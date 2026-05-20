@@ -53,6 +53,12 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/proxy/status", s.handleProxyStatus)
 
+	// API 地图
+	mux.HandleFunc("/api/apimap", s.handleAPIMap)
+	mux.HandleFunc("/api/apimap/notes", s.handleAPINotes)
+	mux.HandleFunc("/api/apimap/notes/", s.handleAPINoteByID)
+	mux.HandleFunc("/api/apimap/hosts", s.handleAPIHosts)
+
 	// WebSocket
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
@@ -232,6 +238,89 @@ func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 		"running": true,
 		"port":    8080,
 	})
+}
+
+// ========================================
+// API Map
+// ========================================
+
+// handleAPIMap GET /api/apimap?host=...
+func (s *Server) handleAPIMap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		return
+	}
+	tree, err := s.store.GetAPIMap(host)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, tree)
+}
+
+// handleAPIHosts GET /api/apimap/hosts
+func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
+	hosts, err := s.store.ListHosts()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if hosts == nil {
+		hosts = []string{}
+	}
+	writeJSON(w, http.StatusOK, hosts)
+}
+
+// handleAPINotes POST /api/apimap/notes (save/update)
+func (s *Server) handleAPINotes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body models.APINoteRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	note := &models.APINote{
+		Host:   body.Host,
+		Path:   body.Path,
+		Method: body.Method,
+		Note:   body.Note,
+	}
+	id, err := s.store.SaveAPINote(note)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	note.ID = id
+	writeJSON(w, http.StatusOK, note)
+}
+
+// handleAPINoteByID DELETE /api/apimap/notes/{id}
+func (s *Server) handleAPINoteByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	idStr := r.URL.Path[len("/api/apimap/notes/"):]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.DeleteAPINote(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // ========================================

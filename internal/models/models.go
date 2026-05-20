@@ -51,3 +51,22 @@ type ResendResponse struct {
 	DurationMs  int64             `json:"duration_ms"`
 	SizeBytes   int64             `json:"size_bytes"`
 }
+
+// APINote API 接口备注
+type APINote struct {
+	ID        int64     `json:"id"`
+	Host      string    `json:"host"`
+	Path      string    `json:"path"`
+	Method    string    `json:"method"`
+	Note      string    `json:"note"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// APINoteRequest 创建/更新备注的请求
+type APINoteRequest struct {
+	Host   string `json:"host"`
+	Path   string `json:"path"`
+	Method string `json:"method"`
+	Note   string `json:"note"`
+}

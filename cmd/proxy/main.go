@@ -26,12 +26,14 @@ func main() {
 	apiPort := flag.Int("api-port", 9090, "API 服务端口")
 	dbPath := flag.String("db", "", "SQLite 数据库路径 (默认 ~/.packetlab/data.db)")
 	noProxy := flag.Bool("no-proxy", false, "仅启动 API，不启动代理")
+	noMitm := flag.Bool("no-mitm", false, "禁用 HTTPS MITM 解密")
 	flag.Parse()
+
+	baseDir := filepath.Join(userHome(), ".packetlab")
 
 	// 数据库路径
 	if *dbPath == "" {
-		home, _ := os.UserHomeDir()
-		*dbPath = filepath.Join(home, ".packetlab", "data.db")
+		*dbPath = filepath.Join(baseDir, "data.db")
 	}
 	if err := os.MkdirAll(filepath.Dir(*dbPath), 0755); err != nil {
 		log.Fatalf("创建数据库目录失败: %v", err)
@@ -56,9 +58,24 @@ func main() {
 		apiSrv.BroadcastCapture(req)
 	}
 
-	// 启动代理（如未禁用）
+	// 加载/生成 CA 证书（HTTPS MITM）
+	var caCert, caKey []byte
+	if !*noMitm {
+		certDir := filepath.Join(baseDir, "certs")
+		caCert, caKey, err = proxy.LoadOrGenerateCA(certDir)
+		if err != nil {
+			log.Printf("[mitm] CA 证书加载失败: %v，HTTPS MITM 已禁用", err)
+		} else {
+			log.Printf("[mitm] HTTPS MITM 已启用")
+			log.Printf("[mitm] 安装 CA 证书以解密 HTTPS 流量: %s/ca.crt", certDir)
+		}
+	} else {
+		log.Println("[mitm] HTTPS MITM 已禁用 (--no-mitm)")
+	}
+
+	// 启动代理
 	if !*noProxy {
-		proxySrv := proxy.New(*proxyPort, st, nil, nil, onCapture)
+		proxySrv := proxy.New(*proxyPort, st, caCert, caKey, onCapture)
 
 		go func() {
 			log.Printf("[proxy] 启动代理: :%d", *proxyPort)
@@ -80,16 +97,21 @@ func main() {
 		os.Exit(0)
 	}()
 
-	// 打印启动信息
+	mitmStatus := "禁用"
+	if caCert != nil {
+		mitmStatus = "已启用"
+	}
+
 	log.Printf(`
-╔════════════════════════════════════════════════╗
-║          PacketLab — 流量捕获工具 v1.0         ║
-╠════════════════════════════════════════════════╣
-║  Web 界面:   http://localhost:%-5d           ║
-║  代理端口:    :%-5d                        ║
-║  配置浏览器代理为 localhost:%d              ║
-╚════════════════════════════════════════════════╝
-`, *apiPort, *proxyPort, *proxyPort)
+╔══════════════════════════════════════════════════════╗
+║            PacketLab — 流量捕获工具 v2.0             ║
+╠══════════════════════════════════════════════════════╣
+║  Web 界面:    http://localhost:%-5d                ║
+║  代理端口:     :%-5d                             ║
+║  HTTPS MITM:  %-38s ║
+║  配置浏览器代理为 localhost:%d                   ║
+╚══════════════════════════════════════════════════════╝
+`, *apiPort, *proxyPort, mitmStatus, *proxyPort)
 
 	apiAddr := fmt.Sprintf(":%d", *apiPort)
 	if err := http.ListenAndServe(apiAddr, apiSrv.Handler()); err != nil {
@@ -97,7 +119,6 @@ func main() {
 	}
 }
 
-// loadFrontend 加载嵌入的前端静态文件
 func loadFrontend() http.Handler {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -105,4 +126,9 @@ func loadFrontend() http.Handler {
 		return http.NotFoundHandler()
 	}
 	return http.FileServer(http.FS(sub))
+}
+
+func userHome() string {
+	home, _ := os.UserHomeDir()
+	return home
 }

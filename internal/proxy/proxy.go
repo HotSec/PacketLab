@@ -20,12 +20,13 @@ type OnCapture func(req *models.CapturedRequest)
 
 // Server 代理服务器
 type Server struct {
-	proxy     *goproxy.ProxyHttpServer
-	store     *store.Store
-	onCapture OnCapture
-	mu        sync.RWMutex
-	running   bool
-	port      int
+	proxy       *goproxy.ProxyHttpServer
+	store       *store.Store
+	batchWriter *BatchWriter
+	onCapture   OnCapture
+	mu          sync.RWMutex
+	running     bool
+	port        int
 	mitmEnabled bool
 }
 
@@ -34,11 +35,14 @@ func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture) *
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
 
+	bw := NewBatchWriter(st, onCapture, 50, 200*time.Millisecond)
+
 	s := &Server{
-		proxy:     proxy,
-		store:     st,
-		onCapture: onCapture,
-		port:      port,
+		proxy:       proxy,
+		store:       st,
+		batchWriter: bw,
+		onCapture:   onCapture,
+		port:        port,
 	}
 
 	// 配置 HTTPS MITM
@@ -70,7 +74,6 @@ func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture) *
 func (s *Server) setupHandlers() {
 	// 请求处理器 — 记录请求信息
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		// 存储请求上下文
 		captured := &models.CapturedRequest{
 			Method:     req.Method,
 			URL:        req.URL.String(),
@@ -82,14 +85,15 @@ func (s *Server) setupHandlers() {
 			CapturedAt: time.Now(),
 		}
 
-		// 读取请求体
+		// 读取请求体（限制 32KB）
 		if req.Body != nil {
-			bodyBytes, err := io.ReadAll(req.Body)
+			limitedReader := io.LimitReader(req.Body, 32*1024)
+			bodyBytes, err := io.ReadAll(limitedReader)
 			if err == nil {
 				captured.ReqBody = string(bodyBytes)
-				// 恢复 body 以便后续处理
-				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
+			// 恢复 body
+			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		}
 
 		ctx.UserData = captured
@@ -112,36 +116,27 @@ func (s *Server) setupHandlers() {
 		captured.ResHeaders = flattenHeaders(resp.Header)
 		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
 
-		// 读取响应体
+		// 读取响应体（限制 64KB）
 		if resp.Body != nil {
-			bodyBytes, err := io.ReadAll(resp.Body)
+			limitedReader := io.LimitReader(resp.Body, 64*1024)
+			bodyBytes, err := io.ReadAll(limitedReader)
 			if err == nil {
-				captured.ResBody = truncateBody(string(bodyBytes), 64*1024)
+				captured.ResBody = string(bodyBytes)
 				captured.SizeBytes = int64(len(bodyBytes))
 				resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			} else {
-				// 读取失败时也需恢复（避免客户端收到损坏响应）
 				resp.Body = io.NopCloser(bytes.NewReader(nil))
 			}
 		}
 
-		// 异步保存
-		go func() {
-			id, err := s.store.Save(captured)
-			if err == nil {
-				captured.ID = id
-			}
-			if s.onCapture != nil {
-				s.onCapture(captured)
-			}
-		}()
+		// 入队批量写入（高流量下不阻塞代理）
+		s.batchWriter.Enqueue(captured)
 
 		return resp
 	})
 
-	// CONNECT 处理器（HTTPS 隧道）
+	// CONNECT 处理器（HTTPS 隧道 — MITM 未启用时记录）
 	s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		// MITM 未启用时，记录 CONNECT 隧道信息
 		if !s.mitmEnabled {
 			captured := &models.CapturedRequest{
 				Method:     "CONNECT",
@@ -153,16 +148,8 @@ func (s *Server) setupHandlers() {
 				ReqHeaders: map[string]string{"Host": host},
 				CapturedAt: time.Now(),
 			}
-
-			go func() {
-				id, _ := s.store.Save(captured)
-				captured.ID = id
-				if s.onCapture != nil {
-					s.onCapture(captured)
-				}
-			}()
+			s.batchWriter.Enqueue(captured)
 		}
-
 		return goproxy.OkConnect, host
 	})
 }
@@ -185,6 +172,11 @@ func (s *Server) Start() error {
 	return server.ListenAndServe()
 }
 
+// Stop 停止代理
+func (s *Server) Stop() {
+	s.batchWriter.Stop()
+}
+
 // IsRunning 是否运行中
 func (s *Server) IsRunning() bool {
 	s.mu.RLock()
@@ -197,7 +189,7 @@ func (s *Server) Port() int {
 	return s.port
 }
 
-// flattenHeaders 将 http.Header 转为 map[string]string（取每个 header 的第一个值）
+// flattenHeaders 将 http.Header 转为 map[string]string（取第一个值）
 func flattenHeaders(h http.Header) map[string]string {
 	result := make(map[string]string)
 	for k, v := range h {
@@ -206,12 +198,4 @@ func flattenHeaders(h http.Header) map[string]string {
 		}
 	}
 	return result
-}
-
-// truncateBody 截断过大的响应体
-func truncateBody(body string, maxSize int) string {
-	if len(body) > maxSize {
-		return body[:maxSize] + fmt.Sprintf("\n\n... [截断: 共 %d bytes]", len(body))
-	}
-	return body
 }
