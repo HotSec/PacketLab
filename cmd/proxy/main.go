@@ -1,0 +1,108 @@
+package main
+
+import (
+	"embed"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"packetlab/internal/api"
+	"packetlab/internal/models"
+	"packetlab/internal/proxy"
+	"packetlab/internal/store"
+)
+
+//go:embed web/*
+var webFS embed.FS
+
+func main() {
+	proxyPort := flag.Int("proxy-port", 8080, "代理监听端口")
+	apiPort := flag.Int("api-port", 9090, "API 服务端口")
+	dbPath := flag.String("db", "", "SQLite 数据库路径 (默认 ~/.packetlab/data.db)")
+	noProxy := flag.Bool("no-proxy", false, "仅启动 API，不启动代理")
+	flag.Parse()
+
+	// 数据库路径
+	if *dbPath == "" {
+		home, _ := os.UserHomeDir()
+		*dbPath = filepath.Join(home, ".packetlab", "data.db")
+	}
+	if err := os.MkdirAll(filepath.Dir(*dbPath), 0755); err != nil {
+		log.Fatalf("创建数据库目录失败: %v", err)
+	}
+
+	// 初始化存储
+	st, err := store.New(*dbPath)
+	if err != nil {
+		log.Fatalf("初始化数据库失败: %v", err)
+	}
+	defer st.Close()
+	log.Printf("[store] 数据库: %s", *dbPath)
+
+	// 加载前端
+	frontendHandler := loadFrontend()
+
+	// 创建 API 服务器
+	apiSrv := api.New(st, frontendHandler)
+
+	// 代理回调：捕获到新请求时通过 API WebSocket 广播
+	onCapture := func(req *models.CapturedRequest) {
+		apiSrv.BroadcastCapture(req)
+	}
+
+	// 启动代理（如未禁用）
+	if !*noProxy {
+		proxySrv := proxy.New(*proxyPort, st, nil, nil, onCapture)
+
+		go func() {
+			log.Printf("[proxy] 启动代理: :%d", *proxyPort)
+			if err := proxySrv.Start(); err != nil {
+				log.Printf("[proxy] 代理启动失败: %v", err)
+			}
+		}()
+	} else {
+		log.Println("[proxy] 代理已禁用 (--no-proxy)")
+	}
+
+	// 优雅关闭
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-sigCh
+		log.Printf("\n[server] 收到信号 %v，正在关闭...", sig)
+		st.Close()
+		os.Exit(0)
+	}()
+
+	// 打印启动信息
+	log.Printf(`
+╔════════════════════════════════════════════════╗
+║          PacketLab — 流量捕获工具 v1.0         ║
+╠════════════════════════════════════════════════╣
+║  Web 界面:   http://localhost:%-5d           ║
+║  代理端口:    :%-5d                        ║
+║  配置浏览器代理为 localhost:%d              ║
+╚════════════════════════════════════════════════╝
+`, *apiPort, *proxyPort, *proxyPort)
+
+	apiAddr := fmt.Sprintf(":%d", *apiPort)
+	if err := http.ListenAndServe(apiAddr, apiSrv.Handler()); err != nil {
+		log.Fatalf("[api] 启动失败: %v", err)
+	}
+}
+
+// loadFrontend 加载嵌入的前端静态文件
+func loadFrontend() http.Handler {
+	sub, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Printf("[web] 嵌入前端加载失败: %v", err)
+		return http.NotFoundHandler()
+	}
+	return http.FileServer(http.FS(sub))
+}
