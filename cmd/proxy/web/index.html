@@ -469,8 +469,6 @@ function editAPINoteLeaf(path,method,note,noteId){noteEditHost=document.getEleme
 function closeNoteModal(){document.getElementById('noteModal').classList.add('hidden')}
 async function saveNoteModal(){const note=document.getElementById('noteModalInput').value;closeNoteModal();try{await apiPost('/api/apimap/notes',{host:noteEditHost,path:noteEditPath,method:noteEditMethod,note:note});loadAPIMap();showToast('success','Note saved')}catch(e){showToast('error','Failed')}}
 async function deleteAPINote(){if(!noteEditId)return;if(!confirm('删除该备注？'))return;closeNoteModal();try{await apiDelete('/api/apimap/notes/'+noteEditId);loadAPIMap();showToast('success','Note deleted')}catch(e){showToast('error','Failed')}}
-document.getElementById('noteModal').addEventListener('click',function(e){if(e.target===this)closeNoteModal()});
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeNoteModal()})
 
 // =============================================
 // Controls
@@ -498,10 +496,13 @@ function showToast(type,msg){const c=document.getElementById('toastContainer');c
 // =============================================
 // Init
 // =============================================
-(async function init(){applyLang();await loadRequests();connectWebSocket();setTimeout(()=>{if(requests.length>0&&!selectedRequestId)selectRequest(requests[0].id);const at=document.querySelector('.detail-tab.active');if(at){const ind=document.getElementById('tabIndicator');ind.style.left=at.offsetLeft+'px';ind.style.width=at.offsetWidth+'px'}},400)})()
-
-// Search: middle-click to clear
+(async function init(){applyLang();await loadRequests();connectWebSocket();
+// Bind modal events (DOM must be ready)
+document.getElementById('noteModal').addEventListener('click',function(e){if(e.target===this)closeNoteModal()});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeNoteModal()});
 document.getElementById('searchInput').addEventListener('mousedown',function(e){if(e.button===1){e.preventDefault();this.value='';currentHost='';loadRequests()}});
+setTimeout(()=>{if(requests.length>0&&!selectedRequestId)selectRequest(requests[0].id);const at=document.querySelector('.detail-tab.active');if(at){const ind=document.getElementById('tabIndicator');ind.style.left=at.offsetLeft+'px';ind.style.width=at.offsetWidth+'px'}},400)})()
+
 // Keyboard
 document.addEventListener('keydown',(e)=>{if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();document.getElementById('searchInput').focus()}if((e.metaKey||e.ctrlKey)&&e.key==='f'&&document.activeElement!==document.getElementById('searchInput')){e.preventDefault();document.getElementById('searchInput').focus()}if((e.metaKey||e.ctrlKey)&&e.key==='Enter'&&activeTab==='resend'){e.preventDefault();sendResend()}if((e.metaKey||e.ctrlKey)&&e.key==='1'){e.preventDefault();switchTab('request')}if((e.metaKey||e.ctrlKey)&&e.key==='2'){e.preventDefault();switchTab('response')}if((e.metaKey||e.ctrlKey)&&e.key==='3'){e.preventDefault();switchTab('resend')}if((e.metaKey||e.ctrlKey)&&e.key==='4'){e.preventDefault();switchTab('apimap')}})
 </script>
