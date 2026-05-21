@@ -517,6 +517,11 @@ function renderAPIMapTree(node) {
     container.innerHTML = '<div style="padding:20px;color:var(--text-tertiary);font-size:12px;text-align:center">No endpoints captured</div>';
     return;
   }
+  // 根节点本身是叶子（无子节点），直接渲染
+  if (node.isLeaf) {
+    container.innerHTML = renderLeaf(node, 0);
+    return;
+  }
   container.innerHTML = renderTreeNode(node, 0);
 }
 
