@@ -86,15 +86,17 @@ func (s *Server) setupHandlers() {
 			CapturedAt: time.Now(),
 		}
 
-		// 读取请求体（限制 32KB）
+		// 读取请求体（完整转发，捕获最多 32KB）
 		if req.Body != nil {
-			limitedReader := io.LimitReader(req.Body, 32*1024)
-			bodyBytes, err := io.ReadAll(limitedReader)
-			if err == nil {
-				captured.ReqBody = string(bodyBytes)
+			bodyBytes, err := io.ReadAll(req.Body)
+			if err == nil && len(bodyBytes) > 0 {
+				if len(bodyBytes) > 32*1024 {
+					captured.ReqBody = string(bodyBytes[:32*1024])
+				} else {
+					captured.ReqBody = string(bodyBytes)
+				}
+				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
-			// 恢复 body
-			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		}
 
 		ctx.UserData = captured
@@ -117,16 +119,17 @@ func (s *Server) setupHandlers() {
 		captured.ResHeaders = flattenHeaders(resp.Header)
 		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
 
-		// 读取响应体（限制 64KB）
+		// 读取响应体（完整转发，捕获最多 64KB）
 		if resp.Body != nil {
-			limitedReader := io.LimitReader(resp.Body, 64*1024)
-			bodyBytes, err := io.ReadAll(limitedReader)
-			if err == nil {
-				captured.ResBody = string(bodyBytes)
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err == nil && len(bodyBytes) > 0 {
 				captured.SizeBytes = int64(len(bodyBytes))
+				if len(bodyBytes) > 64*1024 {
+					captured.ResBody = string(bodyBytes[:64*1024])
+				} else {
+					captured.ResBody = string(bodyBytes)
+				}
 				resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			} else {
-				resp.Body = io.NopCloser(bytes.NewReader(nil))
 			}
 		}
 
