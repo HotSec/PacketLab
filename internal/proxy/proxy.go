@@ -138,7 +138,6 @@ func (s *Server) setupHandlers() {
 	// CONNECT 处理器
 	s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 		// 始终记录 CONNECT 隧道信息
-		// MITM 成功时 OnRequest 会另外产生解密后的 HTTP 记录
 		captured := &models.CapturedRequest{
 			Method:     "CONNECT",
 			URL:        "https://" + host,
@@ -150,6 +149,11 @@ func (s *Server) setupHandlers() {
 			CapturedAt: time.Now(),
 		}
 		s.batchWriter.Enqueue(captured)
+
+		// 跳过非 HTTP 协议的 MITM（WNS、WebSocket、自定义 TCP 等）
+		if !shouldMITM(host) {
+			return &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: nil}, host
+		}
 
 		return goproxy.OkConnect, host
 	})
@@ -199,4 +203,22 @@ func flattenHeaders(h http.Header) map[string]string {
 		}
 	}
 	return result
+}
+
+// shouldMITM 判断某 host 是否适合 MITM 解密
+// 跳过已知的非 HTTP 协议主机（WNS、WebSocket-only、自定义 TCP 等）
+func shouldMITM(host string) bool {
+	// 已知使用非 HTTP 协议的主机后缀
+	skipSuffixes := []string{
+		".wns.windows.com",    // Windows Push Notification Service
+		".notify.windows.com", // Windows Notification
+		".push.apple.com",     // Apple Push Notification
+		".talk.google.com",    // Google Hangouts
+	}
+	for _, s := range skipSuffixes {
+		if len(host) >= len(s) && host[len(host)-len(s):] == s {
+			return false
+		}
+	}
+	return true
 }

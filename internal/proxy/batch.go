@@ -81,7 +81,9 @@ func (bw *BatchWriter) loop() {
 					bw.onSave(req)
 				}
 			}
-			log.Printf("[batch] 批量写入 %d 条", len(ids))
+			if len(ids) > 1 {
+				log.Printf("[batch] 批量写入 %d 条", len(ids))
+			}
 		}
 		batch = batch[:0]
 	}
