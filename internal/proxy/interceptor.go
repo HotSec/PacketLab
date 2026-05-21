@@ -137,6 +137,7 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 		id:        id,
 		result:    ch,
 		createdAt: time.Now(),
+		timer:     time.NewTimer(it.timeout),
 	}
 	it.mu.Unlock()
 
@@ -155,10 +156,10 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	}
 
 	// 阻塞等待用户决定或超时
-	timer := time.NewTimer(it.timeout)
+	pr := it.pending[id]
 	select {
 	case r := <-ch:
-		timer.Stop()
+		pr.timer.Stop()
 		switch r.Action {
 		case "allow":
 			storeFunc(req)
@@ -181,7 +182,7 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 		default:
 			return req, nil
 		}
-	case <-timer.C:
+	case <-pr.timer.C:
 		// 超时自动放过
 		it.mu.Lock()
 		delete(it.pending, id)
