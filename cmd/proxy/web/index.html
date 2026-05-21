@@ -405,7 +405,7 @@ function showToast(type,msg){const c=document.getElementById('toastContainer');c
 // =============================================
 // Resize
 // =============================================
-(function(){const h=document.getElementById('resizeHandle'),p=document.getElementById('requestPanel');let sx,sw;h.addEventListener('mousedown',(ev)=>{sx=ev.clientX;sw=p.offsetWidth;h.classList.add('dragging');document.body.style.cursor='col-resize';document.body.style.userSelect='none';const onM=(e)=>{const d=e.clientX-sx;const nw=Math.max(220,Math.min(600,sw+d));p.style.width=nw+'px'};const onU=()=>{h.classList.remove('dragging');document.body.style.cursor='';document.body.style.userSelect='';document.removeEventListener('mousemove',onM);document.removeEventListener('mouseup',onU)};document.addEventListener('mousemove',onM);document.addEventListener('mouseup',onU)})})()
+(function(){const h=document.getElementById('resizeHandle'),p=document.getElementById('requestPanel');let sx,sw;h.addEventListener('mousedown',(ev)=>{sx=ev.clientX;sw=p.offsetWidth;h.classList.add('dragging');document.body.style.cursor='col-resize';document.body.style.userSelect='none';const onM=(e)=>{const d=e.clientX-sx;const nw=Math.max(220,Math.min(600,sw+d));p.style.width=nw+'px'};const onU=()=>{h.classList.remove('dragging');document.body.style.cursor='';document.body.style.userSelect='';document.removeEventListener('mousemove',onM);document.removeEventListener('mouseup',onU)};document.addEventListener('mousemove',onM);document.addEventListener('mouseup',onU)})})();
 
 // =============================================
 // Init
