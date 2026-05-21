@@ -88,6 +88,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .request-arrow{flex-shrink:0;color:var(--text-tertiary);opacity:0;transition:all .15s}
 .request-item:hover .request-arrow,.request-item.active .request-arrow{opacity:1}
 .resize-handle{width:4px;cursor:col-resize;background:transparent;flex-shrink:0;transition:background .15s;position:relative;z-index:5}
+.resize-handle::after{content:'';position:absolute;inset:0 -4px}
 .resize-handle:hover,.resize-handle.dragging{background:var(--accent)}
 .detail-panel{flex:1;display:flex;flex-direction:column;background:var(--bg-root);overflow:hidden;min-width:0}
 .detail-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--text-tertiary)}
@@ -418,8 +419,7 @@ document.getElementById('res-body-content').textContent=r.resBody||t('empty');
 document.getElementById('resendMethod').value=r.method||'GET';document.getElementById('resendUrl').value=r.url||'';document.getElementById('resendBody').value=r.reqBody||'';
 const hc=document.getElementById('resendHeaders');hc.innerHTML='';
 if(rh&&Object.keys(rh).length>0){Object.entries(rh).forEach(([k,v])=>addHeaderRow(k,v))}else{addHeaderRow('Host',r.host||'')}
-switchTab('request');renderRequestList();
-// 同步 API 地图到请求的 host
+renderRequestList();
 if(r.host)syncAPIMapHost(r.host)}
 function syncAPIMapHost(host){const sel=document.getElementById('apimapHostSelect');for(let i=0;i<sel.options.length;i++){if(sel.options[i].value===host){sel.value=host;if(document.getElementById('tab-apimap').classList.contains('active'))loadAPIMap();return}}}
 
