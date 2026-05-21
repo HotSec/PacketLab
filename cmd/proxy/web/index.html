@@ -134,28 +134,44 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 .spin{animation:spin .8s linear infinite}
 /* API Map */
-.api-map-host-select{margin-bottom:12px;display:flex;gap:6px;align-items:center}
+.api-map-host-select{margin-bottom:10px;display:flex;gap:6px;align-items:center}
 .api-map-host-select select{flex:1;padding:6px 10px;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-input);color:var(--text-primary);font-size:12px;outline:none;font-family:var(--font-mono)}
-.api-map-tree{padding:0}
-.tree-node{padding-left:0;user-select:none}
-.tree-node-header{display:flex;align-items:center;gap:4px;padding:5px 6px;border-radius:var(--radius-sm);cursor:pointer;transition:background .15s;font-size:12px}
+.method-legend{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:6px 10px;background:var(--bg-surface);border-radius:var(--radius-sm);border:1px solid var(--border-subtle)}
+.method-legend-item{display:flex;align-items:center;gap:3px;font-size:10px;font-weight:600;font-family:var(--font-mono);opacity:.85}
+.method-legend-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+.api-map-tree{padding:0;max-height:calc(100vh - 340px);overflow-y:auto}
+.api-map-tree::-webkit-scrollbar{width:5px}
+.api-map-tree::-webkit-scrollbar-thumb{background:var(--border-default);border-radius:10px}
+.tree-node{padding-left:0;user-select:none;margin-bottom:1px}
+.tree-node-header{display:flex;align-items:center;gap:4px;padding:6px 8px;border-radius:var(--radius-sm);cursor:pointer;transition:background .15s;font-size:12px;border-left:3px solid transparent}
 .tree-node-header:hover{background:var(--bg-hover)}
+.tree-node-header.border-GET{border-left-color:var(--green)}
+.tree-node-header.border-POST{border-left-color:var(--blue)}
+.tree-node-header.border-PUT{border-left-color:var(--yellow)}
+.tree-node-header.border-PATCH{border-left-color:var(--purple)}
+.tree-node-header.border-DELETE{border-left-color:var(--red)}
 .tree-node-toggle{width:16px;height:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--text-tertiary);transition:transform .15s}
 .tree-node-toggle.open{transform:rotate(90deg)}
-.tree-node-icon{flex-shrink:0;color:var(--text-tertiary)}
-.tree-node-name{font-family:var(--font-mono);color:var(--text-primary);font-weight:550}
-.tree-node-count{font-size:10px;color:var(--text-tertiary);margin-left:4px}
-.tree-node-children{padding-left:20px;overflow:hidden;transition:max-height .2s}
-.tree-node-methods{display:flex;flex-wrap:wrap;gap:3px;margin-left:auto}
-.tree-method-tag{padding:1px 5px;border-radius:3px;font-size:9px;font-weight:700;font-family:var(--font-mono)}
-.tree-leaf{padding-left:20px}
-.tree-leaf-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px;transition:background .15s}
+.tree-node-icon{flex-shrink:0}
+.tree-node-name{font-family:var(--font-mono);color:var(--text-primary);font-weight:550;font-size:12px}
+.tree-node-count{font-size:10px;color:var(--text-tertiary);margin-left:3px}
+.tree-node-children{padding-left:22px;overflow:hidden;transition:max-height .2s}
+.tree-node-methods{display:flex;flex-wrap:wrap;gap:2px;margin-left:auto;flex-shrink:0}
+.tree-method-tag{padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700;font-family:var(--font-mono);line-height:1.6}
+/* Leaf rows — one per method, colored left border */
+.tree-leaf{padding-left:0}
+.tree-leaf-row{display:flex;align-items:center;gap:0;padding:6px 8px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px;transition:background .15s;border-left:3px solid transparent;margin-left:20px}
 .tree-leaf-row:hover{background:var(--bg-hover)}
-.tree-leaf-method{font-family:var(--font-mono);font-weight:600;flex-shrink:0;min-width:50px;font-size:10px}
-.tree-leaf-path{font-family:var(--font-mono);color:var(--text-primary)}
-.tree-leaf-status{font-size:9px;margin-left:auto;display:flex;gap:3px}
-.tree-leaf-status span{padding:0 3px;border-radius:3px}
-.tree-leaf-note{font-size:10px;color:var(--accent);margin-left:6px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.tree-leaf-row.GET{border-left-color:var(--green)}.tree-leaf-row.POST{border-left-color:var(--blue)}
+.tree-leaf-row.PUT{border-left-color:var(--yellow)}.tree-leaf-row.PATCH{border-left-color:var(--purple)}
+.tree-leaf-row.DELETE{border-left-color:var(--red)}.tree-leaf-row.HEAD,.tree-leaf-row.OPTIONS{border-left-color:var(--text-tertiary)}
+.tree-leaf-method{font-family:var(--font-mono);font-weight:700;flex-shrink:0;min-width:52px;font-size:10px;text-align:center}
+.tree-leaf-path{font-family:var(--font-mono);color:var(--text-primary);margin-left:8px;font-size:11px;word-break:break-all}
+.tree-leaf-status{font-size:9px;margin-left:auto;display:flex;gap:2px;flex-shrink:0}
+.tree-leaf-status span{padding:1px 4px;border-radius:3px;line-height:1.5}
+.tree-leaf-status .s2{background:var(--green-muted);color:var(--green)}.tree-leaf-status .s3{background:var(--blue-muted);color:var(--blue)}
+.tree-leaf-status .s4{background:var(--yellow-muted);color:var(--yellow)}.tree-leaf-status .s5{background:var(--red-muted);color:var(--red)}
+.tree-leaf-note{font-size:10px;color:var(--accent);margin-left:6px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;flex-shrink:0}
 .note-editor{display:flex;gap:4px;margin-top:4px;padding-left:24px}
 .note-editor input{flex:1;padding:4px 8px;border-radius:var(--radius-sm);border:1px solid var(--border-subtle);background:var(--bg-input);color:var(--text-primary);font-size:11px;outline:none}
 .note-editor input:focus{border-color:var(--accent)}
@@ -268,6 +284,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <div class="api-map-host-select">
 <select id="apimapHostSelect" onchange="loadAPIMap()"><option value="" data-i18n="select_host">选择站点...</option></select>
 <button class="mini-btn primary" onclick="loadAPIMap()" data-i18n="refresh">刷新</button></div>
+<div class="method-legend"><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--green)"></span>GET</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--blue)"></span>POST</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--yellow)"></span>PUT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--purple)"></span>PATCH</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--red)"></span>DELETE</span></div>
 <div class="api-map-tree" id="apimapTree"></div></div>
 </div>
 </div></div></section></div>
@@ -376,13 +393,10 @@ try{const result=await apiPost('/api/resend',{method,url,headers,body});requestD
 // =============================================
 async function loadAPIMapHosts(){try{const hosts=await apiGet('/api/apimap/hosts');const sel=document.getElementById('apimapHostSelect');sel.innerHTML=`<option value="">${t('select_host')}</option>`+hosts.map(h=>`<option value="${e(h)}">${e(h)}</option>`).join('');if(hosts.length>0){sel.value=hosts[0];loadAPIMap()}}catch(e){}}
 async function loadAPIMap(){const host=document.getElementById('apimapHostSelect').value;if(!host)return;try{const tree=await apiGet('/api/apimap?host='+encodeURIComponent(host));renderAPIMapTree(tree)}catch(e){}}
-function renderAPIMapTree(node){const container=document.getElementById('apimapTree');container.innerHTML=node?renderTreeNode(node,0):'<div style="padding:16px;color:var(--text-tertiary);font-size:12px">No data</div>'}
-function renderTreeNode(node,depth){if(!node.children||node.children.length===0&&!node.isLeaf){return`<div class="tree-node"><div class="tree-node-header" style="padding-left:${depth*20}px"><span class="tree-node-name">${e(node.name)}</span><span class="tree-node-count">0</span></div></div>`}
-let html='';node.children.forEach(child=>{if(child.isLeaf){html+=renderLeaf(child,depth+1)}else{const hasChildren=child.children&&child.children.length>0;html+=`<div class="tree-node"><div class="tree-node-header" style="padding-left:${depth*20}px" onclick="toggleTreeNode(this)"><span class="tree-node-toggle ${hasChildren?'open':''}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--yellow)"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="tree-node-name">${e(child.Name)}</span><span class="tree-node-count">${child.Count||0}</span><div class="tree-node-methods">${(child.Methods||[]).map(m=>`<span class="tree-method-tag method-${m}">${m}</span>`).join('')}</div></div><div class="tree-node-children">${child.children?renderTreeNode(child,depth+1):''}</div></div>`}});return html}
-function renderLeaf(node,depth){const statuses=node.Statuses||{};const statusHtml=Object.entries(statuses).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([s,c])=>{const cls=`status-${Math.floor(parseInt(s)/100)}xx`;return`<span class="${cls}">${s}(${c})</span>`}).join('');
-return`<div class="tree-node"><div class="tree-leaf-row" style="padding-left:${depth*20}px" onclick="editAPINote('${e(node.FullPath)}','${(node.Methods||['GET'])[0]}','${e(node.Note||'')}',${node.NoteID||0})"><span class="tree-leaf-method method-${(node.Methods||['GET'])[0]}">${(node.Methods||['GET'])[0]}</span><span class="tree-leaf-path">${e(node.FullPath)}</span><span class="tree-leaf-status">${statusHtml}</span>${node.Note?`<span class="tree-leaf-note" title="${e(node.Note)}">${e(node.Note)}</span>`:''}</div></div>`}
-function toggleTreeNode(el){el.querySelector('.tree-node-toggle').classList.toggle('open');const children=el.nextElementSibling;if(children){children.style.maxHeight=children.style.maxHeight==='0px'||!children.style.maxHeight?children.scrollHeight+'px':'0px'}}
-async function editAPINote(path,method,note,noteId){const host=document.getElementById('apimapHostSelect').value;const newNote=prompt(`备注: ${path} [${method}]`,note);if(newNote===null)return;try{await apiPost('/api/apimap/notes',{host,path,method,note:newNote});loadAPIMap();showToast('success','Note saved')}catch(e){showToast('error','Failed to save note')}}
+function renderAPIMapTree(node){const container=document.getElementById('apimapTree');if(!node||(!node.children||node.children.length===0)&&!node.isLeaf){container.innerHTML='<div style="padding:20px;color:var(--text-tertiary);font-size:12px;text-align:center">No endpoints captured</div>';return}container.innerHTML=renderTreeNode(node,0)}
+function renderTreeNode(node,depth){let html='';(node.children||[]).forEach(child=>{if(child.is_leaf){html+=renderLeaf(child,depth+1)}else{const hasChildren=child.children&&child.children.length>0;const allMethods=[...new Set((child.methods||[]))];const dominantMethod=allMethods[0]||'';const borderClass=dominantMethod?`border-${dominantMethod}`:'';html+=`<div class="tree-node"><div class="tree-node-header ${borderClass}" style="padding-left:${depth*20+4}px" onclick="toggleTreeNode(this)"><span class="tree-node-toggle ${hasChildren?'open':''}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--yellow)"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="tree-node-name">${e(child.name)}</span><span class="tree-node-count">(${child.count||0})</span><div class="tree-node-methods">${allMethods.map(m=>`<span class="tree-method-tag method-${m}">${m}</span>`).join('')}</div></div><div class="tree-node-children">${hasChildren?renderTreeNode(child,depth+1):''}</div></div>`}});return html}
+function renderLeaf(node,depth){const methods=node.methods||[];const statuses=node.statuses||{};let html='';methods.forEach(method=>{const statusHtml=Object.entries(statuses).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,c])=>{const cls='s'+Math.floor(parseInt(s)/100);return`<span class="${cls}">${s}</span>`}).join('');const hasNote=node.note&&node.note_id;html+=`<div class="tree-leaf-row ${method}" onclick="editAPINoteLeaf('${e(node.full_path)}','${method}','${e(node.note||'')}',${node.note_id||0})"><span class="tree-leaf-method method-${method}">${method}</span><span class="tree-leaf-path">${e(node.full_path)}</span><span class="tree-leaf-status">${statusHtml}</span>${hasNote?`<span class="tree-leaf-note">${e((node.note||'').substring(0,24))}</span>`:''}</div>`});return html}
+function editAPINoteLeaf(path,method,note,noteId){const host=document.getElementById('apimapHostSelect').value;const newNote=prompt(`${path}\n[${method}]`,note);if(newNote===null)return;apiPost('/api/apimap/notes',{host,path,method,note:newNote}).then(()=>{loadAPIMap();showToast('success','Note saved')}).catch(()=>showToast('error','Failed'))}
 
 // =============================================
 // Controls
