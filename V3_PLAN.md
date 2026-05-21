@@ -88,42 +88,75 @@ Interface    string       `json:"interface,omitempty"`
 
 ---
 
-## 功能 2：代理拦截模式（自动/手动）
 
-### 架构决策（已修复）
+## 功能 2：代理拦截模式（自动放过 / 手动审批<放过|丢弃|修改后放过>）
+
+### 架构决策
 
 | 决策项 | 选择 | 理由 |
 |--------|------|------|
-| 拦截实现 | **channel 阻塞等待** | ~~goproxy 不支持暂停~~ Handler 内用 channel 阻塞，API 写入 channel 唤醒 |
-| 状态机 | Pending → Allowed/Blocked/Timeout | 三终态 |
-| 超时策略 | **15s 后自动放过**（可配） | ~~30s 太长~~ 浏览器默认 30s，留余量 |
+| 拦截实现 | **channel 阻塞等待**，携带 Action 决定 | Handler 内用 `select` 阻塞，API 写入 channel 唤醒 |
+| 手动操作 | **Allow / Drop / Modify&Allow** | 放过 / 丢弃 / 修改后放过 |
+| 状态机 | Pending → Allowed / Dropped / Modified / Timeout | 四终态 |
+| 超时策略 | **15s 后自动放过**（可配） | 浏览器 30s 留余量 |
 | 持久化 | 规则存 SQLite `intercept_rules` 表 | 重启不丢失 |
-| 模式持久化 | SQLite `settings` 表 `key='intercept_mode'` | 重启记忆 |
-| 前端通知 | WebSocket `intercept_request` 消息 | 复用现有 WS 通道 |
+| 模式持久化 | SQLite `settings` 表 | 重启记忆 |
 
-### 拦截实现（已修复）
+### 新增模块
+
+```
+internal/proxy/
+  interceptor.go  # Interceptor — 拦截控制器
+  rules.go        # RuleEngine — 规则匹配
+```
+
+### 拦截核心实现
 
 ```go
-// 每个待审请求一个 channel
+// 三种操作结果
+type InterceptResult struct {
+    Action      string            // "allow" | "drop" | "modify"
+    Method      string            // modify 时的新方法
+    URL         string            // modify 时的新 URL
+    NewHeaders  map[string]string // modify 时的新请求头
+    NewBody     string            // modify 时的新请求体
+}
+
 type pendingReq struct {
-    req     *http.Request
-    result  chan bool  // true=allow, false=block
-    timer   *time.Timer
+    req    *http.Request
+    result chan InterceptResult
+    timer  *time.Timer
 }
 
 // OnRequest handler 中
 if mode == "manual" {
-    ch := make(chan bool, 1)
-    interceptor.enqueue(req, ch)   // 推入队列 + WS 通知
+    ch := make(chan InterceptResult, 1)
+    interceptor.enqueue(req, ch)
     select {
-    case allow := <-ch:            // 等待用户决定
-        if allow { /* 转发 */ }
-        else { return nil, goproxy.NewResponse(r, "text/plain", 403, "Blocked") }
+    case r := <-ch:
+        switch r.Action {
+        case "allow":
+            // 转发原始请求
+        case "drop":
+            return nil, goproxy.NewResponse(req, "text/plain", 403, "Blocked by PacketLab")
+        case "modify":
+            newReq, _ := http.NewRequest(r.Method, r.URL, strings.NewReader(r.NewBody))
+            for k, v := range r.NewHeaders { newReq.Header.Set(k, v) }
+            return newReq, nil
+        }
     case <-time.After(15*time.Second):
         // 超时自动放过
     }
 }
 ```
+
+### 手动操作三种方式
+
+| 操作 | 前端按钮 | 后端行为 |
+|------|---------|---------|
+| **放过 (Allow)** | 绿色「放行」 | 原始请求直接转发到目标服务器 |
+| **丢弃 (Drop)** | 红色「丢弃」 | 返回 403，不发送到服务器 |
+| **修改后放过 (Modify)** | 蓝色「修改并发送」 | 弹出编辑面板 → 修改后构造新请求转发 |
 
 ### 拦截流程
 
@@ -141,20 +174,90 @@ if mode == "manual" {
                                           │
                                      WS notify 前端
                                           │
-                                    user click Allow/Block
-                                          │
-                                     ch <- true/false
-                                          │
-                                     转发 / 403
+                               ┌──────────┼──────────┐
+                               │          │          │
+                            Allow       Drop     Modify
+                               │          │          │
+                            转发请求  返回 403  弹出编辑器
+                                                   │
+                                              修改 Method/URL
+                                              修改 Headers/Body
+                                                   │
+                                               转发新请求
 ```
+
+### 数据模型
+
+```go
+// InterceptResult — 用户操作
+type InterceptResult struct {
+    RequestID  string            `json:"request_id"`
+    Action     string            `json:"action"`    // "allow" | "drop" | "modify"
+    Method     string            `json:"method,omitempty"`
+    URL        string            `json:"url,omitempty"`
+    NewHeaders map[string]string `json:"new_headers,omitempty"`
+    NewBody    string            `json:"new_body,omitempty"`
+}
+
+// PendingRequest — 待审请求（内存）
+type PendingRequest struct {
+    ID        string            `json:"id"`
+    Method    string            `json:"method"`
+    URL       string            `json:"url"`
+    Host      string            `json:"host"`
+    Path      string            `json:"path"`
+    Headers   map[string]string `json:"headers"`
+    Body      string            `json:"body"`
+    Timestamp time.Time         `json:"timestamp"`
+    Age       float64           `json:"age_sec"`
+}
+
+// InterceptRule — 持久化规则
+type InterceptRule struct {
+    ID        int64     `json:"id"`
+    Pattern   string    `json:"pattern"` // "example.com" | "*.example.com/api/*"
+    Action    string    `json:"action"`  // "allow" | "block"
+    Enabled   bool      `json:"enabled"`
+    CreatedAt time.Time `json:"created_at"`
+}
+```
+
+### 新增 API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/intercept/mode` | `{"mode":"auto"}` |
+| `POST` | `/api/intercept/mode` | 切换 `{"mode":"manual"}` |
+| `GET` | `/api/intercept/pending` | `[{id,method,url,host,path,headers,body,age_sec}]` |
+| `POST` | `/api/intercept/action` | `{"request_id":"x","action":"allow\|drop\|modify","method":"...","url":"...","new_headers":{},"new_body":"..."}` |
+| `GET` | `/api/intercept/rules` | 规则列表 |
+| `POST` | `/api/intercept/rules` | 添加 `{"pattern":"...","action":"allow\|block"}` |
+| `PUT` | `/api/intercept/rules/:id` | 更新 `{"enabled":false}` |
+| `DELETE` | `/api/intercept/rules/:id` | 删除 |
+
+### WebSocket 消息
+
+```json
+{"type":"intercept_request","data":{"id":"req_abc","method":"POST","url":"https://api.example.com/v1/orders","host":"api.example.com","path":"/v1/orders","headers":{"Content-Type":"application/json"},"body":"{\"qty\":1}"}}
+{"type":"intercept_resolved","data":{"request_id":"req_abc","action":"modify"}}
+{"type":"intercept_timeout","data":{"request_id":"req_abc"}}
+```
+
+### 前端扩展
+
+1. 顶部工具栏「模式切换」：自动 ↔ 手动
+2. 手动模式下右侧面板顶部出现「待审队列」区域
+3. 待审项显示 Method 徽章 + URL + Host + 倒计时进度条
+4. 三个按钮：**允许**（绿）/ **丢弃**（红）/ **修改并发送**（蓝）
+5. 点击「修改并发送」→ 展开编辑面板（Method/URL/Headers/Body 可编辑）
+6. 15s 超时自动放过并移除
 
 ### 数据库迁移
 
 ```sql
--- store.go migrate() 新增
 CREATE TABLE IF NOT EXISTS intercept_rules (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern TEXT NOT NULL,    -- host 或 host/path 模式
+    pattern TEXT NOT NULL,
     action  TEXT NOT NULL DEFAULT 'allow',  -- allow | block
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -168,67 +271,7 @@ CREATE TABLE IF NOT EXISTS settings (
 INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto');
 ```
 
-### 数据模型（已修复）
-
-```go
-// InterceptRule — 持久化到 SQLite
-type InterceptRule struct {
-    ID        int64     `json:"id"`
-    Pattern   string    `json:"pattern"` // "example.com" | "*.example.com/api/*"
-    Action    string    `json:"action"`  // "allow" | "block"
-    Enabled   bool      `json:"enabled"`
-    CreatedAt time.Time `json:"created_at"`
-}
-
-// PendingRequest — 内存中，不持久化
-type PendingRequest struct {
-    ID        string            `json:"id"`
-    Method    string            `json:"method"`
-    URL       string            `json:"url"`
-    Host      string            `json:"host"`
-    Headers   map[string]string `json:"headers"`
-    Timestamp time.Time         `json:"timestamp"`
-    Age       float64           `json:"age_sec"` // 已等待秒数
-}
-```
-
-### 规则匹配逻辑
-
-```
-输入: host="api.example.com", path="/v1/users", method="GET"
-
-规则匹配优先级:
-1. 精确 host 匹配: "api.example.com"
-2. 通配 host 匹配: "*.example.com" (后缀匹配)
-3. host+path 前缀: "api.example.com/v1/*" (前缀匹配)
-
-匹配到的第一条规则决定 action。
-无匹配 → 默认放行 (allow)。
-```
-
-### 新增 API 端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/intercept/mode` | 当前模式 `{"mode":"auto"}` |
-| `POST` | `/api/intercept/mode` | 切换 `{"mode":"manual"}` → 持久化 |
-| `GET` | `/api/intercept/pending` | 待审列表 `[{id,method,url,host,age_sec}]` |
-| `POST` | `/api/intercept/action` | `{"request_id":"x","action":"allow\|block"}` |
-| `GET` | `/api/intercept/rules` | 规则列表 |
-| `POST` | `/api/intercept/rules` | 添加 `{"pattern":"...","action":"allow\|block"}` |
-| `PUT` | `/api/intercept/rules/:id` | 更新 `{"enabled":false}` |
-| `DELETE` | `/api/intercept/rules/:id` | 删除规则 |
-
-### WebSocket 消息
-
-```json
-{"type":"intercept_request","data":{"id":"req_abc","method":"GET","url":"https://api.example.com/v1/users","host":"api.example.com","age_sec":0.5}}
-{"type":"intercept_timeout","data":{"request_id":"req_abc"}}
-{"type":"intercept_resolved","data":{"request_id":"req_abc","action":"allow"}}
-```
-
 ---
-
 ## V3 项目结构总览
 
 ```
