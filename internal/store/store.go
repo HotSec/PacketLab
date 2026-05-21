@@ -457,7 +457,40 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 		insertPath(root, parts, path, methods, notesMap)
 	}
 
+	// 后序遍历 — 中间节点聚合子节点的 method/count/status 统计
+	aggregateNodeStats(root)
+
 	return root, nil
+}
+
+// aggregateNodeStats 后序遍历聚合统计信息到中间节点
+func aggregateNodeStats(node *APIMapNode) {
+	if node == nil {
+		return
+	}
+	for _, child := range node.Children {
+		aggregateNodeStats(child)
+	}
+
+	// 聚合子节点数据到当前节点
+	methodSet := make(map[string]bool)
+	for _, child := range node.Children {
+		for _, m := range child.Methods {
+			if !methodSet[m] {
+				methodSet[m] = true
+				node.Methods = append(node.Methods, m)
+			}
+		}
+		node.Count += child.Count
+		if len(child.Statuses) > 0 {
+			if node.Statuses == nil {
+				node.Statuses = make(map[int]int)
+			}
+			for s, c := range child.Statuses {
+				node.Statuses[s] += c
+			}
+		}
+	}
 }
 
 // ListHosts 获取捕获过的 host 列表（支持搜索 + 分页）
@@ -560,6 +593,10 @@ func insertPath(node *APIMapNode, parts []string, fullPath string, methods map[s
 			}
 		}
 	} else {
+		// 中间节点 — 之前若是叶子节点则重置
+		if child.IsLeaf {
+			child.IsLeaf = false
+		}
 		insertPath(child, remaining, fullPath, methods, notesMap)
 	}
 }
