@@ -130,18 +130,20 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	// manual 模式：推入待审队列
 	id := fmt.Sprintf("req_%d", time.Now().UnixNano())
 	ch := make(chan models.InterceptResult, 1)
+	timer := time.NewTimer(it.timeout)
 
 	it.mu.Lock()
-	it.pending[id] = &pendingReq{
+	pr := &pendingReq{
 		req:       req,
 		id:        id,
 		result:    ch,
 		createdAt: time.Now(),
-		timer:     time.NewTimer(it.timeout),
+		timer:     timer,
 	}
+	it.pending[id] = pr
 	it.mu.Unlock()
 
-	// 通知前端
+	// 通知前端（锁外操作，避免阻塞）
 	if it.onNotify != nil {
 		it.onNotify(&models.PendingRequest{
 			ID:        id,
@@ -151,15 +153,14 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			Path:      req.URL.Path,
 			Headers:   flattenHeaders(req.Header),
 			Body:      readBody(req),
-			Timestamp: time.Now(),
+			Timestamp: pr.createdAt,
 		})
 	}
 
-	// 阻塞等待用户决定或超时
-	pr := it.pending[id]
+	// 阻塞等待用户决定或超时 — pr 在锁内赋值，后续只读取 pr 自身字段（结果 channel 和 timer 安全）
 	select {
 	case r := <-ch:
-		pr.timer.Stop()
+		timer.Stop()
 		switch r.Action {
 		case "allow":
 			storeFunc(req)
@@ -182,10 +183,12 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 		default:
 			return req, nil
 		}
-	case <-pr.timer.C:
-		// 超时自动放过
+	case <-timer.C:
+		// 超时自动放过 — 清理并放行
 		it.mu.Lock()
-		delete(it.pending, id)
+		if _, ok := it.pending[id]; ok {
+			delete(it.pending, id)
+		}
 		it.mu.Unlock()
 		storeFunc(req)
 		return req, nil

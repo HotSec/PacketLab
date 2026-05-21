@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,12 +18,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const maxRequestBodySize = 10 * 1024 * 1024 // 10 MB
+
 // Server API 服务器
 type Server struct {
 	store       *store.Store
 	hub         *wsHub
 	mux         *http.ServeMux
 	frontend    http.Handler
+	insecure    bool
 	interceptor interface {
 		GetMode() string
 		SetMode(mode string)
@@ -34,7 +37,7 @@ type Server struct {
 }
 
 // New 创建 API 服务器
-func New(st *store.Store, frontendHandler http.Handler) *Server {
+func New(st *store.Store, frontendHandler http.Handler, insecure bool) *Server {
 	hub := newWSHub()
 	go hub.run()
 
@@ -42,6 +45,7 @@ func New(st *store.Store, frontendHandler http.Handler) *Server {
 		store:    st,
 		hub:      hub,
 		frontend: frontendHandler,
+		insecure: insecure,
 	}
 
 	s.setupRoutes()
@@ -51,6 +55,10 @@ func New(st *store.Store, frontendHandler http.Handler) *Server {
 // setupRoutes 注册路由
 func (s *Server) setupRoutes() {
 	mux := http.NewServeMux()
+
+	// 健康检查
+	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/ready", s.handleReady)
 
 	// API 路由
 	mux.HandleFunc("/api/requests", s.handleListRequests)
@@ -84,9 +92,9 @@ func (s *Server) setupRoutes() {
 	s.mux = mux
 }
 
-// Handler 返回 HTTP Handler（含 CORS）
+// Handler 返回 HTTP Handler（含 CORS + 安全头）
 func (s *Server) Handler() http.Handler {
-	return corsMiddleware(s.mux)
+	return securityHeadersMiddleware(corsMiddleware(s.mux))
 }
 
 // SetInterceptor 设置拦截控制器引用
@@ -111,13 +119,38 @@ func (s *Server) BroadcastCapture(req *models.CapturedRequest) {
 }
 
 // ========================================
+// Health Checks
+// ========================================
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{"database": "ok"}
+	_, _, _, err := s.store.Stats()
+	if err != nil {
+		checks["database"] = "error"
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"status": "degraded",
+			"checks": checks,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "ok",
+		"checks": checks,
+	})
+}
+
+// ========================================
 // Handlers
 // ========================================
 
 // handleListRequests GET /api/requests
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 		return
 	}
 
@@ -131,10 +164,14 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	items, total, err := s.store.List(method, search, host, errorOnly, limit, offset)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("list requests failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to list requests"))
 		return
 	}
 
@@ -147,15 +184,14 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 
 // handleRequestByID GET/DELETE /api/requests/{id}
 func (s *Server) handleRequestByID(w http.ResponseWriter, r *http.Request) {
-	// 提取 ID
 	idStr := r.URL.Path[len("/api/requests/"):]
 	if idStr == "" {
-		http.Error(w, "Missing id", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, apiError("Missing id"))
 		return
 	}
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		http.Error(w, "Invalid id", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, apiError("Invalid id"))
 		return
 	}
 
@@ -165,14 +201,14 @@ func (s *Server) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteRequest(w, r, id)
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 	}
 }
 
 func (s *Server) getRequest(w http.ResponseWriter, r *http.Request, id int64) {
 	req, err := s.store.Get(id)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found"})
+		writeJSON(w, http.StatusNotFound, apiError("Not found"))
 		return
 	}
 	writeJSON(w, http.StatusOK, req)
@@ -180,7 +216,8 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request, id int64) {
 
 func (s *Server) deleteRequest(w http.ResponseWriter, r *http.Request, id int64) {
 	if err := s.store.Delete(id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("delete request failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to delete request"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -189,20 +226,34 @@ func (s *Server) deleteRequest(w http.ResponseWriter, r *http.Request, id int64)
 // handleResend POST /api/resend
 func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 		return
 	}
 
+	// 限制请求体大小
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 	var body models.ResendRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON or body too large (max 10MB)"))
+		return
+	}
+
+	// 输入校验
+	if body.Method == "" {
+		writeJSON(w, http.StatusBadRequest, apiError("Method is required"))
+		return
+	}
+	if body.URL == "" {
+		writeJSON(w, http.StatusBadRequest, apiError("URL is required"))
 		return
 	}
 
 	// 执行重发
-	resp, err := doResend(&body)
+	resp, err := doResend(&body, s.insecure)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		slog.Warn("resend failed", "url", body.URL, "error", err)
+		writeJSON(w, http.StatusBadGateway, apiError(err.Error()))
 		return
 	}
 
@@ -224,10 +275,12 @@ func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 		CapturedAt: time.Now(),
 	}
 
-	id, _ := s.store.Save(captured)
+	id, err := s.store.Save(captured)
+	if err != nil {
+		slog.Error("save resend result failed", "error", err)
+	}
 	resp.ID = id
 
-	// 广播
 	if s.hub != nil {
 		s.hub.broadcast(captured)
 	}
@@ -238,12 +291,12 @@ func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 // handleClear POST /api/clear
 func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 		return
 	}
-
 	if err := s.store.Clear(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("clear failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to clear"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
@@ -251,14 +304,15 @@ func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
 
 // handleStats GET /api/stats
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	total, errors, totalSize, err := s.store.Stats()
+	total, errs, totalSize, err := s.store.Stats()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("stats failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to get stats"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"total":      total,
-		"errors":     errors,
+		"errors":     errs,
 		"total_size": totalSize,
 	})
 }
@@ -267,7 +321,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"running": true,
-		"port":    8080,
 	})
 }
 
@@ -275,26 +328,25 @@ func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 // API Map
 // ========================================
 
-// handleAPIMap GET /api/apimap?host=...
 func (s *Server) handleAPIMap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 		return
 	}
 	host := r.URL.Query().Get("host")
 	if host == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		writeJSON(w, http.StatusBadRequest, apiError("host required"))
 		return
 	}
 	tree, err := s.store.GetAPIMap(host)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("apimap failed", "host", host, "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to build API map"))
 		return
 	}
 	writeJSON(w, http.StatusOK, tree)
 }
 
-// handleAPIHosts GET /api/apimap/hosts?search=&limit=&offset=
 func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
 	search := r.URL.Query().Get("search")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -302,7 +354,8 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
 
 	hosts, total, err := s.store.ListHosts(search, limit, offset)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("list hosts failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to list hosts"))
 		return
 	}
 	if hosts == nil {
@@ -315,16 +368,21 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAPINotes POST /api/apimap/notes (save/update)
 func (s *Server) handleAPINotes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 	var body models.APINoteRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+		return
+	}
+	if body.Host == "" {
+		writeJSON(w, http.StatusBadRequest, apiError("host is required"))
 		return
 	}
 
@@ -336,27 +394,28 @@ func (s *Server) handleAPINotes(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.store.SaveAPINote(note)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("save note failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to save note"))
 		return
 	}
 	note.ID = id
 	writeJSON(w, http.StatusOK, note)
 }
 
-// handleAPINoteByID DELETE /api/apimap/notes/{id}
 func (s *Server) handleAPINoteByID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 		return
 	}
 	idStr := r.URL.Path[len("/api/apimap/notes/"):]
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		http.Error(w, "Invalid id", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, apiError("Invalid id"))
 		return
 	}
 	if err := s.store.DeleteAPINote(id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Error("delete note failed", "id", id, "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError("Failed to delete note"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -368,7 +427,7 @@ func (s *Server) handleAPINoteByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
 	if s.interceptor == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Interceptor not available"})
+		writeJSON(w, http.StatusServiceUnavailable, apiError("Interceptor not available"))
 		return
 	}
 	switch r.Method {
@@ -376,16 +435,21 @@ func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"mode": s.interceptor.GetMode()})
 	case http.MethodPost:
 		var body struct{ Mode string `json:"mode"` }
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+			return
+		}
 		if body.Mode != "auto" && body.Mode != "manual" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be auto or manual"})
+			writeJSON(w, http.StatusBadRequest, apiError("mode must be auto or manual"))
 			return
 		}
 		s.interceptor.SetMode(body.Mode)
-		s.store.SetSetting("intercept_mode", body.Mode)
+		if err := s.store.SetSetting("intercept_mode", body.Mode); err != nil {
+			slog.Warn("save intercept mode failed", "error", err)
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"mode": body.Mode})
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 	}
 }
 
@@ -399,20 +463,23 @@ func (s *Server) handleInterceptPending(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleInterceptAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 		return
 	}
 	if s.interceptor == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Interceptor not available"})
+		writeJSON(w, http.StatusServiceUnavailable, apiError("Interceptor not available"))
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 	var result models.InterceptResult
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
 		return
 	}
 	if err := s.interceptor.Resolve(result.RequestID, result); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusNotFound, apiError(err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
@@ -423,30 +490,38 @@ func (s *Server) handleInterceptRules(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		rules, err := s.store.ListRules()
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			slog.Error("list rules failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, apiError("Failed to list rules"))
 			return
 		}
-		if rules == nil { rules = []models.InterceptRule{} }
+		if rules == nil {
+			rules = []models.InterceptRule{}
+		}
 		writeJSON(w, http.StatusOK, rules)
 	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 		var rule models.InterceptRule
 		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+			writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
 			return
 		}
 		id, err := s.store.SaveRule(&rule)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			slog.Error("save rule failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, apiError("Failed to save rule"))
 			return
 		}
 		rule.ID = id
 		if s.interceptor != nil {
-			rules, _ := s.store.ListRules()
-			s.interceptor.SetRules(rules)
+			rules, err := s.store.ListRules()
+			if err == nil {
+				s.interceptor.SetRules(rules)
+			}
 		}
 		writeJSON(w, http.StatusCreated, rule)
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 	}
 }
 
@@ -454,28 +529,39 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 	idStr := r.URL.Path[len("/api/intercept/rules/"):]
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		http.Error(w, "Invalid id", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, apiError("Invalid id"))
 		return
 	}
 	switch r.Method {
 	case http.MethodPut:
 		var body struct{ Enabled bool `json:"enabled"` }
-		json.NewDecoder(r.Body).Decode(&body)
-		s.store.UpdateRule(id, body.Enabled)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+			return
+		}
+		if err := s.store.UpdateRule(id, body.Enabled); err != nil {
+			slog.Error("update rule failed", "id", id, "error", err)
+		}
 		if s.interceptor != nil {
-			rules, _ := s.store.ListRules()
-			s.interceptor.SetRules(rules)
+			rules, err := s.store.ListRules()
+			if err == nil {
+				s.interceptor.SetRules(rules)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 	case http.MethodDelete:
-		s.store.DeleteRule(id)
+		if err := s.store.DeleteRule(id); err != nil {
+			slog.Error("delete rule failed", "id", id, "error", err)
+		}
 		if s.interceptor != nil {
-			rules, _ := s.store.ListRules()
-			s.interceptor.SetRules(rules)
+			rules, err := s.store.ListRules()
+			if err == nil {
+				s.interceptor.SetRules(rules)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 	}
 }
 
@@ -492,7 +578,7 @@ var upgrader = websocket.Upgrader{
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[ws] upgrade error: %v", err)
+		slog.Warn("ws upgrade failed", "error", err)
 		return
 	}
 
@@ -525,16 +611,18 @@ type resendResult struct {
 	SizeBytes  int64             `json:"size_bytes"`
 }
 
-func doResend(req *models.ResendRequest) (*resendResult, error) {
+func doResend(req *models.ResendRequest, insecure bool) (*resendResult, error) {
 	parsedURL, err := url.Parse(req.URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported scheme: %s", parsedURL.Scheme)
 	}
 
 	isHTTPS := parsedURL.Scheme == "https"
 	startTime := time.Now()
 
-	// 构建 HTTP 请求
 	var bodyReader io.Reader
 	if req.Body != "" {
 		bodyReader = bytes.NewBufferString(req.Body)
@@ -549,14 +637,13 @@ func doResend(req *models.ResendRequest) (*resendResult, error) {
 		httpReq.Header.Set(k, v)
 	}
 	if httpReq.Header.Get("User-Agent") == "" {
-		httpReq.Header.Set("User-Agent", "PacketLab/1.0")
+		httpReq.Header.Set("User-Agent", "PacketLab/2.0")
 	}
 
-	// 发送请求
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
 		},
 	}
 
@@ -566,7 +653,8 @@ func doResend(req *models.ResendRequest) (*resendResult, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	// 限制读取响应体大小
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
 
 	return &resendResult{
 		StatusCode: resp.StatusCode,
@@ -595,23 +683,39 @@ func flattenHeaders(h http.Header) map[string]string {
 // Utilities
 // ========================================
 
+func apiError(msg string) map[string]string {
+	return map[string]string{"error": msg}
+}
+
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		slog.Warn("write JSON response failed", "error", err)
+	}
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		next.ServeHTTP(w, r)
 	})
 }

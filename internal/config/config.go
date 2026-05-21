@@ -1,0 +1,71 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// Config 集中化应用配置 (fail-fast on invalid values)
+type Config struct {
+	ProxyPort  int
+	APIPort    int
+	DBPath     string
+	NoProxy    bool
+	NoMitm     bool
+	Insecure   bool // 是否跳过 TLS 证书校验（仅开发环境）
+	BaseDir    string
+	CertDir    string
+}
+
+// Default validated default values
+const (
+	DefaultProxyPort  = 8080
+	DefaultAPIPort    = 9090
+	DefaultTimeoutSec = 30
+	defaultOrg        = "PacketLab"
+)
+
+// Load 从命令行参数和环境变量加载配置，fail-fast 校验
+func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool) (*Config, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
+	}
+	baseDir := filepath.Join(home, ".packetlab")
+
+	if dbPath == "" {
+		dbPath = filepath.Join(baseDir, "data.db")
+	}
+	if proxyPort <= 0 || proxyPort > 65535 {
+		return nil, fmt.Errorf("config: invalid proxy-port %d (must be 1-65535)", proxyPort)
+	}
+	if apiPort <= 0 || apiPort > 65535 {
+		return nil, fmt.Errorf("config: invalid api-port %d (must be 1-65535)", apiPort)
+	}
+	if proxyPort == apiPort {
+		return nil, fmt.Errorf("config: proxy-port and api-port must differ (both set to %d)", proxyPort)
+	}
+
+	// Ensure DB directory exists
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return nil, fmt.Errorf("config: cannot create DB directory %s: %w", filepath.Dir(dbPath), err)
+	}
+
+	cfg := &Config{
+		ProxyPort: proxyPort,
+		APIPort:   apiPort,
+		DBPath:    dbPath,
+		NoProxy:   noProxy,
+		NoMitm:    noMitm,
+		Insecure:  insecure,
+		BaseDir:   baseDir,
+		CertDir:   filepath.Join(baseDir, "certs"),
+	}
+	return cfg, nil
+}
+
+// Addr formats a port into a listen address string
+func (c *Config) ProxyAddr() string  { return fmt.Sprintf(":%d", c.ProxyPort) }
+func (c *Config) APIAddr() string    { return fmt.Sprintf(":%d", c.APIPort) }
+func (c *Config) OrgName() string    { return defaultOrg }

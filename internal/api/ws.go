@@ -2,7 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"time"
 
 	"packetlab/internal/models"
@@ -46,14 +46,14 @@ func (h *wsHub) run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			log.Printf("[ws] client connected (%d total)", len(h.clients))
+			slog.Info("ws client connected", "total", len(h.clients))
 
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
 			}
-			log.Printf("[ws] client disconnected (%d total)", len(h.clients))
+			slog.Info("ws client disconnected", "total", len(h.clients))
 
 		case req := <-h.broadcastCh:
 			// 序列化为简略列表项
@@ -104,7 +104,7 @@ func (c *wsClient) readPump() {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("[ws] read error: %v", err)
+				slog.Warn("ws read error", "error", err)
 			}
 			break
 		}

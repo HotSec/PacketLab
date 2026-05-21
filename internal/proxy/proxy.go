@@ -2,10 +2,12 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,7 @@ type OnCapture func(req *models.CapturedRequest)
 // Server 代理服务器
 type Server struct {
 	proxy       *goproxy.ProxyHttpServer
+	httpServer  *http.Server
 	store       *store.Store
 	batchWriter *BatchWriter
 	interceptor *Interceptor
@@ -178,21 +181,30 @@ func (s *Server) Start() error {
 	s.running = true
 	s.mu.Unlock()
 
-	addr := fmt.Sprintf(":%d", s.port)
-	server := &http.Server{
+	addr := portToAddr(s.port)
+	s.httpServer = &http.Server{
 		Addr:    addr,
 		Handler: s.proxy,
 	}
 
-	fmt.Printf("[proxy] 代理服务器启动在 %s\n", addr)
-	fmt.Printf("[proxy] 配置浏览器代理为 localhost:%d\n", s.port)
+	slog.Info("代理服务器启动", "addr", addr)
 
-	return server.ListenAndServe()
+	return s.httpServer.ListenAndServe()
 }
 
-// Stop 停止代理
+// Stop 优雅停止代理服务器
 func (s *Server) Stop() {
 	s.batchWriter.Stop()
+	if s.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			slog.Warn("代理服务器关闭超时", "error", err)
+		}
+	}
+	s.mu.Lock()
+	s.running = false
+	s.mu.Unlock()
 }
 
 // IsRunning 是否运行中
@@ -217,6 +229,8 @@ func flattenHeaders(h http.Header) map[string]string {
 	}
 	return result
 }
+
+func portToAddr(port int) string { return ":" + strconv.Itoa(port) }
 
 // shouldMITM 判断某 host 是否适合 MITM 解密
 // 跳过已知的非 HTTP 协议主机（WNS、遥测、自定义 TCP 等）

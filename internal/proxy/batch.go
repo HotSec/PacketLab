@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -47,8 +47,14 @@ func (bw *BatchWriter) Enqueue(req *models.CapturedRequest) {
 	select {
 	case bw.ch <- req:
 	default:
-		// 通道满则丢弃（大流量保护）
-		log.Printf("[batch] 写入通道满，丢弃请求 %s %s", req.Method, req.URL)
+		// 通道满：降级为同步写入（背压），避免数据丢失
+		slog.Warn("batch channel full, fallback to sync write", "method", req.Method, "url", req.URL)
+		if id, err := bw.store.Save(req); err == nil {
+			req.ID = id
+			if bw.onSave != nil {
+				bw.onSave(req)
+			}
+		}
 	}
 }
 
@@ -71,7 +77,7 @@ func (bw *BatchWriter) loop() {
 		}
 		ids, err := bw.store.SaveBatch(batch)
 		if err != nil {
-			log.Printf("[batch] 批量写入失败: %v", err)
+			slog.Error("batch write failed", "error", err)
 		} else {
 			for i, req := range batch {
 				if i < len(ids) {
@@ -82,7 +88,7 @@ func (bw *BatchWriter) loop() {
 				}
 			}
 			if len(ids) > 1 {
-				log.Printf("[batch] 批量写入 %d 条", len(ids))
+				slog.Debug("batch written", "count", len(ids))
 			}
 		}
 		batch = batch[:0]

@@ -15,29 +15,38 @@ import (
 
 // Store 持久化存储
 type Store struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db    *sql.DB
+	dbRO  *sql.DB // 只读连接，支持 WAL 并发读
+	mu    sync.RWMutex
 }
 
 // New 创建存储实例
 func New(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-8000&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-
-	// SQLite 性能优化
+	// 主连接用于写操作
 	db.SetMaxOpenConns(1)
 	db.SetConnMaxLifetime(0)
-
-	// WAL 模式提升并发性能
 	db.Exec("PRAGMA journal_mode=WAL")
 	db.Exec("PRAGMA synchronous=NORMAL")
-	db.Exec("PRAGMA cache_size=-8000") // 8MB cache
+	db.Exec("PRAGMA cache_size=-8000")
 	db.Exec("PRAGMA busy_timeout=5000")
 
-	s := &Store{db: db}
+	// 只读连接，利用 WAL 模式实现并发读
+	dbRO, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=5000")
+	if err == nil {
+		dbRO.SetMaxOpenConns(1)
+		dbRO.SetConnMaxLifetime(0)
+	}
+
+	s := &Store{db: db, dbRO: dbRO}
 	if err := s.migrate(); err != nil {
+		db.Close()
+		if dbRO != nil {
+			dbRO.Close()
+		}
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
@@ -301,9 +310,12 @@ func (s *Store) Stats() (total int, errors int, totalSize int64, err error) {
 	defer s.mu.RUnlock()
 
 	if err := s.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM requests").Scan(&total, &totalSize); err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, fmt.Errorf("stats count: %w", err)
 	}
-	s.db.QueryRow("SELECT COUNT(*) FROM requests WHERE status_code >= 400").Scan(&errors)
+	// 错误计数失败不影响主统计返回
+	if scanErr := s.db.QueryRow("SELECT COUNT(*) FROM requests WHERE status_code >= 400").Scan(&errors); scanErr != nil {
+		errors = 0
+	}
 	return
 }
 
@@ -561,7 +573,19 @@ func splitPath(path string) []string {
 // ========================================
 
 func (s *Store) Close() error {
-	return s.db.Close()
+	var errs []error
+	if err := s.db.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	if s.dbRO != nil {
+		if err := s.dbRO.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("close errors: %v", errs)
+	}
+	return nil
 }
 
 func boolToInt(b bool) int {

@@ -1,18 +1,20 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
+	"time"
 
 	"packetlab/internal/api"
+	"packetlab/internal/config"
 	"packetlab/internal/models"
 	"packetlab/internal/proxy"
 	"packetlab/internal/store"
@@ -22,36 +24,42 @@ import (
 var webFS embed.FS
 
 func main() {
-	proxyPort := flag.Int("proxy-port", 8080, "代理监听端口")
-	apiPort := flag.Int("api-port", 9090, "API 服务端口")
+	// 命令行参数
+	proxyPort := flag.Int("proxy-port", config.DefaultProxyPort, "代理监听端口")
+	apiPort := flag.Int("api-port", config.DefaultAPIPort, "API 服务端口")
 	dbPath := flag.String("db", "", "SQLite 数据库路径 (默认 ~/.packetlab/data.db)")
 	noProxy := flag.Bool("no-proxy", false, "仅启动 API，不启动代理")
 	noMitm := flag.Bool("no-mitm", false, "禁用 HTTPS MITM 解密")
+	insecure := flag.Bool("insecure", false, "重发请求时跳过 TLS 证书验证（仅开发环境）")
 	flag.Parse()
 
-	baseDir := filepath.Join(userHome(), ".packetlab")
+	// 结构化日志
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
 
-	// 数据库路径
-	if *dbPath == "" {
-		*dbPath = filepath.Join(baseDir, "data.db")
+	// 集中化配置 fail-fast 校验
+	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure)
+	if err != nil {
+		slog.Error("配置加载失败", "error", err)
+		os.Exit(1)
 	}
-	if err := os.MkdirAll(filepath.Dir(*dbPath), 0755); err != nil {
-		log.Fatalf("创建数据库目录失败: %v", err)
-	}
+	slog.Info("配置已加载", "proxy_port", cfg.ProxyPort, "api_port", cfg.APIPort,
+		"db", cfg.DBPath, "no_proxy", cfg.NoProxy, "no_mitm", cfg.NoMitm, "insecure", cfg.Insecure)
 
 	// 初始化存储
-	st, err := store.New(*dbPath)
+	st, err := store.New(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("初始化数据库失败: %v", err)
+		slog.Error("初始化数据库失败", "error", err)
+		os.Exit(1)
 	}
 	defer st.Close()
-	log.Printf("[store] 数据库: %s", *dbPath)
+	slog.Info("数据库已初始化", "path", cfg.DBPath)
 
 	// 加载前端
 	frontendHandler := loadFrontend()
 
 	// 创建 API 服务器
-	apiSrv := api.New(st, frontendHandler)
+	apiSrv := api.New(st, frontendHandler, cfg.Insecure)
 
 	// 创建拦截控制器
 	interceptMode, _ := st.GetSetting("intercept_mode")
@@ -62,89 +70,103 @@ func main() {
 		apiSrv.BroadcastIntercept(req)
 	})
 	interceptor.SetMode(interceptMode)
-	// 加载已有规则
 	if rules, err := st.ListRules(); err == nil {
 		interceptor.SetRules(rules)
 	}
-	// 暴露给 API
 	apiSrv.SetInterceptor(interceptor)
 
-	// 代理回调：捕获到新请求时通过 API WebSocket 广播
+	// 捕获回调
 	onCapture := func(req *models.CapturedRequest) {
 		apiSrv.BroadcastCapture(req)
 	}
 
 	// 加载/生成 CA 证书（HTTPS MITM）
 	var caCert, caKey []byte
-	if !*noMitm {
-		certDir := filepath.Join(baseDir, "certs")
-		caCert, caKey, err = proxy.LoadOrGenerateCA(certDir)
+	if !cfg.NoMitm {
+		caCert, caKey, err = proxy.LoadOrGenerateCA(cfg.CertDir)
 		if err != nil {
-			log.Printf("[mitm] CA 证书加载失败: %v，HTTPS MITM 已禁用", err)
+			slog.Warn("CA 证书加载失败，HTTPS MITM 已禁用", "error", err)
 		} else {
-			log.Printf("[mitm] HTTPS MITM 已启用")
-			log.Printf("[mitm] 安装 CA 证书以解密 HTTPS 流量: %s/ca.crt", certDir)
+			slog.Info("HTTPS MITM 已启用", "cert_dir", cfg.CertDir)
 		}
 	} else {
-		log.Println("[mitm] HTTPS MITM 已禁用 (--no-mitm)")
+		slog.Info("HTTPS MITM 已禁用 (--no-mitm)")
 	}
 
 	// 启动代理
-	if !*noProxy {
-		proxySrv := proxy.New(*proxyPort, st, caCert, caKey, onCapture, interceptor)
-
+	var proxySrv *proxy.Server
+	if !cfg.NoProxy {
+		proxySrv = proxy.New(cfg.ProxyPort, st, caCert, caKey, onCapture, interceptor)
 		go func() {
-			log.Printf("[proxy] 启动代理: :%d", *proxyPort)
+			slog.Info("代理服务器启动", "port", cfg.ProxyPort)
 			if err := proxySrv.Start(); err != nil {
-				log.Printf("[proxy] 代理启动失败: %v", err)
+				slog.Error("代理服务器启动失败", "error", err)
 			}
 		}()
 	} else {
-		log.Println("[proxy] 代理已禁用 (--no-proxy)")
+		slog.Info("代理已禁用 (--no-proxy)")
+	}
+
+	// API HTTP 服务器
+	apiHTTPServer := &http.Server{
+		Addr:         cfg.APIAddr(),
+		Handler:      apiSrv.Handler(),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	// 优雅关闭
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		sig := <-sigCh
-		log.Printf("\n[server] 收到信号 %v，正在关闭...", sig)
-		st.Close()
-		os.Exit(0)
-	}()
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, syscall.SIGINT, syscall.SIGTERM)
 
 	mitmStatus := "禁用"
 	if caCert != nil {
 		mitmStatus = "已启用"
 	}
 
-	log.Printf(`
-╔══════════════════════════════════════════════════════╗
-║            PacketLab — 流量捕获工具 v2.0             ║
-╠══════════════════════════════════════════════════════╣
-║  Web 界面:    http://localhost:%-5d                ║
-║  代理端口:     :%-5d                             ║
-║  HTTPS MITM:  %-38s ║
-║  配置浏览器代理为 localhost:%d                   ║
-╚══════════════════════════════════════════════════════╝
-`, *apiPort, *proxyPort, mitmStatus, *proxyPort)
+	slog.Info("PacketLab v2.0 已就绪",
+		"web_url", fmt.Sprintf("http://localhost:%d", cfg.APIPort),
+		"proxy_port", cfg.ProxyPort,
+		"mitm", mitmStatus)
 
-	apiAddr := fmt.Sprintf(":%d", *apiPort)
-	if err := http.ListenAndServe(apiAddr, apiSrv.Handler()); err != nil {
-		log.Fatalf("[api] 启动失败: %v", err)
+	// 在 goroutine 中启动 API，主 goroutine 等待信号
+	go func() {
+		slog.Info("API 服务器启动", "addr", cfg.APIAddr())
+		if err := apiHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("API 服务器错误", "error", err)
+		}
+	}()
+
+	// 等待关闭信号
+	sig := <-shutdownCh
+	slog.Info("收到关闭信号，开始优雅退出...", "signal", sig.String())
+
+	// 优雅关闭 API 服务器（30s 超时）
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := apiHTTPServer.Shutdown(ctx); err != nil {
+		slog.Error("API 服务器关闭失败", "error", err)
 	}
+
+	// 关闭代理
+	if proxySrv != nil {
+		proxySrv.Stop()
+	}
+
+	// 关闭数据库
+	if err := st.Close(); err != nil {
+		slog.Error("数据库关闭失败", "error", err)
+	}
+
+	slog.Info("PacketLab 已安全退出")
 }
 
 func loadFrontend() http.Handler {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
-		log.Printf("[web] 嵌入前端加载失败: %v", err)
+		slog.Error("嵌入前端加载失败", "error", err)
 		return http.NotFoundHandler()
 	}
 	return http.FileServer(http.FS(sub))
-}
-
-func userHome() string {
-	home, _ := os.UserHomeDir()
-	return home
 }
