@@ -93,6 +93,7 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 
 	method := r.URL.Query().Get("method")
 	search := r.URL.Query().Get("search")
+	host := r.URL.Query().Get("host")
 	errorOnly := r.URL.Query().Get("error_only") == "true"
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -101,7 +102,7 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 
-	items, total, err := s.store.List(method, search, errorOnly, limit, offset)
+	items, total, err := s.store.List(method, search, host, errorOnly, limit, offset)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

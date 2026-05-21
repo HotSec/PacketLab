@@ -209,7 +209,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 @keyframes modalIn{from{opacity:0;transform:scale(.95) translateY(8px)}to{opacity:1;transform:scale(1) translateY(0)}}
 .modal-title{font-size:15px;font-weight:650;color:var(--text-primary);margin-bottom:6px}
 .modal-sub{font-size:11px;font-family:var(--font-mono);color:var(--text-tertiary);margin-bottom:14px;word-break:break-all}
-.modal-textarea{width:100%;min-height:80px;padding:10px 12px;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-input);color:var(--text-primary);font-size:13px;font-family:var(--font-sans);outline:none;resize:vertical;transition:border .15s;line-height:1.5}
+.modal-textarea{width:100%;min-height:120px;padding:10px 12px;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-input);color:var(--text-primary);font-size:13px;font-family:var(--font-sans);outline:none;resize:vertical;transition:border .15s;line-height:1.6}
 .modal-textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-muted)}
 .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
 .modal-btn{padding:7px 18px;border-radius:var(--radius-sm);font-size:13px;font-weight:550;cursor:pointer;border:1px solid var(--border-subtle);background:var(--bg-elevated);color:var(--text-primary);transition:all .15s}
@@ -218,6 +218,14 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .modal-btn.primary:hover{background:var(--accent-hover)}
 .modal-btn.danger{color:var(--red);border-color:var(--red)}
 .modal-btn.danger:hover{background:var(--red-muted)}
+/* Context Menu */
+.context-menu{position:fixed;z-index:300;min-width:180px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-md);box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0;animation:ctxIn .12s ease}
+.context-menu.hidden{display:none}
+@keyframes ctxIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+.ctx-item{display:flex;align-items:center;gap:8px;padding:7px 14px;cursor:pointer;font-size:12px;color:var(--text-primary);transition:background .1s}
+.ctx-item:hover{background:var(--bg-hover)}
+.ctx-item svg{flex-shrink:0;color:var(--text-tertiary)}
+.ctx-separator{height:1px;background:var(--border-subtle);margin:3px 0}
 @media(max-width:768px){.modal-box{min-width:auto;margin:0 16px;width:calc(100% - 32px)}}
 </style>
 </head>
@@ -373,7 +381,7 @@ applyTheme();
 // State
 // =============================================
 const API_BASE='';let requests=[],requestDetailCache={},selectedRequestId=null,activeTab='request';
-let currentFilter='all',errorFilterOnly=false,isRecording=true,ws=null,wsReconnectTimer=null;
+let currentFilter='all',currentHost='',errorFilterOnly=false,isRecording=true,ws=null,wsReconnectTimer=null;
 async function apiGet(p){const r=await fetch(API_BASE+p);if(!r.ok)throw Error(`API ${r.status}`);return r.json()}
 async function apiPost(p,b){const r=await fetch(API_BASE+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});if(!r.ok)throw Error(`API ${r.status}`);return r.json()}
 async function apiDelete(p){const r=await fetch(API_BASE+p,{method:'DELETE'});if(!r.ok)throw Error(`API ${r.status}`);return r.json()}
@@ -381,7 +389,7 @@ async function apiDelete(p){const r=await fetch(API_BASE+p,{method:'DELETE'});if
 // =============================================
 // Data
 // =============================================
-async function loadRequests(){try{const p=new URLSearchParams();if(currentFilter!=='all')p.set('method',currentFilter);if(errorFilterOnly)p.set('error_only','true');const s=document.getElementById('searchInput').value.trim();if(s)p.set('search',s);p.set('limit','200');const r=await apiGet('/api/requests?'+p.toString());requests=(r.data||[]).map(n);renderRequestList()}catch(e){console.error(e)}}
+async function loadRequests(){try{const p=new URLSearchParams();if(currentFilter!=='all')p.set('method',currentFilter);if(errorFilterOnly)p.set('error_only','true');const s=document.getElementById('searchInput').value.trim();if(s)p.set('search',s);if(currentHost)p.set('host',currentHost);p.set('limit','200');const r=await apiGet('/api/requests?'+p.toString());requests=(r.data||[]).map(n);renderRequestList()}catch(e){console.error(e)}}
 async function loadRequestDetail(id){if(requestDetailCache[id])return requestDetailCache[id];try{const d=await apiGet('/api/requests/'+id);requestDetailCache[id]=d;return d}catch(e){return null}}
 async function loadStats(){try{const s=await apiGet('/api/stats');document.getElementById('totalRequests').textContent=`${s.total||0} ${t('requests')}`;document.getElementById('totalSize').textContent=f(s.total_size||0);document.getElementById('errorCount').textContent=`${s.errors||0} ${t('errors')}`}catch(e){}}
 function n(r){return{id:r.id,method:r.method,url:r.url,host:r.host,status:r.status_code,status_code:r.status_code,duration_ms:r.duration_ms,size_bytes:r.size_bytes,time:`${r.duration_ms}ms`,size:f(r.size_bytes),timestamp:r.captured_at?new Date(r.captured_at).getTime():Date.now(),captured_at:r.captured_at,is_https:r.is_https,protocol:r.is_https?'HTTPS/1.1':'HTTP/1.1',reqHeaders:r.req_headers||{},reqBody:r.req_body,resHeaders:r.res_headers||{},resBody:r.res_body}}
@@ -430,11 +438,21 @@ try{const result=await apiPost('/api/resend',{method,url,headers,body});requestD
 // =============================================
 async function loadAPIMapHosts(){try{const hosts=await apiGet('/api/apimap/hosts');const sel=document.getElementById('apimapHostSelect');sel.innerHTML=`<option value="">${t('select_host')}</option>`+hosts.map(h=>`<option value="${e(h)}">${e(h)}</option>`).join('');if(hosts.length>0){sel.value=hosts[0];loadAPIMap()}}catch(e){}}
 async function loadAPIMap(){const host=document.getElementById('apimapHostSelect').value;if(!host)return;try{const tree=await apiGet('/api/apimap?host='+encodeURIComponent(host));renderAPIMapTree(tree)}catch(e){}
-// 联动：API地图切换站点时自动过滤请求列表
-document.getElementById('searchInput').value='host:'+host;currentFilter='all';document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));document.querySelector('[data-filter="all"]').classList.add('active');loadRequests()}
+// 联动：API地图切换站点时用 host 参数精确过滤
+currentHost=host;document.getElementById('searchInput').value='';currentFilter='all';document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));document.querySelector('[data-filter="all"]').classList.add('active');loadRequests()}
 function renderAPIMapTree(node){const container=document.getElementById('apimapTree');if(!node||(!node.children||node.children.length===0)&&!node.isLeaf){container.innerHTML='<div style="padding:20px;color:var(--text-tertiary);font-size:12px;text-align:center">No endpoints captured</div>';return}container.innerHTML=renderTreeNode(node,0)}
 function renderTreeNode(node,depth){let html='';(node.children||[]).forEach(child=>{if(child.is_leaf){html+=renderLeaf(child,depth+1)}else{const hasChildren=child.children&&child.children.length>0;const allMethods=[...new Set((child.methods||[]))];const dominantMethod=allMethods[0]||'';const borderClass=dominantMethod?`border-${dominantMethod}`:'';html+=`<div class="tree-node"><div class="tree-node-header ${borderClass}" style="padding-left:${depth*20+4}px" onclick="toggleTreeNode(this)"><span class="tree-node-toggle ${hasChildren?'open':''}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--yellow)"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="tree-node-name">${e(child.name)}</span><span class="tree-node-count">(${child.count||0})</span><div class="tree-node-methods">${allMethods.map(m=>`<span class="tree-method-tag method-${m}">${m}</span>`).join('')}</div></div><div class="tree-node-children">${hasChildren?renderTreeNode(child,depth+1):''}</div></div>`}});return html}
-function renderLeaf(node,depth){const methods=node.methods||[];const statuses=node.statuses||{};let html='';methods.forEach(method=>{const statusHtml=Object.entries(statuses).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,c])=>{const cls='s'+Math.floor(parseInt(s)/100);return`<span class="${cls}">${s}</span>`}).join('');const hasNote=node.note&&node.note_id;html+=`<div class="tree-leaf-row ${method}" onclick="editAPINoteLeaf('${e(node.full_path)}','${method}','${e(node.note||'')}',${node.note_id||0})"><span class="tree-leaf-method method-${method}">${method}</span><span class="tree-leaf-path">${e(node.full_path)}</span><span class="tree-leaf-status">${statusHtml}</span>${hasNote?`<span class="tree-leaf-note">${e((node.note||'').substring(0,24))}</span>`:''}</div>`});return html}
+function renderLeaf(node,depth){const methods=node.methods||[];const statuses=node.statuses||{};let html='';methods.forEach(method=>{const statusHtml=Object.entries(statuses).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,c])=>{const cls='s'+Math.floor(parseInt(s)/100);return`<span class="${cls}">${s}</span>`}).join('');const hasNote=node.note&&node.note_id;html+=`<div class="tree-leaf-row ${method}" onclick="leafClick('${e(node.full_path)}','${method}')" oncontextmenu="leafContext(event,'${e(node.full_path)}','${method}','${e(node.note||'')}',${node.note_id||0})" title="点击过滤 | 右键更多"><span class="tree-leaf-method method-${method}">${method}</span><span class="tree-leaf-path">${e(node.full_path)}</span><span class="tree-leaf-status">${statusHtml}</span>${hasNote?`<span class="tree-leaf-note">${e((node.note||'').substring(0,24))}</span>`:''}</div>`});return html}
+
+// Context menu handlers
+let ctxPath='',ctxMethod='',ctxNote='',ctxNoteId=0;
+function leafClick(path,method){document.getElementById('searchInput').value=path;currentHost='';currentFilter='all';document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));document.querySelector('[data-filter="all"]').classList.add('active');loadRequests()}
+function leafContext(e,path,method,note,noteId){e.preventDefault();ctxPath=path;ctxMethod=method;ctxNote=note;ctxNoteId=noteId;const menu=document.getElementById('ctxMenu');menu.classList.remove('hidden');menu.style.left=Math.min(e.clientX,window.innerWidth-190)+'px';menu.style.top=Math.min(e.clientY,window.innerHeight-120)+'px'}
+function ctxOpenNote(){closeCtx();editAPINoteLeaf(ctxPath,ctxMethod,ctxNote,ctxNoteId)}
+function ctxCopyURL(){closeCtx();const host=document.getElementById('apimapHostSelect').value;let url=(host?host:'')+ctxPath;navigator.clipboard.writeText(url).then(()=>showToast('success',t('copied'))).catch(()=>showToast('error','Failed'))}
+function ctxFilterHost(){closeCtx();const host=document.getElementById('apimapHostSelect').value;currentHost=host||'';document.getElementById('searchInput').value='';currentFilter='all';document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));document.querySelector('[data-filter="all"]').classList.add('active');loadRequests()}
+function closeCtx(){document.getElementById('ctxMenu').classList.add('hidden')}
+document.addEventListener('click',closeCtx)
 let noteEditHost='',noteEditPath='',noteEditMethod='',noteEditId=0;
 function editAPINoteLeaf(path,method,note,noteId){noteEditHost=document.getElementById('apimapHostSelect').value;noteEditPath=path;noteEditMethod=method;noteEditId=noteId||0;document.getElementById('noteModalPath').textContent=path+'  ['+method+']';document.getElementById('noteModalInput').value=note;document.getElementById('noteModalDelete').style.display=noteId?'inline-block':'none';document.getElementById('noteModal').classList.remove('hidden');document.getElementById('noteModalInput').focus()}
 function closeNoteModal(){document.getElementById('noteModal').classList.add('hidden')}
@@ -448,10 +466,10 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape')closeNoteMod
 // =============================================
 function toggleCapture(){isRecording=!isRecording;const btn=document.getElementById('captureBtn'),label=document.getElementById('captureLabel'),dot=document.getElementById('statusDot'),text=document.getElementById('statusText');
 if(isRecording){btn.classList.add('recording');label.textContent=t('recording');dot.classList.add('recording');text.textContent=t('recording')}else{btn.classList.remove('recording');label.textContent=t('paused');dot.classList.remove('recording');text.textContent=t('paused')}}
-function setFilter(btn,f){currentFilter=f;document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));btn.classList.add('active');loadRequests()}
-function toggleErrorFilter(){errorFilterOnly=!errorFilterOnly;const btn=document.getElementById('errorFilterBtn');if(errorFilterOnly){btn.style.background='var(--red-muted)';btn.style.color='var(--red)';btn.classList.add('active')}else{btn.style.background='transparent';btn.style.color='var(--text-secondary)';btn.classList.remove('active')}loadRequests()}
-function filterRequests(){loadRequests()}
-async function clearHistory(){if(!confirm(t('confirm_clear')))return;try{await apiPost('/api/clear',{});requests=[];requestDetailCache={};selectedRequestId=null;document.getElementById('detailEmpty').style.display='flex';document.getElementById('detailContent').style.display='none';renderRequestList();showToast('success',t('cleared'))}catch(e){showToast('error',t('send_failed')+': '+e.message)}}
+function setFilter(btn,f){currentFilter=f;currentHost='';document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));btn.classList.add('active');loadRequests()}
+function toggleErrorFilter(){errorFilterOnly=!errorFilterOnly;currentHost='';const btn=document.getElementById('errorFilterBtn');if(errorFilterOnly){btn.style.background='var(--red-muted)';btn.style.color='var(--red)';btn.classList.add('active')}else{btn.style.background='transparent';btn.style.color='var(--text-secondary)';btn.classList.remove('active')}loadRequests()}
+function filterRequests(){currentHost='';loadRequests()}
+async function clearHistory(){if(!confirm(t('confirm_clear')))return;try{await apiPost('/api/clear',{});requests=[];requestDetailCache={};selectedRequestId=null;currentHost='';document.getElementById('searchInput').value='';document.getElementById('detailEmpty').style.display='flex';document.getElementById('detailContent').style.display='none';renderRequestList();showToast('success',t('cleared'))}catch(e){showToast('error',t('send_failed')+': '+e.message)}}
 
 // =============================================
 // Utilities
@@ -485,5 +503,12 @@ document.addEventListener('keydown',(e)=>{if((e.metaKey||e.ctrlKey)&&e.key==='k'
 <button class="modal-btn" onclick="closeNoteModal()" data-i18n="cancel">取消</button>
 <button class="modal-btn primary" onclick="saveNoteModal()" data-i18n="save_note">保存</button>
 </div></div></div>
+<!-- Context Menu -->
+<div class="context-menu hidden" id="ctxMenu">
+<div class="ctx-item" onclick="ctxOpenNote()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> 添加/编辑备注</div>
+<div class="ctx-item" onclick="ctxCopyURL()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 复制路径</div>
+<div class="ctx-separator"></div>
+<div class="ctx-item" onclick="ctxFilterHost()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg> 按此站点过滤</div>
+</div>
 </body>
 </html>

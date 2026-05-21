@@ -171,7 +171,7 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 }
 
 // List 获取请求列表（分页 + 过滤）
-func (s *Store) List(method, search string, errorOnly bool, limit, offset int) ([]models.RequestListItem, int, error) {
+func (s *Store) List(method, search, host string, errorOnly bool, limit, offset int) ([]models.RequestListItem, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -182,7 +182,10 @@ func (s *Store) List(method, search string, errorOnly bool, limit, offset int) (
 		where = append(where, "method = ?")
 		args = append(args, method)
 	}
-	if search != "" {
+	if host != "" {
+		where = append(where, "host = ?")
+		args = append(args, host)
+	} else if search != "" {
 		where = append(where, "(url LIKE ? OR host LIKE ? OR CAST(status_code AS TEXT) LIKE ?)")
 		pattern := "%" + search + "%"
 		args = append(args, pattern, pattern, pattern)
