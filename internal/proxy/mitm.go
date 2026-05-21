@@ -20,15 +20,20 @@ func GenerateCA(org string) (certPEM, keyPEM []byte, err error) {
 		return nil, nil, fmt.Errorf("generate key: %w", err)
 	}
 
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		serialNumber = big.NewInt(time.Now().UnixNano())
+	}
+
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{org},
 			CommonName:   org + " MITM CA",
 		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().AddDate(10, 0, 0),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		NotBefore: time.Now().Add(-24 * time.Hour),
+		NotAfter:  time.Now().AddDate(10, 0, 0),
+		KeyUsage:  x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		MaxPathLenZero:        true,
@@ -65,7 +70,6 @@ func LoadOrGenerateCA(certDir string) (certPEM, keyPEM []byte, err error) {
 		return certPEM, keyPEM, nil
 	}
 
-	// 生成新证书
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		return nil, nil, fmt.Errorf("mkdir certs: %w", err)
 	}
@@ -82,8 +86,38 @@ func LoadOrGenerateCA(certDir string) (certPEM, keyPEM []byte, err error) {
 		return nil, nil, fmt.Errorf("write key: %w", err)
 	}
 
-	fmt.Printf("[mitm] CA 证书已生成: %s\n", certPath)
-	fmt.Printf("[mitm] 安装此证书到系统信任根以解密 HTTPS 流量\n")
+	printInstallGuide(certPath)
 
 	return certPEM, keyPEM, nil
+}
+
+func printInstallGuide(certPath string) {
+	msg := `
+============================================================
+  CA 证书已生成，需要安装才能解密 HTTPS 流量
+============================================================
+
+  macOS 安装步骤:
+  1. 双击打开证书文件:
+     open ` + certPath + `
+  2. 钥匙串访问 -> 选择 系统 钥匙串
+  3. 双击已添加的证书 -> 展开 信任 部分
+  4. 使用此证书时 -> 选择 始终信任
+  5. 关闭窗口，输入密码确认
+
+  命令行快速安装:
+  sudo security add-trusted-cert -d -r trustRoot \
+    -k /Library/Keychains/System.keychain \
+    ` + certPath + `
+
+  Windows:
+  certutil -addstore Root ` + certPath + `
+
+  Linux:
+  sudo cp ` + certPath + ` /usr/local/share/ca-certificates/
+  sudo update-ca-certificates
+
+============================================================
+`
+	fmt.Print(msg)
 }

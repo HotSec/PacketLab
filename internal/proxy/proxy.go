@@ -135,21 +135,22 @@ func (s *Server) setupHandlers() {
 		return resp
 	})
 
-	// CONNECT 处理器（HTTPS 隧道 — MITM 未启用时记录）
+	// CONNECT 处理器
 	s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		if !s.mitmEnabled {
-			captured := &models.CapturedRequest{
-				Method:     "CONNECT",
-				URL:        "https://" + host,
-				Host:       host,
-				Path:       "/",
-				Protocol:   "HTTPS",
-				IsHTTPS:    true,
-				ReqHeaders: map[string]string{"Host": host},
-				CapturedAt: time.Now(),
-			}
-			s.batchWriter.Enqueue(captured)
+		// 始终记录 CONNECT 隧道信息
+		// MITM 成功时 OnRequest 会另外产生解密后的 HTTP 记录
+		captured := &models.CapturedRequest{
+			Method:     "CONNECT",
+			URL:        "https://" + host,
+			Host:       host,
+			Path:       "/",
+			Protocol:   "HTTPS",
+			IsHTTPS:    true,
+			ReqHeaders: map[string]string{"Host": host},
+			CapturedAt: time.Now(),
 		}
+		s.batchWriter.Enqueue(captured)
+
 		return goproxy.OkConnect, host
 	})
 }
