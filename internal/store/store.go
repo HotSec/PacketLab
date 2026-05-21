@@ -397,12 +397,16 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// 去端口：httpbin.org:443 → httpbin.org，解决 host 精确匹配不到非 CONNECT 请求的问题
+	hostNoPort := stripPort(host)
+
 	// 查询该 host 下所有不同路径+方法的组合，及出现次数和状态码分布
+	// 同时匹配原始 host 和去端口后的 host
 	rows, err := s.db.Query(
 		`SELECT path, method, COUNT(*) as cnt, status_code
-		 FROM requests WHERE host = ? AND path != '' AND method != 'CONNECT'
+		 FROM requests WHERE (host = ? OR host = ?) AND path != '' AND method != 'CONNECT'
 		 GROUP BY path, method, status_code
-		 ORDER BY path, method`, host,
+		 ORDER BY path, method`, host, hostNoPort,
 	)
 	if err != nil {
 		return nil, err
@@ -428,9 +432,9 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 		pathMethods[path][method].statuses[status] += cnt
 	}
 
-	// 加载备注
+	// 加载备注 — 同样匹配原始 host 和去端口后的 host
 	notesMap := make(map[string]models.APINote)
-	noteRows, err := s.db.Query("SELECT path, method, note, id FROM api_notes WHERE host = ?", host)
+	noteRows, err := s.db.Query("SELECT path, method, note, id FROM api_notes WHERE host = ? OR host = ?", host, hostNoPort)
 	if err == nil {
 		defer noteRows.Close()
 		for noteRows.Next() {
@@ -558,6 +562,17 @@ func insertPath(node *APIMapNode, parts []string, fullPath string, methods map[s
 	} else {
 		insertPath(child, remaining, fullPath, methods, notesMap)
 	}
+}
+
+func stripPort(host string) string {
+	// 去掉末尾端口号，如 httpbin.org:443 → httpbin.org
+	if idx := strings.LastIndex(host, ":"); idx > 0 {
+		// 排除 IPv6 [::1] 的情况
+		if !strings.HasPrefix(host, "[") {
+			return host[:idx]
+		}
+	}
+	return host
 }
 
 func splitPath(path string) []string {
