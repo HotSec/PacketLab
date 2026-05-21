@@ -404,7 +404,7 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 	// 同时匹配原始 host 和去端口后的 host
 	rows, err := s.db.Query(
 		`SELECT path, method, COUNT(*) as cnt, status_code
-		 FROM requests WHERE (host = ? OR host = ?) AND path != '' AND method != 'CONNECT'
+		 FROM requests WHERE (host = ? OR host = ?) AND path != ''
 		 GROUP BY path, method, status_code
 		 ORDER BY path, method`, host, hostNoPort,
 	)
@@ -453,6 +453,26 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 	}
 
 	for path, methods := range pathMethods {
+		// 根路径 / 直接附加到 root 节点
+		if path == "/" {
+			root.IsLeaf = true
+			root.Count = 0
+			root.Methods = []string{}
+			root.Statuses = make(map[int]int)
+			for method, info := range methods {
+				root.Methods = append(root.Methods, method)
+				root.Count += info.count
+				for s, c := range info.statuses {
+					root.Statuses[s] += c
+				}
+				key := path + "|" + method
+				if note, ok := notesMap[key]; ok {
+					root.Note = note.Note
+					root.NoteID = note.ID
+				}
+			}
+			continue
+		}
 		parts := splitPath(path)
 		insertPath(root, parts, path, methods, notesMap)
 	}
@@ -472,8 +492,16 @@ func aggregateNodeStats(node *APIMapNode) {
 		aggregateNodeStats(child)
 	}
 
+	// 如果节点有子节点，则不再是叶子节点
+	if len(node.Children) > 0 {
+		node.IsLeaf = false
+	}
+
 	// 聚合子节点数据到当前节点
 	methodSet := make(map[string]bool)
+	for _, m := range node.Methods {
+		methodSet[m] = true
+	}
 	for _, child := range node.Children {
 		for _, m := range child.Methods {
 			if !methodSet[m] {
