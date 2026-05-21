@@ -144,6 +144,7 @@ func (h *wsHub) broadcast(req *models.CapturedRequest) {
 	select {
 	case h.broadcastCh <- req:
 	default:
+		slog.Warn("ws broadcast channel full, dropping message", "url", req.URL)
 	}
 }
 

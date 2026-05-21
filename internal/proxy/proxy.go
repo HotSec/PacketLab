@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"packetlab/internal/api"
 	"packetlab/internal/models"
 	"packetlab/internal/store"
 
@@ -88,7 +89,7 @@ func (s *Server) setupHandlers() {
 			Path:       req.URL.Path,
 			Protocol:   req.Proto,
 			IsHTTPS:    req.URL.Scheme == "https",
-			ReqHeaders: flattenHeaders(req.Header),
+			ReqHeaders: api.FlattenHeaders(req.Header),
 			CapturedAt: time.Now(),
 		}
 		if req.Body != nil {
@@ -126,7 +127,7 @@ func (s *Server) setupHandlers() {
 
 		captured.StatusCode = resp.StatusCode
 		captured.Protocol = resp.Proto
-		captured.ResHeaders = flattenHeaders(resp.Header)
+		captured.ResHeaders = api.FlattenHeaders(resp.Header)
 		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
 
 		// 读取响应体（完整转发，捕获最多 64KB）
@@ -202,17 +203,6 @@ func (s *Server) IsRunning() bool {
 // Port 代理端口
 func (s *Server) Port() int {
 	return s.port
-}
-
-// flattenHeaders 将 http.Header 转为 map[string]string（取第一个值）
-func flattenHeaders(h http.Header) map[string]string {
-	result := make(map[string]string)
-	for k, v := range h {
-		if len(v) > 0 {
-			result[k] = v[0]
-		}
-	}
-	return result
 }
 
 func portToAddr(port int) string { return ":" + strconv.Itoa(port) }

@@ -666,14 +666,14 @@ func doResend(req *models.ResendRequest, insecure bool) (*resendResult, error) {
 		Path:       parsedURL.Path,
 		Proto:      resp.Proto,
 		IsHTTPS:    isHTTPS,
-		ResHeaders: flattenHeaders(resp.Header),
+		ResHeaders: FlattenHeaders(resp.Header),
 		ResBody:    string(respBody),
 		DurationMs: time.Since(startTime).Milliseconds(),
 		SizeBytes:  int64(len(respBody)),
 	}, nil
 }
 
-func flattenHeaders(h http.Header) map[string]string {
+func FlattenHeaders(h http.Header) map[string]string {
 	result := make(map[string]string)
 	for k, v := range h {
 		if len(v) > 0 {

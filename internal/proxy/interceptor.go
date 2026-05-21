@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"packetlab/internal/api"
 	"packetlab/internal/models"
 
 	"github.com/elazarl/goproxy"
@@ -76,7 +77,7 @@ func (it *Interceptor) GetPending() []models.PendingRequest {
 			URL:       p.req.URL.String(),
 			Host:      p.req.URL.Host,
 			Path:      p.req.URL.Path,
-			Headers:   flattenHeaders(p.req.Header),
+			Headers:   api.FlattenHeaders(p.req.Header),
 			Body:      readBody(p.req),
 			Timestamp: p.createdAt,
 			Age:       time.Since(p.createdAt).Seconds(),
@@ -151,7 +152,7 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			URL:       req.URL.String(),
 			Host:      req.URL.Host,
 			Path:      req.URL.Path,
-			Headers:   flattenHeaders(req.Header),
+			Headers:   api.FlattenHeaders(req.Header),
 			Body:      readBody(req),
 			Timestamp: pr.createdAt,
 		})

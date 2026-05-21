@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -29,16 +30,25 @@ func New(dbPath string) (*Store, error) {
 	// 主连接用于写操作
 	db.SetMaxOpenConns(1)
 	db.SetConnMaxLifetime(0)
-	db.Exec("PRAGMA journal_mode=WAL")
-	db.Exec("PRAGMA synchronous=NORMAL")
-	db.Exec("PRAGMA cache_size=-8000")
-	db.Exec("PRAGMA busy_timeout=5000")
+	for _, p := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA cache_size=-8000",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := db.Exec(p); err != nil {
+			slog.Warn("PRAGMA failed", "pragma", p, "error", err)
+		}
+	}
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+
+	// 初始化只读连接（利用 WAL 并发读）
+	s.initReadConn(dbPath)
 
 	return s, nil
 }
@@ -206,8 +216,9 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 		args = append(args, method)
 	}
 	if host != "" {
-		where = append(where, "host = ?")
-		args = append(args, host)
+		where = append(where, "(host = ? OR host LIKE ? || ':%')")
+		hostNoPort := stripPort(host)
+		args = append(args, host, hostNoPort)
 	} else if search != "" {
 		where = append(where, "(url LIKE ? OR host LIKE ? OR CAST(status_code AS TEXT) LIKE ?)")
 		pattern := "%" + search + "%"
@@ -353,7 +364,7 @@ func (s *Store) GetAPINotes() ([]models.APINote, error) {
 
 	rows, err := s.db.Query("SELECT id, host, path, method, note, created_at, updated_at FROM api_notes ORDER BY host, path")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query notes: %w", err)
 	}
 	defer rows.Close()
 
