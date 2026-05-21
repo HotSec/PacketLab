@@ -382,7 +382,7 @@ type APIMapNode struct {
 	Statuses map[int]int   `json:"statuses,omitempty"`
 	Note     string        `json:"note,omitempty"`
 	NoteID   int64         `json:"note_id,omitempty"`
-	Children []*APIMapNode `json:"children,omitempty"`
+	Children []*APIMapNode `json:"children"` // 必须始终输出，空时输出 [] 而非省略
 	IsLeaf   bool          `json:"is_leaf"`
 }
 
