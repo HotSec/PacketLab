@@ -1,4 +1,4 @@
-# PacketLab V3 开发计划
+# PacketLab V3 开发计划 (v2 — 已审查修复)
 
 ## 概览
 
@@ -14,23 +14,23 @@
 
 | 决策项 | 选择 | 理由 |
 |--------|------|------|
-| 抓包库 | `google/gopacket` + `libpcap` | Go 生态最成熟的包捕获库，支持 BPF 过滤 |
-| TCP 重组 | `gopacket/tcpassembly` | 内置 TCP 流重组，处理重传/乱序 |
-| HTTP 解析 | 自实现轻量解析器 | 只需 Method/URL/Headers/Body，无需完整 HTTP 语义 |
-| 进程关联 (macOS) | `lsof -i tcp -n -P` 轮询 + 缓存 | 无需 root 守护进程，用户级可运行 |
-| 进程关联 (Linux) | `/proc/net/tcp` + `/proc/<pid>/fd` | 内核暴露，零外部依赖 |
-| 进程关联 (Windows) | `netstat -ano` + Windows API | 仅 WSL/非优先支持 |
+| 抓包库 | `google/gopacket` + `pcap` (CGO) | macOS 预装 libpcap，Linux `apt install libpcap-dev` |
+| TCP 重组 | `gopacket/tcpassembly`，限制 1000 并发流 | 内置重组，`StreamPool` 控制内存 |
+| HTTP 解析 | 自实现轻量解析器 | 只需 Method/URL/Headers/Body |
+| 进程关联 | **连接建立时立即查询** `lsof -i tcp -n -P -p <PID>` | ~~不支持轮询~~ 按需查，不遗漏短连接 |
+| 进程缓存 | `sync.Map[addr]ProcInfo`，30s TTL | 避免频繁 fork lsof |
+| 降级模式 | 进程关联失败 → 留空，不影响抓包 | 非关键功能 |
 
 ### 新增模块
 
 ```
 internal/capture/
   engine.go         # CaptureEngine — 主入口，管理抓包生命周期
-  tcp_stream.go     # TCP 流重组工厂 (tcpassembly)
+  tcp_stream.go     # TCP 流重组工厂 (tcpassembly.StreamPool)
   http_extract.go   # HTTP 请求/响应从 TCP 流中提取
-  process.go        # 进程信息解析 + IP:端口 → PID 映射缓存
-  process_darwin.go # macOS lsof 实现
-  process_linux.go  # Linux /proc 实现
+  process.go        # ProcessResolver 接口 + 缓存
+  process_darwin.go # macOS lsof 实现 (OnDemand)
+  process_linux.go  # Linux /proc/net 实现 (OnDemand)
 ```
 
 ### 数据模型扩展
@@ -40,87 +40,89 @@ internal/capture/
 type ProcessInfo struct {
     PID     int    `json:"pid"`
     Name    string `json:"name"`
-    Cmdline string `json:"cmdline"`
+    Cmdline string `json:"cmdline,omitempty"`
 }
 
 // CapturedRequest 新增字段
 Process      *ProcessInfo `json:"process,omitempty"`
 CaptureMode  string       `json:"capture_mode"` // "proxy" | "nic"
-Interface    string       `json:"interface,omitempty"`  // 网卡名
+Interface    string       `json:"interface,omitempty"`
 ```
 
-### 进程关联流程
+### 进程关联流程（已修复）
 
 ```
-┌─────────────┐    定期轮询(5s)    ┌──────────────┐
-│  lsof /     │ ◄─────────────── │  ProcessCache │
-│  /proc/net  │     PID, Name     │  IP:Port→Proc │
-└─────────────┘                   └──────┬───────┘
-                                         │ 查询
-┌─────────────┐    TCP 流              ┌─▼──────────┐
-│  网卡       │ ────► gopacket ──────► │ HTTP 提取   │
-│  (en0/eth0) │    重组+解析           │ + 关联进程   │
-└─────────────┘                        └──────┬──────┘
-                                              │
-                                         ┌────▼─────┐
-                                         │ BatchWriter│
-                                         │  + WS 广播 │
-                                         └──────────┘
+新连接到达(srcIP:srcPort, dstIP:dstPort)
+  │
+  ├─ ProcessCache.Get(addr) → 命中? 直接返回
+  │
+  └─ 未命中:
+       ├─ macOS: lsof -i tcp -n -P -sTCP:ESTABLISHED | grep <port>
+       ├─ Linux: 读 /proc/net/tcp → inode → /proc/*/fd/* → comm
+       └─ 结果存入 ProcessCache (TTL 30s)
 ```
 
-### 实现阶段
-
-| 阶段 | 内容 | 产出 |
-|------|------|------|
-| P1 | gopacket 抓包 + BPF 过滤 `tcp port 80 or tcp port 443` | `engine.go` + `--capture` 参数 |
-| P2 | TCP 流重组 + HTTP 请求/响应提取 | `tcp_stream.go` + `http_extract.go` |
-| P3 | macOS 进程关联 (lsof) | `process_darwin.go` |
-| P4 | Linux 进程关联 (/proc) | `process_linux.go` |
-| P5 | 前端显示进程列 + 网卡选择器 | `index.html` 扩展 |
-
-### 新建 CLI 参数
+### 新增 CLI 参数
 
 ```
---capture            启用网卡抓包
---capture-iface eth0 指定网卡（默认自动检测）
---capture-bpf "tcp port 80 or tcp port 443"  BPF 过滤表达式
+--capture              启用网卡抓包
+--capture-iface en0    指定网卡（默认自动检测活跃网卡）
+--capture-bpf "..."    BPF 过滤（默认 tcp port 80 or tcp port 443）
 ```
 
 ### 关键技术点
 
-1. **HTTPS 限制**：网卡抓包只能看到 CONNECT 握手 (SNI hostname)，无法解密 HTTPS 内容。协议列标注 `(encrypted)`。
-2. **进程关联时效**：5 秒轮询窗口可能错过短连接。使用连接开始时立即查询 + 定期刷新策略。
-3. **性能**：BPF 在内核层过滤，用户态只处理 HTTP 端口流量。每连接 goroutine 处理 TCP 流。
+1. **HTTPS 限制**：网卡抓包只看 CONNECT 握手 (SNI hostname)，不解密。记录标注 `(encrypted)`。
+2. **按需查进程**：连接建立时立即查询，不依赖轮询。短连接不会遗漏。
+3. **BPF 内核过滤**：用户态仅处理 HTTP 端口数据，降低 CPU 开销。
+4. **流池限制**：最多 1000 并发 TCP 流，超出丢弃最老的 idle 流。
 
 ### 新增 API 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/capture/status` | 抓包状态（运行中/停止/网卡） |
-| `GET` | `/api/capture/interfaces` | 可用网卡列表 |
-| `POST` | `/api/capture/start` | 启动抓包 `{interface:"en0"}` |
+| `GET` | `/api/capture/status` | 抓包状态、网卡名、已捕获数 |
+| `GET` | `/api/capture/interfaces` | 可用网卡列表 (ifconfig) |
+| `POST` | `/api/capture/start` | 启动 `{interface:"en0", bpf:"..."}` |
 | `POST` | `/api/capture/stop` | 停止抓包 |
 
 ---
 
 ## 功能 2：代理拦截模式（自动/手动）
 
-### 架构决策
+### 架构决策（已修复）
 
 | 决策项 | 选择 | 理由 |
 |--------|------|------|
-| 拦截实现 | goproxy OnRequest 返回 nil 暂停 | Handler 内阻塞等待用户决定 |
-| 状态机 | Pending → Allowed/Blocked | 简单二态 + 超时 |
-| 超时策略 | 手动模式 30s 后自动放过 | 避免浏览器卡死 |
+| 拦截实现 | **channel 阻塞等待** | ~~goproxy 不支持暂停~~ Handler 内用 channel 阻塞，API 写入 channel 唤醒 |
+| 状态机 | Pending → Allowed/Blocked/Timeout | 三终态 |
+| 超时策略 | **15s 后自动放过**（可配） | ~~30s 太长~~ 浏览器默认 30s，留余量 |
+| 持久化 | 规则存 SQLite `intercept_rules` 表 | 重启不丢失 |
+| 模式持久化 | SQLite `settings` 表 `key='intercept_mode'` | 重启记忆 |
 | 前端通知 | WebSocket `intercept_request` 消息 | 复用现有 WS 通道 |
-| 规则引擎 | Host/Path/Method 白名单 + 黑名单 | 自动模式下的精确控制 |
 
-### 新增模块
+### 拦截实现（已修复）
 
-```
-internal/proxy/
-  interceptor.go  # Interceptor — 拦截控制器
-  rules.go        # RuleEngine — 规则匹配
+```go
+// 每个待审请求一个 channel
+type pendingReq struct {
+    req     *http.Request
+    result  chan bool  // true=allow, false=block
+    timer   *time.Timer
+}
+
+// OnRequest handler 中
+if mode == "manual" {
+    ch := make(chan bool, 1)
+    interceptor.enqueue(req, ch)   // 推入队列 + WS 通知
+    select {
+    case allow := <-ch:            // 等待用户决定
+        if allow { /* 转发 */ }
+        else { return nil, goproxy.NewResponse(r, "text/plain", 403, "Blocked") }
+    case <-time.After(15*time.Second):
+        // 超时自动放过
+    }
+}
 ```
 
 ### 拦截流程
@@ -128,27 +130,57 @@ internal/proxy/
 ```
 浏览器 → 代理 → OnRequest
                    │
-                   ├─ 模式=auto ──► RuleEngine.Match(req)
+                   ├─ mode=auto ──► RuleEngine(host, path, method)
                    │                   │
                    │              ┌────┴────┐
-                   │           match?    no match?
-                   │              │          │
-                   │          转发请求   放行(自动)
+                   │           match    no match
+                   │              │         │
+                   │           规则动作   放行
                    │
-                   └─ 模式=manual ──► 推入待审队列 → WS通知前端
-                                            │
-                                      用户点击 Allow/Block
-                                            │
-                                     ┌──────┴──────┐
-                                  Allow          Block
-                                     │              │
-                                 转发请求      返回 403
+                   └─ mode=manual ──► pendingReq{ch, 15s timer}
+                                          │
+                                     WS notify 前端
+                                          │
+                                    user click Allow/Block
+                                          │
+                                     ch <- true/false
+                                          │
+                                     转发 / 403
 ```
 
-### 数据模型
+### 数据库迁移
+
+```sql
+-- store.go migrate() 新增
+CREATE TABLE IF NOT EXISTS intercept_rules (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern TEXT NOT NULL,    -- host 或 host/path 模式
+    action  TEXT NOT NULL DEFAULT 'allow',  -- allow | block
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto');
+```
+
+### 数据模型（已修复）
 
 ```go
-// PendingRequest 待审批请求
+// InterceptRule — 持久化到 SQLite
+type InterceptRule struct {
+    ID        int64     `json:"id"`
+    Pattern   string    `json:"pattern"` // "example.com" | "*.example.com/api/*"
+    Action    string    `json:"action"`  // "allow" | "block"
+    Enabled   bool      `json:"enabled"`
+    CreatedAt time.Time `json:"created_at"`
+}
+
+// PendingRequest — 内存中，不持久化
 type PendingRequest struct {
     ID        string            `json:"id"`
     Method    string            `json:"method"`
@@ -156,51 +188,44 @@ type PendingRequest struct {
     Host      string            `json:"host"`
     Headers   map[string]string `json:"headers"`
     Timestamp time.Time         `json:"timestamp"`
+    Age       float64           `json:"age_sec"` // 已等待秒数
 }
+```
 
-// InterceptAction 用户操作
-type InterceptAction struct {
-    RequestID string `json:"request_id"`
-    Action    string `json:"action"` // "allow" | "block"
-}
+### 规则匹配逻辑
 
-// InterceptRule 规则
-type InterceptRule struct {
-    ID      int64  `json:"id"`
-    Pattern string `json:"pattern"` // host:port 或 url 匹配模式
-    Type    string `json:"type"`    // "allow" | "block"
-    Enabled bool   `json:"enabled"`
-}
+```
+输入: host="api.example.com", path="/v1/users", method="GET"
+
+规则匹配优先级:
+1. 精确 host 匹配: "api.example.com"
+2. 通配 host 匹配: "*.example.com" (后缀匹配)
+3. host+path 前缀: "api.example.com/v1/*" (前缀匹配)
+
+匹配到的第一条规则决定 action。
+无匹配 → 默认放行 (allow)。
 ```
 
 ### 新增 API 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/intercept/mode` | 当前模式 (`auto`/`manual`) |
-| `POST` | `/api/intercept/mode` | 切换模式 `{mode:"manual"}` |
-| `GET` | `/api/intercept/pending` | 待审批请求列表 |
-| `POST` | `/api/intercept/action` | 审批操作 `{request_id, action}` |
+| `GET` | `/api/intercept/mode` | 当前模式 `{"mode":"auto"}` |
+| `POST` | `/api/intercept/mode` | 切换 `{"mode":"manual"}` → 持久化 |
+| `GET` | `/api/intercept/pending` | 待审列表 `[{id,method,url,host,age_sec}]` |
+| `POST` | `/api/intercept/action` | `{"request_id":"x","action":"allow\|block"}` |
 | `GET` | `/api/intercept/rules` | 规则列表 |
-| `POST` | `/api/intercept/rules` | 添加规则 |
+| `POST` | `/api/intercept/rules` | 添加 `{"pattern":"...","action":"allow\|block"}` |
+| `PUT` | `/api/intercept/rules/:id` | 更新 `{"enabled":false}` |
 | `DELETE` | `/api/intercept/rules/:id` | 删除规则 |
 
 ### WebSocket 消息
 
 ```json
-// 新待审请求
-{"type": "intercept_request", "data": {"id":"...", "method":"GET", "url":"...", "host":"..."}}
-
-// 请求已过期
-{"type": "intercept_timeout", "data": {"request_id":"..."}}
+{"type":"intercept_request","data":{"id":"req_abc","method":"GET","url":"https://api.example.com/v1/users","host":"api.example.com","age_sec":0.5}}
+{"type":"intercept_timeout","data":{"request_id":"req_abc"}}
+{"type":"intercept_resolved","data":{"request_id":"req_abc","action":"allow"}}
 ```
-
-### 前端扩展
-
-1. 顶部工具栏增加「模式切换」按钮：自动 ↔ 手动
-2. 手动模式下弹出「待审队列」区域（底部或侧边栏）
-3. 每个待审请求显示 Method/URL/Host + Allow/Block 按钮
-4. 规则管理面板（可折叠）
 
 ---
 
@@ -210,49 +235,53 @@ type InterceptRule struct {
 traffic-capture-tool/
 ├── cmd/proxy/main.go
 ├── internal/
-│   ├── proxy/           # 代理核心 (v2)
+│   ├── proxy/              # 代理核心
 │   │   ├── proxy.go
 │   │   ├── mitm.go
 │   │   ├── batch.go
-│   │   ├── interceptor.go    # [new] 拦截控制器
-│   │   └── rules.go          # [new] 规则引擎
-│   ├── capture/              # [new] 网卡抓包模块
+│   │   ├── interceptor.go  # [new] 拦截控制器 (channel 阻塞)
+│   │   └── rules.go        # [new] 规则引擎 (通配匹配)
+│   ├── capture/            # [new] 网卡抓包
 │   │   ├── engine.go
-│   │   ├── tcp_stream.go
+│   │   ├── tcp_stream.go   # TCP 流重组 (tcpassembly)
 │   │   ├── http_extract.go
-│   │   ├── process.go
+│   │   ├── process.go      # ProcessResolver 接口 + 缓存
 │   │   ├── process_darwin.go
 │   │   └── process_linux.go
-│   ├── api/             # REST + WebSocket
+│   ├── api/
 │   │   ├── server.go
 │   │   └── ws.go
-│   ├── store/           # SQLite
-│   │   └── store.go
+│   ├── store/
+│   │   └── store.go        # + intercept_rules + settings 表
 │   └── models/
-│       └── models.go
+│       └── models.go       # + ProcessInfo, InterceptRule, PendingRequest
 ├── cmd/proxy/web/index.html
-├── go.mod
-├── go.sum
-└── README.md
+├── go.mod / go.sum
+├── README.md
+└── V3_PLAN.md
 ```
 
 ## 实施优先级
 
-| 优先级 | 功能 | 原因 |
-|--------|------|------|
-| P0 | 拦截模式（自动/手动） | 纯内存逻辑，不改动现有架构 |
-| P1 | 拦截规则引擎 | 自动模式核心，白名单/黑名单 |
-| P2 | 前端拦截 UI | 待审队列 + 操作按钮 |
-| P3 | gopacket 网卡抓包 | 需要 libpcap 依赖 |
-| P4 | TCP 流重组 + HTTP 提取 | 复杂但核心 |
-| P5 | 进程关联 (macOS) | lsof 轮询实现 |
-| P6 | 进程关联 (Linux) | /proc 实现 |
+| 优先级 | 功能 | 依赖 | 预估 |
+|--------|------|------|------|
+| P0 | 拦截控制器 (channel阻塞) | 无 | 200行 |
+| P0 | `settings` 表 + 模式持久化 | store.go migration | 30行 |
+| P1 | 规则引擎 + `intercept_rules` 表 | store.go CRUD | 150行 |
+| P1 | 拦截 API 端点 | server.go 新增路由 | 100行 |
+| P2 | WebSocket 推送待审请求 | ws.go 新增消息类型 | 50行 |
+| P2 | 前端拦截 UI (待审面板) | index.html | 200行 |
+| P3 | gopacket 引擎 + TCP 重组 | go get gopacket | 400行 |
+| P4 | HTTP 流提取 | 自实现解析器 | 200行 |
+| P5 | 进程关联 (macOS + Linux) | lsof | 150行 |
 
-## 风险与限制
+## 与 V2 相比的关键修复
 
-| 风险 | 缓解 |
-|------|------|
-| gopacket 需要 libpcap C 依赖 | 使用 CGO_ENABLED=1 编译；提供 Homebrew 安装指引 |
-| TCP 重组内存开销 | 限制并发流数 + 流超时清理 |
-| 进程关联准确性 | 仅关联 IP:Port 映射，不保证 100% 准确 |
-| 手动拦截阻塞浏览器 | 30s 超时自动放过，可配置 |
+| 问题 | V2 原方案 | V2 修复后 |
+|------|----------|----------|
+| 拦截实现 | `return nil → 拒绝` | channel 阻塞 + 超时放过 |
+| 超时 | 30s | 15s (浏览器 30s 留余量) |
+| 进程关联 | 5s 轮询错过短连接 | 连接时即时查询 + 30s 缓存 |
+| 规则持久化 | 未提及 | SQLite `intercept_rules` 表 |
+| 模式持久化 | 未提及 | SQLite `settings` 表 |
+| 规则匹配 | 未定义 | 精确 → 通配 → 前缀 优先级 |

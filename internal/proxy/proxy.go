@@ -232,7 +232,7 @@ func shouldMITM(host string) bool {
 		}
 	}
 	// 精确匹配或包含
-	for _, kw := range []string{"telemetry", "events.data", "vortex.data", "settings-win.data"} {
+	for _, kw := range []string{"telemetry", "vortex.data", "settings-win.data"} {
 		if strings.Contains(host, kw) {
 			return false
 		}
