@@ -496,21 +496,26 @@ function filterHostDropdown() {
 async function loadAPIMap() {
   const host = document.getElementById('apimapHostSelect').value;
   if (!host) return;
+  let success = false;
   try {
     const tree = await apiGet('/api/apimap?host=' + encodeURIComponent(host));
     renderAPIMapTree(tree);
+    success = true;
   } catch (e) {
     console.warn('loadAPIMap failed:', e);
     document.getElementById('apimapTree').innerHTML =
       '<div style="padding:20px;color:var(--red);font-size:12px;text-align:center">Failed to load API map</div>';
   }
-  currentHost = host;
-  document.getElementById('searchInput').value = '';
-  currentFilter = 'all';
-  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-  const allBtn = document.querySelector('[data-filter="all"]');
-  if (allBtn) allBtn.classList.add('active');
-  loadRequests();
+  // 仅在成功时联动请求列表过滤，避免失败时错误清空
+  if (success) {
+    currentHost = host;
+    document.getElementById('searchInput').value = '';
+    currentFilter = 'all';
+    document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+    const allBtn = document.querySelector('[data-filter="all"]');
+    if (allBtn) allBtn.classList.add('active');
+    loadRequests();
+  }
 }
 
 function renderAPIMapTree(node) {

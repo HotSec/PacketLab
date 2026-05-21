@@ -321,6 +321,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"running": true,
+		"mode":    "proxy",
 	})
 }
 
@@ -654,7 +655,10 @@ func doResend(req *models.ResendRequest, insecure bool) (*resendResult, error) {
 	defer resp.Body.Close()
 
 	// 限制读取响应体大小
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
+	if err != nil {
+		slog.Warn("resend read response body failed", "url", req.URL, "error", err)
+	}
 
 	return &resendResult{
 		StatusCode: resp.StatusCode,
