@@ -53,6 +53,22 @@ func main() {
 	// 创建 API 服务器
 	apiSrv := api.New(st, frontendHandler)
 
+	// 创建拦截控制器
+	interceptMode, _ := st.GetSetting("intercept_mode")
+	if interceptMode == "" {
+		interceptMode = "auto"
+	}
+	interceptor := proxy.NewInterceptor(15, func(req *models.PendingRequest) {
+		apiSrv.BroadcastIntercept(req)
+	})
+	interceptor.SetMode(interceptMode)
+	// 加载已有规则
+	if rules, err := st.ListRules(); err == nil {
+		interceptor.SetRules(rules)
+	}
+	// 暴露给 API
+	apiSrv.SetInterceptor(interceptor)
+
 	// 代理回调：捕获到新请求时通过 API WebSocket 广播
 	onCapture := func(req *models.CapturedRequest) {
 		apiSrv.BroadcastCapture(req)
@@ -75,7 +91,7 @@ func main() {
 
 	// 启动代理
 	if !*noProxy {
-		proxySrv := proxy.New(*proxyPort, st, caCert, caKey, onCapture)
+		proxySrv := proxy.New(*proxyPort, st, caCert, caKey, onCapture, interceptor)
 
 		go func() {
 			log.Printf("[proxy] 启动代理: :%d", *proxyPort)

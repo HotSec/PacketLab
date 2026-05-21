@@ -24,6 +24,7 @@ type Server struct {
 	proxy       *goproxy.ProxyHttpServer
 	store       *store.Store
 	batchWriter *BatchWriter
+	interceptor *Interceptor
 	onCapture   OnCapture
 	mu          sync.RWMutex
 	running     bool
@@ -32,7 +33,7 @@ type Server struct {
 }
 
 // New 创建代理服务器
-func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture) *Server {
+func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture, interceptor *Interceptor) *Server {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
 
@@ -42,6 +43,7 @@ func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture) *
 		proxy:       proxy,
 		store:       st,
 		batchWriter: bw,
+		interceptor: interceptor,
 		onCapture:   onCapture,
 		port:        port,
 	}
@@ -75,6 +77,13 @@ func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture) *
 func (s *Server) setupHandlers() {
 	// 请求处理器 — 记录请求信息
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		// 拦截检查（manual 模式会阻塞等待）
+		if s.interceptor != nil {
+			return s.interceptor.Handle(req, ctx, func(r *http.Request) {
+				_ = r // captured elsewhere
+			})
+		}
+
 		captured := &models.CapturedRequest{
 			Method:     req.Method,
 			URL:        req.URL.String(),

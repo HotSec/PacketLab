@@ -144,6 +144,22 @@ func (h *wsHub) broadcast(req *models.CapturedRequest) {
 	select {
 	case h.broadcastCh <- req:
 	default:
-		// 通道满则丢弃
+	}
+}
+
+// broadcastIntercept 广播待审批请求
+func (h *wsHub) broadcastIntercept(req *models.PendingRequest) {
+	msg, err := json.Marshal(map[string]interface{}{
+		"type": "intercept_request",
+		"data": req,
+	})
+	if err != nil {
+		return
+	}
+	for client := range h.clients {
+		select {
+		case client.send <- msg:
+		default:
+		}
 	}
 }

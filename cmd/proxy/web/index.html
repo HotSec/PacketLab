@@ -41,6 +41,19 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .capture-btn:hover{background:var(--bg-hover)}
 .capture-btn:active{transform:scale(.97)}
 .capture-btn.recording{background:var(--red-muted);border-color:var(--red);color:var(--red)}
+.mode-indicator{font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;flex-shrink:0}
+.mode-auto{background:var(--green-muted);color:var(--green)}
+.mode-manual{background:var(--yellow-muted);color:var(--yellow)}
+.pending-queue{max-height:200px;overflow-y:auto;border-bottom:1px solid var(--border-subtle);display:none}
+.pending-item{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:11px;border-bottom:1px solid var(--border-subtle);animation:listFadeIn .2s ease}
+.pending-item-url{flex:1;font-family:var(--font-mono);font-size:10px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pending-actions{display:flex;gap:3px;flex-shrink:0}
+.pending-btn{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .1s}
+.pending-btn.allow{background:var(--green-muted);color:var(--green);border-color:var(--green)}
+.pending-btn.drop{background:var(--red-muted);color:var(--red);border-color:var(--red)}
+.pending-btn.modify{background:var(--blue-muted);color:var(--blue);border-color:var(--blue)}
+.pending-btn:hover{filter:brightness(1.2)}
+.pending-timer{font-size:9px;color:var(--text-tertiary);min-width:36px;text-align:right;flex-shrink:0}
 .capture-btn .ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,.2);transform:scale(0);animation:ripple .6s ease-out;pointer-events:none}
 @keyframes ripple{to{transform:scale(4);opacity:0}}
 .capture-dot{width:7px;height:7px;border-radius:50%;background:var(--text-tertiary);transition:all .15s}
@@ -263,9 +276,13 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <button class="icon-btn" data-i18n-title="clear_history" title="清空记录" onclick="clearHistory()">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
 </button>
+<button class="icon-btn" onclick="toggleInterceptMode()" id="interceptModeBtn" data-i18n-title="intercept_mode" title="拦截模式: 自动">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+</button>
+<span class="mode-indicator mode-auto" id="modeIndicator">AUTO</span>
 </div>
 </header>
-
+<div class="pending-queue" id="pendingQueue"></div>
 <div class="main-content">
 <aside class="request-panel" id="requestPanel">
 <div class="panel-header"><span class="panel-title" data-i18n="request_list">请求列表</span><span class="panel-count" id="requestCount">0</span></div>
@@ -413,7 +430,7 @@ function f(b){if(!b||b===0)return'0 B';if(b<1024)return b+' B';if(b<1048576)retu
 // =============================================
 // WebSocket
 // =============================================
-function connectWebSocket(){if(ws&&ws.readyState===WebSocket.OPEN)return;const p=location.protocol==='https:'?'wss:':'ws:';try{ws=new WebSocket(`${p}//${location.host}/ws`);ws.onopen=()=>{if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null}};ws.onmessage=(e)=>{try{const m=JSON.parse(e.data);if(m.type==='new_request'&&m.data){requests.unshift(n(m.data));renderRequestList()}}catch{}};ws.onclose=()=>{wsReconnectTimer=setTimeout(connectWebSocket,3000)};ws.onerror=()=>ws.close()}catch{wsReconnectTimer=setTimeout(connectWebSocket,3000)}}
+function connectWebSocket(){if(ws&&ws.readyState===WebSocket.OPEN)return;const p=location.protocol==='https:'?'wss:':'ws:';try{ws=new WebSocket(`${p}//${location.host}/ws`);ws.onopen=()=>{if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null}};ws.onmessage=(e)=>{try{const m=JSON.parse(e.data);if(m.type==='new_request'&&m.data){requests.unshift(n(m.data));renderRequestList()}if(m.type==='intercept_request'&&m.data){addPendingItem(m.data)}}catch{}};ws.onclose=()=>{wsReconnectTimer=setTimeout(connectWebSocket,3000)};ws.onerror=()=>ws.close()}catch{wsReconnectTimer=setTimeout(connectWebSocket,3000)}}
 
 // =============================================
 // Rendering
@@ -485,6 +502,12 @@ function setFilter(btn,f){currentFilter=f;currentHost='';document.querySelectorA
 function toggleErrorFilter(){errorFilterOnly=!errorFilterOnly;currentHost='';const btn=document.getElementById('errorFilterBtn');if(errorFilterOnly){btn.style.background='var(--red-muted)';btn.style.color='var(--red)';btn.classList.add('active')}else{btn.style.background='transparent';btn.style.color='var(--text-secondary)';btn.classList.remove('active')}loadRequests()}
 function filterRequests(){currentHost='';loadRequests()}
 async function clearHistory(){if(!confirm(t('confirm_clear')))return;try{await apiPost('/api/clear',{});requests=[];requestDetailCache={};selectedRequestId=null;currentHost='';document.getElementById('searchInput').value='';document.getElementById('detailEmpty').style.display='flex';document.getElementById('detailContent').style.display='none';renderRequestList();showToast('success',t('cleared'))}catch(e){showToast('error',t('send_failed')+': '+e.message)}}
+
+// Intercept
+let interceptMode='auto';
+async function toggleInterceptMode(){interceptMode=interceptMode==='auto'?'manual':'auto';try{await apiPost('/api/intercept/mode',{mode:interceptMode});const ind=document.getElementById('modeIndicator');ind.textContent=interceptMode==='auto'?'AUTO':'MANUAL';ind.className='mode-indicator '+(interceptMode==='auto'?'mode-auto':'mode-manual')}catch(e){showToast('error','Mode switch failed')}}
+function addPendingItem(req){const q=document.getElementById('pendingQueue');q.style.display='block';const html=`<div class="pending-item" id="p_${req.id}"><span class="method-badge method-${req.method}">${req.method}</span><span class="pending-item-url">${e(req.host)}${e(req.path||'')}</span><span class="pending-timer">0s</span><div class="pending-actions"><button class="pending-btn allow" onclick="resolveIntercept('${req.id}','allow')">Allow</button><button class="pending-btn drop" onclick="resolveIntercept('${req.id}','drop')">Drop</button><button class="pending-btn modify" onclick="resolveIntercept('${req.id}','modify')">Edit</button></div></div>`;q.insertAdjacentHTML('beforeend',html);setTimeout(()=>{const el=document.getElementById('p_'+req.id);if(el){const timer=el.querySelector('.pending-timer');if(timer)timer.textContent=Math.round((Date.now()-new Date(req.timestamp).getTime())/1000)+'s'}},5000)}
+async function resolveIntercept(id,action){if(action==='modify'){const url=prompt('Edit URL / Method / Body (format: METHOD URL\\nBody)');if(!url)return;const parts=url.split('\n');const[method,newUrl]=parts[0].split(' ');const body=parts.slice(1).join('\n')||'';await apiPost('/api/intercept/action',{request_id:id,action:'modify',method:method||'GET',url:newUrl,new_headers:{},new_body:body})}else{await apiPost('/api/intercept/action',{request_id:id,action:action})}document.getElementById('p_'+id)?.remove();if(!document.querySelector('.pending-item'))document.getElementById('pendingQueue').style.display='none'}
 
 // =============================================
 // Utilities

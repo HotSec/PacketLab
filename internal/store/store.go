@@ -82,6 +82,21 @@ func (s *Store) migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_api_notes_host ON api_notes(host);
+
+	CREATE TABLE IF NOT EXISTS settings (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS intercept_rules (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		pattern    TEXT NOT NULL,
+		action     TEXT NOT NULL DEFAULT 'allow',
+		enabled    INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+
+	INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto');
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -561,4 +576,66 @@ func truncateStr(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s
+}
+
+// ========================================
+// Settings
+// ========================================
+
+func (s *Store) GetSetting(key string) (string, error) {
+	var val string
+	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return val, err
+}
+
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", key, value)
+	return err
+}
+
+// ========================================
+// Intercept Rules
+// ========================================
+
+func (s *Store) SaveRule(rule *models.InterceptRule) (int64, error) {
+	result, err := s.db.Exec(
+		"INSERT INTO intercept_rules (pattern, action, enabled) VALUES (?, ?, ?)",
+		rule.Pattern, rule.Action, boolToInt(rule.Enabled),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (s *Store) ListRules() ([]models.InterceptRule, error) {
+	rows, err := s.db.Query("SELECT id, pattern, action, enabled, created_at FROM intercept_rules ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rules []models.InterceptRule
+	for rows.Next() {
+		var r models.InterceptRule
+		var ca string
+		if err := rows.Scan(&r.ID, &r.Pattern, &r.Action, &r.Enabled, &ca); err != nil {
+			continue
+		}
+		r.CreatedAt, _ = time.Parse(time.RFC3339, ca)
+		rules = append(rules, r)
+	}
+	return rules, nil
+}
+
+func (s *Store) UpdateRule(id int64, enabled bool) error {
+	_, err := s.db.Exec("UPDATE intercept_rules SET enabled = ? WHERE id = ?", boolToInt(enabled), id)
+	return err
+}
+
+func (s *Store) DeleteRule(id int64) error {
+	_, err := s.db.Exec("DELETE FROM intercept_rules WHERE id = ?", id)
+	return err
 }

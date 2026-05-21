@@ -20,10 +20,17 @@ import (
 
 // Server API 服务器
 type Server struct {
-	store    *store.Store
-	hub      *wsHub
-	mux      *http.ServeMux
-	frontend http.Handler // 前端静态文件
+	store       *store.Store
+	hub         *wsHub
+	mux         *http.ServeMux
+	frontend    http.Handler
+	interceptor interface {
+		GetMode() string
+		SetMode(mode string)
+		GetPending() []models.PendingRequest
+		Resolve(id string, result models.InterceptResult) error
+		SetRules(rules []models.InterceptRule)
+	}
 }
 
 // New 创建 API 服务器
@@ -59,6 +66,13 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/apimap/notes/", s.handleAPINoteByID)
 	mux.HandleFunc("/api/apimap/hosts", s.handleAPIHosts)
 
+	// 拦截
+	mux.HandleFunc("/api/intercept/mode", s.handleInterceptMode)
+	mux.HandleFunc("/api/intercept/pending", s.handleInterceptPending)
+	mux.HandleFunc("/api/intercept/action", s.handleInterceptAction)
+	mux.HandleFunc("/api/intercept/rules", s.handleInterceptRules)
+	mux.HandleFunc("/api/intercept/rules/", s.handleInterceptRuleByID)
+
 	// WebSocket
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
@@ -73,6 +87,22 @@ func (s *Server) setupRoutes() {
 // Handler 返回 HTTP Handler（含 CORS）
 func (s *Server) Handler() http.Handler {
 	return corsMiddleware(s.mux)
+}
+
+// SetInterceptor 设置拦截控制器引用
+func (s *Server) SetInterceptor(interceptor interface {
+	GetMode() string
+	SetMode(mode string)
+	GetPending() []models.PendingRequest
+	Resolve(id string, result models.InterceptResult) error
+	SetRules(rules []models.InterceptRule)
+}) {
+	s.interceptor = interceptor
+}
+
+// BroadcastIntercept 广播待审批请求到 WebSocket
+func (s *Server) BroadcastIntercept(req *models.PendingRequest) {
+	s.hub.broadcastIntercept(req)
 }
 
 // BroadcastCapture 广播新捕获的请求
@@ -330,6 +360,123 @@ func (s *Server) handleAPINoteByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ========================================
+// Intercept
+// ========================================
+
+func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
+	if s.interceptor == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Interceptor not available"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]string{"mode": s.interceptor.GetMode()})
+	case http.MethodPost:
+		var body struct{ Mode string `json:"mode"` }
+		json.NewDecoder(r.Body).Decode(&body)
+		if body.Mode != "auto" && body.Mode != "manual" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be auto or manual"})
+			return
+		}
+		s.interceptor.SetMode(body.Mode)
+		s.store.SetSetting("intercept_mode", body.Mode)
+		writeJSON(w, http.StatusOK, map[string]string{"mode": body.Mode})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleInterceptPending(w http.ResponseWriter, r *http.Request) {
+	if s.interceptor == nil {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.interceptor.GetPending())
+}
+
+func (s *Server) handleInterceptAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.interceptor == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Interceptor not available"})
+		return
+	}
+	var result models.InterceptResult
+	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if err := s.interceptor.Resolve(result.RequestID, result); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
+}
+
+func (s *Server) handleInterceptRules(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rules, err := s.store.ListRules()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if rules == nil { rules = []models.InterceptRule{} }
+		writeJSON(w, http.StatusOK, rules)
+	case http.MethodPost:
+		var rule models.InterceptRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+			return
+		}
+		id, err := s.store.SaveRule(&rule)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		rule.ID = id
+		if s.interceptor != nil {
+			rules, _ := s.store.ListRules()
+			s.interceptor.SetRules(rules)
+		}
+		writeJSON(w, http.StatusCreated, rule)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Path[len("/api/intercept/rules/"):]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var body struct{ Enabled bool `json:"enabled"` }
+		json.NewDecoder(r.Body).Decode(&body)
+		s.store.UpdateRule(id, body.Enabled)
+		if s.interceptor != nil {
+			rules, _ := s.store.ListRules()
+			s.interceptor.SetRules(rules)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	case http.MethodDelete:
+		s.store.DeleteRule(id)
+		if s.interceptor != nil {
+			rules, _ := s.store.ListRules()
+			s.interceptor.SetRules(rules)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ========================================

@@ -70,3 +70,35 @@ type APINoteRequest struct {
 	Method string `json:"method"`
 	Note   string `json:"note"`
 }
+
+// InterceptRule 拦截规则
+type InterceptRule struct {
+	ID        int64     `json:"id"`
+	Pattern   string    `json:"pattern"`
+	Action    string    `json:"action"` // "allow" | "block"
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// InterceptResult 拦截操作结果
+type InterceptResult struct {
+	RequestID  string            `json:"request_id"`
+	Action     string            `json:"action"` // "allow" | "drop" | "modify"
+	Method     string            `json:"method,omitempty"`
+	URL        string            `json:"url,omitempty"`
+	NewHeaders map[string]string `json:"new_headers,omitempty"`
+	NewBody    string            `json:"new_body,omitempty"`
+}
+
+// PendingRequest 待审批请求
+type PendingRequest struct {
+	ID        string            `json:"id"`
+	Method    string            `json:"method"`
+	URL       string            `json:"url"`
+	Host      string            `json:"host"`
+	Path      string            `json:"path"`
+	Headers   map[string]string `json:"headers"`
+	Body      string            `json:"body"`
+	Timestamp time.Time         `json:"timestamp"`
+	Age       float64           `json:"age_sec"`
+}
