@@ -151,21 +151,8 @@ func (s *Server) setupHandlers() {
 		return resp
 	})
 
-	// CONNECT 处理器
+	// CONNECT 处理器 — 不记录隧道信息，仅处理 MITM 决策
 	s.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		// 始终记录 CONNECT 隧道信息
-		captured := &models.CapturedRequest{
-			Method:     "CONNECT",
-			URL:        "https://" + host,
-			Host:       host,
-			Path:       "/",
-			Protocol:   "HTTPS",
-			IsHTTPS:    true,
-			ReqHeaders: map[string]string{"Host": host},
-			CapturedAt: time.Now(),
-		}
-		s.batchWriter.Enqueue(captured)
-
 		// 跳过非 HTTP 协议的 MITM（WNS、WebSocket、自定义 TCP 等）
 		if !shouldMITM(host) {
 			return &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: nil}, host
