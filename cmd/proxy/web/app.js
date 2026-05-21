@@ -688,13 +688,14 @@ function addPendingToList(p) {
 async function interceptAction(action) {
   if (!selectedRequestId || !pendingRequests[selectedRequestId]) return;
   const p = pendingRequests[selectedRequestId];
-  if (action === 'allow') {
-    const m = document.getElementById('resendMethod').value, u = document.getElementById('resendUrl').value,
-      b = document.getElementById('resendBody').value;
-    const hrs = document.querySelectorAll('#resendHeaders .kv-editor-row'); const h = {};
-    hrs.forEach(r => { const k = r.querySelector('.header-key').value.trim(); const v = r.querySelector('.header-value').value.trim(); if (k) h[k] = v; });
-    try { await apiPost('/api/intercept/action', { request_id: selectedRequestId, action: 'allow', method: m, url: u, new_headers: h, new_body: b }); } catch (e) { showToast('error', 'Intercept failed'); }
-  } else { try { await apiPost('/api/intercept/action', { request_id: selectedRequestId, action }); } catch (e) { showToast('error', 'Intercept failed'); } }
+  // 始终读取当前表单值，以 'modify' 发送（允许未修改时原样转发）
+  const m = document.getElementById('resendMethod').value, u = document.getElementById('resendUrl').value,
+    b = document.getElementById('resendBody').value;
+  const hrs = document.querySelectorAll('#resendHeaders .kv-editor-row'); const h = {};
+  hrs.forEach(r => { const k = r.querySelector('.header-key').value.trim(); const v = r.querySelector('.header-value').value.trim(); if (k) h[k] = v; });
+  try {
+    await apiPost('/api/intercept/action', { request_id: selectedRequestId, action: action === 'drop' ? 'drop' : 'modify', method: m, url: u, new_headers: h, new_body: b });
+  } catch (e) { showToast('error', 'Intercept failed'); }
   removePending(selectedRequestId);
 }
 function removePending(id) {

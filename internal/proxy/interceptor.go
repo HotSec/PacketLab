@@ -162,24 +162,27 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	case r := <-ch:
 		timer.Stop()
 		switch r.Action {
-		case "allow":
+		case "allow", "modify":
+			// 有修改内容时构建新请求，否则原样转发
+			if r.Method != "" || r.URL != "" {
+				newReq, err := http.NewRequest(r.Method, r.URL, strings.NewReader(r.NewBody))
+				if err != nil {
+					return nil, goproxy.NewResponse(req, "text/plain", 400, "Invalid modified request")
+				}
+				for k, v := range r.NewHeaders {
+					newReq.Header.Set(k, v)
+				}
+				if newReq.Header.Get("User-Agent") == "" {
+					newReq.Header.Set("User-Agent", "PacketLab/1.0")
+				}
+				storeFunc(newReq)
+				return newReq, nil
+			}
+			// 无修改，原样转发
 			storeFunc(req)
 			return req, nil
 		case "drop":
 			return nil, goproxy.NewResponse(req, "text/plain", 403, "Blocked by PacketLab")
-		case "modify":
-			newReq, err := http.NewRequest(r.Method, r.URL, strings.NewReader(r.NewBody))
-			if err != nil {
-				return nil, goproxy.NewResponse(req, "text/plain", 400, "Invalid modified request")
-			}
-			for k, v := range r.NewHeaders {
-				newReq.Header.Set(k, v)
-			}
-			if newReq.Header.Get("User-Agent") == "" {
-				newReq.Header.Set("User-Agent", "PacketLab/1.0")
-			}
-			storeFunc(newReq)
-			return newReq, nil
 		default:
 			return req, nil
 		}
