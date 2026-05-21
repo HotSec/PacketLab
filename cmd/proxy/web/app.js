@@ -513,16 +513,20 @@ async function loadAPIMap() {
 
 function renderAPIMapTree(node) {
   const container = document.getElementById('apimapTree');
-  if (!node || (!node.children || node.children.length === 0) && !node.isLeaf) {
+  if (!node || (!node.children || node.children.length === 0) && !node.isLeaf && (!node.methods || node.methods.length === 0)) {
     container.innerHTML = '<div style="padding:20px;color:var(--text-tertiary);font-size:12px;text-align:center">No endpoints captured</div>';
     return;
   }
-  // 根节点本身是叶子（无子节点），直接渲染
-  if (node.isLeaf) {
-    container.innerHTML = renderLeaf(node, 0);
-    return;
+  let html = '';
+  // 渲染根节点自身的方法（如 CONNECT /）
+  if (node.methods && node.methods.length > 0) {
+    html += renderLeaf(node, 0);
   }
-  container.innerHTML = renderTreeNode(node, 0);
+  // 渲染子树
+  if (node.children && node.children.length > 0) {
+    html += renderTreeNode(node, 0);
+  }
+  container.innerHTML = html;
 }
 
 function renderTreeNode(node, depth) {

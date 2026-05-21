@@ -198,6 +198,8 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .tree-leaf-path{font-family:var(--font-mono);color:var(--text-primary);margin-left:8px;font-size:11px;word-break:break-all}
 .tree-leaf-status{font-size:9px;margin-left:auto;display:flex;gap:2px;flex-shrink:0}
 .tree-leaf-status span{padding:1px 4px;border-radius:3px;line-height:1.5}
+.tree-leaf-status .s0{background:var(--text-tertiary);color:var(--text-primary);opacity:.6}
+.tree-leaf-status .s1{background:var(--cyan-muted);color:var(--cyan)}
 .tree-leaf-status .s2{background:var(--green-muted);color:var(--green)}.tree-leaf-status .s3{background:var(--blue-muted);color:var(--blue)}
 .tree-leaf-status .s4{background:var(--yellow-muted);color:var(--yellow)}.tree-leaf-status .s5{background:var(--red-muted);color:var(--red)}
 .tree-leaf-note{font-size:10px;color:var(--accent);margin-left:6px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;flex-shrink:0}
