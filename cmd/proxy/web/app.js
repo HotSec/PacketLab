@@ -215,7 +215,7 @@ function renderRequestList() {
       const ts = r.captured_at ? new Date(r.captured_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
       const pcls = r.is_pending ? ' pending' : '';
       const pendingExtra = r.is_pending ? '<span class="pending-tag">PENDING</span>' : '';
-      const isActive = selectedRequestId === r.id ? ' active' : '';
+      const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
       return `<div class="request-item${pcls}${isActive}" style="--i:${i}" data-id="${r.id}">
         <span class="method-badge method-${r.method}">${r.method}</span>
         <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
@@ -238,7 +238,7 @@ function renderRequestList() {
 
 async function selectRequest(id) {
   selectedRequestId = id;
-  let r = requests.find(r => r.id === id);
+  let r = requests.find(r => String(r.id) === id);
   if (!r) return;
   const isPending = !!r.is_pending;
 
@@ -251,7 +251,7 @@ async function selectRequest(id) {
       const d = await loadRequestDetail(id);
       if (d) {
         r = normalizeReq(d);
-        const idx = requests.findIndex(x => x.id === id);
+        const idx = requests.findIndex(x => String(x.id) === id);
         if (idx >= 0) requests[idx] = r;
         if (!r) return;
       }
