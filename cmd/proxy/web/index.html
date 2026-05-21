@@ -460,7 +460,7 @@ switchTab(isPending?'resend':'request');renderRequestList();
 if(r.host)syncAPIMapHost(r.host)}
 function syncAPIMapHost(host){const sel=document.getElementById('apimapHostSelect');for(let i=0;i<sel.options.length;i++){if(sel.options[i].value===host){sel.value=host;if(document.getElementById('tab-apimap').classList.contains('active'))loadAPIMap();return}}}
 
-function switchTab(tab){activeTab=tab;document.querySelectorAll('.detail-tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));const t=document.querySelector(`.detail-tab[data-tab="${tab}"]`);t.classList.add('active');document.getElementById(`tab-${tab}`).classList.add('active');const ind=document.getElementById('tabIndicator');ind.style.left=t.offsetLeft+'px';ind.style.width=t.offsetWidth+'px';if(tab==='apimap')loadAPIMapHosts()}
+function switchTab(tab){activeTab=tab;document.querySelectorAll('.detail-tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));const bt=document.querySelector(`.detail-tab[data-tab="${tab}"]`);bt.classList.add('active');document.getElementById(`tab-${tab}`).classList.add('active');void bt.offsetWidth;const ind=document.getElementById('tabIndicator');ind.style.left=bt.offsetLeft+'px';ind.style.width=bt.offsetWidth+'px';if(tab==='apimap')loadAPIMapHosts()}
 
 // =============================================
 // Resend
