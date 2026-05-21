@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,17 +207,30 @@ func flattenHeaders(h http.Header) map[string]string {
 }
 
 // shouldMITM 判断某 host 是否适合 MITM 解密
-// 跳过已知的非 HTTP 协议主机（WNS、WebSocket-only、自定义 TCP 等）
+// 跳过已知的非 HTTP 协议主机（WNS、遥测、自定义 TCP 等）
 func shouldMITM(host string) bool {
-	// 已知使用非 HTTP 协议的主机后缀
 	skipSuffixes := []string{
-		".wns.windows.com",    // Windows Push Notification Service
-		".notify.windows.com", // Windows Notification
-		".push.apple.com",     // Apple Push Notification
-		".talk.google.com",    // Google Hangouts
+		".wns.windows.com",        // Windows Push Notification
+		".notify.windows.com",     // Windows Notification
+		".push.apple.com",         // Apple Push Notification
+		".talk.google.com",        // Google Hangouts
+		".events.data.msn.cn",     // Microsoft Telemetry
+		".events.data.msn.com",    // Microsoft Telemetry
+		".events.data.microsoft.com", // Microsoft Telemetry
+		"ntp.msn.cn",              // MSN Time Sync (non-HTTP)
+		"ntp.msn.com",             // MSN Time Sync
+		".telemetry.microsoft.com", // Microsoft Telemetry
+		".vortex.data.microsoft.com", // Microsoft Telemetry
+		".settings.data.microsoft.com", // Microsoft Settings Sync
 	}
 	for _, s := range skipSuffixes {
 		if len(host) >= len(s) && host[len(host)-len(s):] == s {
+			return false
+		}
+	}
+	// 精确匹配或包含
+	for _, kw := range []string{"telemetry", "events.data", "vortex.data", "settings-win.data"} {
+		if strings.Contains(host, kw) {
 			return false
 		}
 	}
