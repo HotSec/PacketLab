@@ -44,16 +44,20 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .mode-indicator{font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;flex-shrink:0}
 .mode-auto{background:var(--green-muted);color:var(--green)}
 .mode-manual{background:var(--yellow-muted);color:var(--yellow)}
-.pending-queue{max-height:200px;overflow-y:auto;border-bottom:1px solid var(--border-subtle);display:none}
-.pending-item{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:11px;border-bottom:1px solid var(--border-subtle);animation:listFadeIn .2s ease}
-.pending-item-url{flex:1;font-family:var(--font-mono);font-size:10px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pending-actions{display:flex;gap:3px;flex-shrink:0}
-.pending-btn{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .1s}
-.pending-btn.allow{background:var(--green-muted);color:var(--green);border-color:var(--green)}
-.pending-btn.drop{background:var(--red-muted);color:var(--red);border-color:var(--red)}
-.pending-btn.modify{background:var(--blue-muted);color:var(--blue);border-color:var(--blue)}
-.pending-btn:hover{filter:brightness(1.2)}
-.pending-timer{font-size:9px;color:var(--text-tertiary);min-width:36px;text-align:right;flex-shrink:0}
+/* Pending intercept item in request list */
+.request-item.pending{border-left-color:var(--yellow);background:var(--yellow-muted)}
+.request-item.pending.active{background:var(--yellow-muted);filter:brightness(1.15)}
+.request-item.pending .pending-tag{margin-left:auto;padding:1px 6px;border-radius:3px;background:var(--yellow);color:var(--bg-root);font-size:8px;font-weight:700;flex-shrink:0}
+.request-item.pending .pending-timer{font-size:9px;font-family:var(--font-mono);color:var(--yellow);flex-shrink:0;margin-left:4px}
+/* Intercept action bar */
+.intercept-bar{display:none;align-items:center;gap:8px;padding:8px 14px;background:var(--yellow-muted);border-bottom:1px solid var(--border-subtle)}
+.intercept-bar.show{display:flex}
+.intercept-actions{display:flex;gap:6px;margin-left:auto}
+.intercept-btn{display:flex;align-items:center;gap:4px;padding:5px 14px;border-radius:var(--radius-sm);font-size:12px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .12s}
+.intercept-btn:active{transform:scale(.97)}
+.intercept-btn.allow{background:var(--green);color:#fff}
+.intercept-btn.drop{background:var(--red);color:#fff}
+.intercept-btn:hover{filter:brightness(1.15)}
 .capture-btn .ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,.2);transform:scale(0);animation:ripple .6s ease-out;pointer-events:none}
 @keyframes ripple{to{transform:scale(4);opacity:0}}
 .capture-dot{width:7px;height:7px;border-radius:50%;background:var(--text-tertiary);transition:all .15s}
@@ -282,7 +286,6 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <span class="mode-indicator mode-auto" id="modeIndicator">AUTO</span>
 </div>
 </header>
-<div class="pending-queue" id="pendingQueue"></div>
 <div class="main-content">
 <aside class="request-panel" id="requestPanel">
 <div class="panel-header"><span class="panel-title" data-i18n="request_list">请求列表</span><span class="panel-count" id="requestCount">0</span></div>
@@ -306,6 +309,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <div class="detail-empty-sub" data-i18n="select_request_hint">从左侧请求列表点击任意条目，即可查看请求/响应详情、编辑并重发</div>
 </div>
 <div class="detail-content" id="detailContent" style="display:none">
+<div class="intercept-bar" id="interceptBar"><span style="font-size:11px;font-weight:600;color:var(--yellow)">⏳ Pending — review this request</span><div class="intercept-actions"><button class="intercept-btn allow" onclick="interceptAction('allow')">Allow</button><button class="intercept-btn drop" onclick="interceptAction('drop')">Drop</button></div></div>
 <div class="detail-tabs">
 <button class="detail-tab active" data-tab="request" onclick="switchTab('request')" data-i18n="tab_request">请求</button>
 <button class="detail-tab" data-tab="response" onclick="switchTab('response')" data-i18n="tab_response">响应</button>
@@ -430,27 +434,29 @@ function f(b){if(!b||b===0)return'0 B';if(b<1024)return b+' B';if(b<1048576)retu
 // =============================================
 // WebSocket
 // =============================================
-function connectWebSocket(){if(ws&&ws.readyState===WebSocket.OPEN)return;const p=location.protocol==='https:'?'wss:':'ws:';try{ws=new WebSocket(`${p}//${location.host}/ws`);ws.onopen=()=>{if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null}};ws.onmessage=(e)=>{try{const m=JSON.parse(e.data);if(m.type==='new_request'&&m.data){requests.unshift(n(m.data));renderRequestList()}if(m.type==='intercept_request'&&m.data){addPendingItem(m.data)}}catch{}};ws.onclose=()=>{wsReconnectTimer=setTimeout(connectWebSocket,3000)};ws.onerror=()=>ws.close()}catch{wsReconnectTimer=setTimeout(connectWebSocket,3000)}}
+function connectWebSocket(){if(ws&&ws.readyState===WebSocket.OPEN)return;const p=location.protocol==='https:'?'wss:':'ws:';try{ws=new WebSocket(`${p}//${location.host}/ws`);ws.onopen=()=>{if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null}};ws.onmessage=(e)=>{try{const m=JSON.parse(e.data);if(m.type==='new_request'&&m.data){requests.unshift(n(m.data));renderRequestList()}if(m.type==='intercept_request'&&m.data){addPendingToList(m.data)}}catch{}};ws.onclose=()=>{wsReconnectTimer=setTimeout(connectWebSocket,3000)};ws.onerror=()=>ws.close()}catch{wsReconnectTimer=setTimeout(connectWebSocket,3000)}}
 
 // =============================================
 // Rendering
 // =============================================
 function renderRequestList(){const list=document.getElementById('requestList');let filtered=requests.filter(r=>{if(currentFilter!=='all'&&r.method!==currentFilter)return false;if(errorFilterOnly&&r.status<400)return false;const q=document.getElementById('searchInput').value.toLowerCase();if(q){return r.url.toLowerCase().includes(q)||r.method.toLowerCase().includes(q)||String(r.status).includes(q)}return true});
-if(filtered.length===0){list.innerHTML=`<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 16px;color:var(--text-tertiary);gap:10px;animation:listFadeIn .4s ease"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".4"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><span style="font-size:13px">${t('no_requests')}</span></div>`}else{list.innerHTML=filtered.map((r,i)=>{const sc=`status-${Math.floor(r.status/100)}xx`;const ts=r.captured_at?new Date(r.captured_at).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';return`<div class="request-item ${selectedRequestId===r.id?'active':''}" style="--i:${i}" onclick="selectRequest(${r.id})"><span class="method-badge method-${r.method}">${r.method}</span><span class="status-code ${sc}">${r.status}</span><div class="request-info"><span class="request-url">${e(r.url)}</span><div class="request-meta"><span>${e(r.host)}</span><span>${ts}</span><span>${r.size}</span></div></div><span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span></div>`}).join('')}
+if(filtered.length===0){list.innerHTML=`<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 16px;color:var(--text-tertiary);gap:10px;animation:listFadeIn .4s ease"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".4"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><span style="font-size:13px">${t('no_requests')}</span></div>`}else{list.innerHTML=filtered.map((r,i)=>{const sc=r.is_pending?'':`status-${Math.floor(r.status/100)}xx`;const ts=r.captured_at?new Date(r.captured_at).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';const pcls=r.is_pending?' pending':'';const pendingExtra=r.is_pending?`<span class="pending-tag">PENDING</span>`:'';return`<div class="request-item ${pcls} ${selectedRequestId===r.id?'active':''}" style="--i:${i}" onclick="selectRequest('${r.id}')"><span class="method-badge method-${r.method}">${r.method}</span><span class="status-code ${sc}">${r.is_pending?'—':r.status}</span><div class="request-info"><span class="request-url">${e(r.url)}</span><div class="request-meta"><span>${e(r.host)}</span><span>${ts}</span><span>${r.size}</span></div></div>${pendingExtra}<span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span></div>`}).join('')}
 document.getElementById('requestCount').textContent=`${requests.length} ${t('recordings')}`;loadStats()}
 
-async function selectRequest(id){selectedRequestId=id;let r=requests.find(r=>r.id===id);if(!r||!r.reqHeaders||Object.keys(r.reqHeaders).length===0){const d=await loadRequestDetail(id);if(d){r=n(d);const idx=requests.findIndex(x=>x.id===id);if(idx>=0)requests[idx]=r}}if(!r)return;
+async function selectRequest(id){selectedRequestId=id;let r=requests.find(r=>r.id===id);if(!r)return;const isPending=!!r.is_pending;
+if(!isPending&&(!r.reqHeaders||Object.keys(r.reqHeaders).length===0)){const d=await loadRequestDetail(id);if(d){r=n(d);const idx=requests.findIndex(x=>x.id===id);if(idx>=0)requests[idx]=r;if(!r)return}}
 document.getElementById('detailEmpty').style.display='none';document.getElementById('detailContent').style.display='flex';
+document.getElementById('interceptBar').classList.toggle('show',isPending);
 document.getElementById('req-url').textContent=r.url||'';document.getElementById('req-method').textContent=r.method||'';document.getElementById('req-host').textContent=r.host||'';document.getElementById('req-protocol').textContent=r.protocol||'';
 const rh=r.reqHeaders||{};document.getElementById('req-headers-content').textContent=Object.keys(rh).length>0?Object.entries(rh).map(([k,v])=>`${k}: ${v}`).join('\n'):t('empty');
 document.getElementById('req-body-content').textContent=r.reqBody||t('empty');
-const sc=`status-${Math.floor(r.status/100)}xx`;document.getElementById('res-status').innerHTML=`<span class="status-code ${sc}">${r.status}</span>`;document.getElementById('res-time').textContent=r.time||`${r.duration_ms||0}ms`;document.getElementById('res-size').textContent=r.size||'0 B';
+const sc=`status-${Math.floor(r.status/100)}xx`;document.getElementById('res-status').innerHTML=isPending?'—':`<span class="status-code ${sc}">${r.status}</span>`;document.getElementById('res-time').textContent=r.time||'';document.getElementById('res-size').textContent=r.size||'';
 const rsh=r.resHeaders||{};document.getElementById('res-headers-content').textContent=Object.keys(rsh).length>0?Object.entries(rsh).map(([k,v])=>`${k}: ${v}`).join('\n'):t('empty');
 document.getElementById('res-body-content').textContent=r.resBody||t('empty');
 document.getElementById('resendMethod').value=r.method||'GET';document.getElementById('resendUrl').value=r.url||'';document.getElementById('resendBody').value=r.reqBody||'';
 const hc=document.getElementById('resendHeaders');hc.innerHTML='';
 if(rh&&Object.keys(rh).length>0){Object.entries(rh).forEach(([k,v])=>addHeaderRow(k,v))}else{addHeaderRow('Host',r.host||'')}
-renderRequestList();
+switchTab(isPending?'resend':'request');renderRequestList();
 if(r.host)syncAPIMapHost(r.host)}
 function syncAPIMapHost(host){const sel=document.getElementById('apimapHostSelect');for(let i=0;i<sel.options.length;i++){if(sel.options[i].value===host){sel.value=host;if(document.getElementById('tab-apimap').classList.contains('active'))loadAPIMap();return}}}
 
@@ -504,10 +510,11 @@ function filterRequests(){currentHost='';loadRequests()}
 async function clearHistory(){if(!confirm(t('confirm_clear')))return;try{await apiPost('/api/clear',{});requests=[];requestDetailCache={};selectedRequestId=null;currentHost='';document.getElementById('searchInput').value='';document.getElementById('detailEmpty').style.display='flex';document.getElementById('detailContent').style.display='none';renderRequestList();showToast('success',t('cleared'))}catch(e){showToast('error',t('send_failed')+': '+e.message)}}
 
 // Intercept
-let interceptMode='auto';
+let interceptMode='auto',pendingRequests={};
 async function toggleInterceptMode(){interceptMode=interceptMode==='auto'?'manual':'auto';try{await apiPost('/api/intercept/mode',{mode:interceptMode});const ind=document.getElementById('modeIndicator');ind.textContent=interceptMode==='auto'?'AUTO':'MANUAL';ind.className='mode-indicator '+(interceptMode==='auto'?'mode-auto':'mode-manual')}catch(e){showToast('error','Mode switch failed')}}
-function addPendingItem(req){const q=document.getElementById('pendingQueue');q.style.display='block';const html=`<div class="pending-item" id="p_${req.id}"><span class="method-badge method-${req.method}">${req.method}</span><span class="pending-item-url">${e(req.host)}${e(req.path||'')}</span><span class="pending-timer">0s</span><div class="pending-actions"><button class="pending-btn allow" onclick="resolveIntercept('${req.id}','allow')">Allow</button><button class="pending-btn drop" onclick="resolveIntercept('${req.id}','drop')">Drop</button><button class="pending-btn modify" onclick="resolveIntercept('${req.id}','modify')">Edit</button></div></div>`;q.insertAdjacentHTML('beforeend',html);setTimeout(()=>{const el=document.getElementById('p_'+req.id);if(el){const timer=el.querySelector('.pending-timer');if(timer)timer.textContent=Math.round((Date.now()-new Date(req.timestamp).getTime())/1000)+'s'}},5000)}
-async function resolveIntercept(id,action){if(action==='modify'){const url=prompt('Edit URL / Method / Body (format: METHOD URL\\nBody)');if(!url)return;const parts=url.split('\n');const[method,newUrl]=parts[0].split(' ');const body=parts.slice(1).join('\n')||'';await apiPost('/api/intercept/action',{request_id:id,action:'modify',method:method||'GET',url:newUrl,new_headers:{},new_body:body})}else{await apiPost('/api/intercept/action',{request_id:id,action:action})}document.getElementById('p_'+id)?.remove();if(!document.querySelector('.pending-item'))document.getElementById('pendingQueue').style.display='none'}
+function addPendingToList(p){pendingRequests[p.id]=p;const r={id:p.id,method:p.method,url:p.url,host:p.host,path:p.path,status:0,reqHeaders:p.headers||{},reqBody:p.body||'',resHeaders:{},resBody:'',protocol:'',is_pending:true,size:'',captured_at:p.timestamp};requests.unshift(r);renderRequestList()}
+async function interceptAction(action){if(!selectedRequestId||!pendingRequests[selectedRequestId])return;const p=pendingRequests[selectedRequestId];if(action==='allow'){const m=document.getElementById('resendMethod').value;const u=document.getElementById('resendUrl').value;const b=document.getElementById('resendBody').value;const hrs=document.querySelectorAll('#resendHeaders .kv-editor-row');const h={};hrs.forEach(r=>{const k=r.querySelector('.header-key').value.trim();const v=r.querySelector('.header-value').value.trim();if(k)h[k]=v});await apiPost('/api/intercept/action',{request_id:selectedRequestId,action:'allow',method:m,url:u,new_headers:h,new_body:b})}else{await apiPost('/api/intercept/action',{request_id:selectedRequestId,action:action})}removePending(selectedRequestId)}
+function removePending(id){delete pendingRequests[id];requests=requests.filter(r=>r.id!==id);selectedRequestId=null;document.getElementById('interceptBar').classList.remove('show');document.getElementById('detailEmpty').style.display='flex';document.getElementById('detailContent').style.display='none';renderRequestList()}
 
 // =============================================
 // Utilities
