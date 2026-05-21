@@ -461,8 +461,8 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	if limit <= 0 || limit > 500 {
+		limit = 100
 	}
 
 	where := "WHERE host != ''"

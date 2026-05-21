@@ -461,21 +461,13 @@ async function sendResend() {
 }
 
 // ── API Map ──────────────────────────────────
-let hostsOffset = 0, hostsTotal = 0, hostsSearch = '';
 
 async function loadAPIMapHosts() {
   const sel = document.getElementById('apimapHostSelect');
-  sel.innerHTML = `<option value="">${t('select_host')}</option>`;
-  hostsOffset = 0; hostsTotal = 0;
-  await loadMoreHosts();
-}
-
-async function loadMoreHosts() {
   try {
-    const r = await apiGet(`/api/apimap/hosts?search=${encodeURIComponent(hostsSearch || '')}&limit=20&offset=${hostsOffset}`);
+    const r = await apiGet('/api/apimap/hosts?limit=500');
     const hosts = r.data || [];
-    hostsTotal = r.total || 0;
-    const sel = document.getElementById('apimapHostSelect');
+    sel.innerHTML = `<option value="">${t('select_host')}</option>`;
     const frag = document.createDocumentFragment();
     hosts.forEach(h => {
       const o = document.createElement('option');
@@ -483,14 +475,21 @@ async function loadMoreHosts() {
       o.textContent = h;
       frag.appendChild(o);
     });
-    if (hostsOffset === 0) { sel.innerHTML = `<option value="">${t('select_host')}</option>`; }
     sel.appendChild(frag);
-    hostsOffset += hosts.length;
-    document.getElementById('hostLoadMore').style.display = hostsOffset < hostsTotal ? 'block' : 'none';
-  } catch (e) { console.warn('loadMoreHosts failed:', e); }
+  } catch (e) {
+    console.warn('loadAPIMapHosts failed:', e);
+    sel.innerHTML = `<option value="">${t('select_host')}</option>`;
+  }
 }
 
-function filterHostDropdown() { hostsSearch = document.getElementById('hostSearchInput').value; hostsOffset = 0; loadMoreHosts(); }
+function filterHostDropdown() {
+  const s = document.getElementById('hostSearchInput').value;
+  const sel = document.getElementById('apimapHostSelect');
+  for (let i = 1; i < sel.options.length; i++) {
+    const opt = sel.options[i];
+    opt.style.display = !s || opt.textContent.toLowerCase().includes(s.toLowerCase()) ? '' : 'none';
+  }
+}
 
 async function loadAPIMap() {
   const host = document.getElementById('apimapHostSelect').value;
@@ -498,7 +497,11 @@ async function loadAPIMap() {
   try {
     const tree = await apiGet('/api/apimap?host=' + encodeURIComponent(host));
     renderAPIMapTree(tree);
-  } catch (e) { console.warn('loadAPIMap failed:', e); }
+  } catch (e) {
+    console.warn('loadAPIMap failed:', e);
+    document.getElementById('apimapTree').innerHTML =
+      '<div style="padding:20px;color:var(--red);font-size:12px;text-align:center">Failed to load API map</div>';
+  }
   currentHost = host;
   document.getElementById('searchInput').value = '';
   currentFilter = 'all';
