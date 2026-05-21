@@ -146,8 +146,9 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 .spin{animation:spin .8s linear infinite}
 /* API Map */
-.api-map-host-select{margin-bottom:10px;display:flex;gap:6px;align-items:center}
-.api-map-host-select select{flex:1;padding:6px 10px;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-input);color:var(--text-primary);font-size:12px;outline:none;font-family:var(--font-mono)}
+.api-map-host-select{margin-bottom:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.api-map-host-select select{flex:1;min-width:160px;padding:6px 10px;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-input);color:var(--text-primary);font-size:12px;outline:none;font-family:var(--font-mono);max-height:200px}
+.api-map-host-select input{flex:1;min-width:120px;padding:6px 10px}
 .method-legend{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:6px 10px;background:var(--bg-surface);border-radius:var(--radius-sm);border:1px solid var(--border-subtle)}
 .method-legend-item{display:flex;align-items:center;gap:3px;font-size:10px;font-weight:600;font-family:var(--font-mono);opacity:.85}
 .method-legend-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
@@ -334,8 +335,10 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <div class="tab-panel" id="tab-apimap">
 <div class="detail-section"><div class="section-label" data-i18n="api_map">API 地图</div>
 <div class="api-map-host-select">
-<select id="apimapHostSelect" onchange="loadAPIMap()"><option value="" data-i18n="select_host">选择站点...</option></select>
+<input type="text" class="url-input" id="hostSearchInput" placeholder="搜索站点..." oninput="filterHostDropdown()" style="flex:1;min-width:140px">
+<select id="apimapHostSelect" onchange="loadAPIMap()" size="1" style="flex:2;min-width:160px"><option value="" data-i18n="select_host">选择站点...</option></select>
 <button class="mini-btn primary" onclick="loadAPIMap()" data-i18n="refresh">刷新</button></div>
+<button class="mini-btn" id="hostLoadMore" onclick="loadMoreHosts()" style="display:none;width:100%;margin-bottom:10px;text-align:center">加载更多站点...</button>
 <div class="method-legend"><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--green)"></span>GET</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--blue)"></span>POST</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--yellow)"></span>PUT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--purple)"></span>PATCH</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--red)"></span>DELETE</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--teal)"></span>HEAD</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--cyan)"></span>OPTIONS</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--orange)"></span>CONNECT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--pink)"></span>TRACE</span></div>
 <div class="api-map-tree" id="apimapTree"></div></div>
 </div>
@@ -447,7 +450,10 @@ try{const result=await apiPost('/api/resend',{method,url,headers,body});requestD
 // =============================================
 // API Map
 // =============================================
-async function loadAPIMapHosts(){try{const hosts=await apiGet('/api/apimap/hosts');const sel=document.getElementById('apimapHostSelect');sel.innerHTML=`<option value="">${t('select_host')}</option>`+hosts.map(h=>`<option value="${e(h)}">${e(h)}</option>`).join('');if(hosts.length>0){sel.value=hosts[0];loadAPIMap()}}catch(e){}}
+async function loadAPIMapHosts(){const sel=document.getElementById('apimapHostSelect');sel.innerHTML=`<option value="">${t('select_host')}</option>`;hostsOffset=0;hostsTotal=0;await loadMoreHosts()}
+async function loadMoreHosts(){try{const r=await apiGet(`/api/apimap/hosts?search=${encodeURIComponent(hostsSearch||'')}&limit=20&offset=${hostsOffset}`);const hosts=r.data||[];hostsTotal=r.total||0;const sel=document.getElementById('apimapHostSelect');const frag=document.createDocumentFragment();hosts.forEach(h=>{const o=document.createElement('option');o.value=h.split(' (')[0];o.textContent=h;frag.appendChild(o)});if(hostsOffset===0){sel.innerHTML=`<option value="">${t('select_host')}</option>`}sel.appendChild(frag);hostsOffset+=hosts.length;document.getElementById('hostLoadMore').style.display=hostsOffset<hostsTotal?'block':'none'}catch(e){}}
+let hostsOffset=0,hostsTotal=0,hostsSearch='';
+function filterHostDropdown(){hostsSearch=document.getElementById('hostSearchInput').value;hostsOffset=0;loadMoreHosts()}
 async function loadAPIMap(){const host=document.getElementById('apimapHostSelect').value;if(!host)return;try{const tree=await apiGet('/api/apimap?host='+encodeURIComponent(host));renderAPIMapTree(tree)}catch(e){}
 // 联动：API地图切换站点时用 host 参数精确过滤
 currentHost=host;document.getElementById('searchInput').value='';currentFilter='all';document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));document.querySelector('[data-filter="all"]').classList.add('active');loadRequests()}

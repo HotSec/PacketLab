@@ -264,9 +264,13 @@ func (s *Server) handleAPIMap(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tree)
 }
 
-// handleAPIHosts GET /api/apimap/hosts
+// handleAPIHosts GET /api/apimap/hosts?search=&limit=&offset=
 func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
-	hosts, err := s.store.ListHosts()
+	search := r.URL.Query().Get("search")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	hosts, total, err := s.store.ListHosts(search, limit, offset)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -274,7 +278,11 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
 	if hosts == nil {
 		hosts = []string{}
 	}
-	writeJSON(w, http.StatusOK, hosts)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"data":   hosts,
+		"total":  total,
+		"offset": offset,
+	})
 }
 
 // handleAPINotes POST /api/apimap/notes (save/update)

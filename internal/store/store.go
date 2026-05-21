@@ -429,26 +429,50 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 	return root, nil
 }
 
-// ListHosts 获取所有捕获过的 host 列表
-func (s *Store) ListHosts() ([]string, error) {
+// ListHosts 获取捕获过的 host 列表（支持搜索 + 分页）
+func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query("SELECT DISTINCT host FROM requests WHERE host != '' ORDER BY COUNT(*) OVER (PARTITION BY host) DESC LIMIT 50")
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	where := "WHERE host != ''"
+	args := []interface{}{}
+	if search != "" {
+		where += " AND host LIKE ?"
+		args = append(args, "%"+search+"%")
+	}
+
+	// 总数
+	var total int
+	countSQL := fmt.Sprintf("SELECT COUNT(DISTINCT host) FROM requests %s", where)
+	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// 分页 — 按请求数降序
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(
+		fmt.Sprintf("SELECT host, COUNT(*) as cnt FROM requests %s GROUP BY host ORDER BY cnt DESC LIMIT ? OFFSET ?", where),
+		args...,
+	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
 	var hosts []string
 	for rows.Next() {
 		var h string
-		if err := rows.Scan(&h); err != nil {
+		var cnt int
+		if err := rows.Scan(&h, &cnt); err != nil {
 			continue
 		}
-		hosts = append(hosts, h)
+		hosts = append(hosts, fmt.Sprintf("%s (%d)", h, cnt))
 	}
-	return hosts, nil
+	return hosts, total, nil
 }
 
 func insertPath(node *APIMapNode, parts []string, fullPath string, methods map[string]*methodInfo, notesMap map[string]models.APINote) {
