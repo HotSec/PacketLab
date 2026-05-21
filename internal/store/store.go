@@ -22,7 +22,7 @@ type Store struct {
 
 // New 创建存储实例
 func New(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-8000&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -34,23 +34,22 @@ func New(dbPath string) (*Store, error) {
 	db.Exec("PRAGMA cache_size=-8000")
 	db.Exec("PRAGMA busy_timeout=5000")
 
-	// 只读连接，利用 WAL 模式实现并发读
-	dbRO, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=5000")
-	if err == nil {
-		dbRO.SetMaxOpenConns(1)
-		dbRO.SetConnMaxLifetime(0)
-	}
-
-	s := &Store{db: db, dbRO: dbRO}
+	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
-		if dbRO != nil {
-			dbRO.Close()
-		}
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	return s, nil
+}
+
+func (s *Store) initReadConn(dbPath string) {
+	dbRO, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	if err == nil {
+		dbRO.SetMaxOpenConns(1)
+		dbRO.SetConnMaxLifetime(0)
+		s.dbRO = dbRO
+	}
 }
 
 // migrate 建表
