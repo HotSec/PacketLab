@@ -406,10 +406,12 @@ function switchTab(tab) {
 }
 
 function syncAPIMapHost(host) {
+  // 去端口匹配: httpbin.org:443 → httpbin.org
+  const baseHost = host.replace(/:(\d+)$/, '');
   const sel = document.getElementById('apimapHostSelect');
   for (let i = 0; i < sel.options.length; i++) {
-    if (sel.options[i].value === host) {
-      sel.value = host;
+    if (sel.options[i].value === baseHost) {
+      sel.value = baseHost;
       if (document.getElementById('tab-apimap').classList.contains('active')) loadAPIMap();
       return;
     }

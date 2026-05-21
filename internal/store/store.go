@@ -401,12 +401,12 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 	hostNoPort := stripPort(host)
 
 	// 查询该 host 下所有不同路径+方法的组合，及出现次数和状态码分布
-	// 同时匹配原始 host 和去端口后的 host
+	// 匹配: 精确host / 去端口host / 去端口host:任意端口（如 httpbin.org → 匹配 httpbin.org:443 等）
 	rows, err := s.db.Query(
 		`SELECT path, method, COUNT(*) as cnt, status_code
-		 FROM requests WHERE (host = ? OR host = ?) AND path != ''
+		 FROM requests WHERE (host = ? OR host = ? OR host LIKE ? || ':%') AND path != ''
 		 GROUP BY path, method, status_code
-		 ORDER BY path, method`, host, hostNoPort,
+		 ORDER BY path, method`, host, hostNoPort, hostNoPort,
 	)
 	if err != nil {
 		return nil, err
@@ -432,9 +432,9 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 		pathMethods[path][method].statuses[status] += cnt
 	}
 
-	// 加载备注 — 同样匹配原始 host 和去端口后的 host
+	// 加载备注 — 同样匹配 host / hostNoPort / hostNoPort:*
 	notesMap := make(map[string]models.APINote)
-	noteRows, err := s.db.Query("SELECT path, method, note, id FROM api_notes WHERE host = ? OR host = ?", host, hostNoPort)
+	noteRows, err := s.db.Query("SELECT path, method, note, id FROM api_notes WHERE host = ? OR host = ? OR host LIKE ? || ':%'", host, hostNoPort, hostNoPort)
 	if err == nil {
 		defer noteRows.Close()
 		for noteRows.Next() {
@@ -555,15 +555,28 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	}
 	defer rows.Close()
 
-	var hosts []string
+	// 去端口后合并: httpbin.org + httpbin.org:443 → httpbin.org (7)
+	hostCounts := make(map[string]int)
+	var hostOrder []string // 保持原始顺序
 	for rows.Next() {
 		var h string
 		var cnt int
 		if err := rows.Scan(&h, &cnt); err != nil {
 			continue
 		}
-		hosts = append(hosts, fmt.Sprintf("%s (%d)", h, cnt))
+		baseHost := stripPort(h)
+		if _, exists := hostCounts[baseHost]; !exists {
+			hostOrder = append(hostOrder, baseHost)
+		}
+		hostCounts[baseHost] += cnt
 	}
+
+	var hosts []string
+	for _, h := range hostOrder {
+		hosts = append(hosts, fmt.Sprintf("%s (%d)", h, hostCounts[h]))
+	}
+	// 更新 total 为去重后的数量
+	total = len(hosts)
 	return hosts, total, nil
 }
 
