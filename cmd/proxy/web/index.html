@@ -13,7 +13,9 @@
 --text-tertiary:#6e7681;--accent:#e8913a;--accent-hover:#f0a254;--accent-muted:rgba(232,145,58,0.12);
 --green:#3fb950;--green-muted:rgba(63,185,80,0.12);--red:#f85149;--red-muted:rgba(248,81,73,0.12);
 --blue:#58a6ff;--blue-muted:rgba(88,166,255,0.12);--yellow:#d2991d;--yellow-muted:rgba(210,153,29,0.12);
---purple:#bc8cff;--purple-muted:rgba(188,140,255,0.12);--cyan:#39d2c0;
+--purple:#bc8cff;--purple-muted:rgba(188,140,255,0.12);--cyan:#39d2c0;--cyan-muted:rgba(57,210,192,0.12);
+--teal:#2dd4bf;--teal-muted:rgba(45,212,191,0.12);--pink:#f472b6;--pink-muted:rgba(244,114,182,0.12);
+--orange:#e8913a;--orange-muted:rgba(232,145,58,0.12);
 }
 [data-theme="light"]{
 --bg-root:#ffffff;--bg-surface:#f6f8fa;--bg-elevated:#ffffff;--bg-hover:#f0f2f5;
@@ -22,7 +24,9 @@
 --text-tertiary:#8b949e;--accent:#d9773e;--accent-hover:#c4652f;--accent-muted:rgba(217,119,62,0.1);
 --green:#1a7f37;--green-muted:rgba(26,127,55,0.1);--red:#cf222e;--red-muted:rgba(207,34,46,0.1);
 --blue:#0969da;--blue-muted:rgba(9,105,218,0.1);--yellow:#9a6700;--yellow-muted:rgba(154,103,0,0.1);
---purple:#8250df;--purple-muted:rgba(130,80,223,0.1);--cyan:#1b7c83;
+--purple:#8250df;--purple-muted:rgba(130,80,223,0.1);--cyan:#1b7c83;--cyan-muted:rgba(27,124,131,0.1);
+--teal:#0d9488;--teal-muted:rgba(13,148,136,0.1);--pink:#be185d;--pink-muted:rgba(190,24,93,0.1);
+--orange:#c2410c;--orange-muted:rgba(194,65,12,0.1);
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg-root);color:var(--text-primary);-webkit-font-smoothing:antialiased;transition:background .3s,color .3s}
@@ -72,8 +76,10 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .method-PUT{background:var(--yellow-muted);color:var(--yellow)}
 .method-PATCH{background:var(--purple-muted);color:var(--purple)}
 .method-DELETE{background:var(--red-muted);color:var(--red)}
-.method-HEAD,.method-OPTIONS{background:rgba(139,148,158,.12);color:var(--text-secondary)}
-.method-CONNECT{background:var(--blue-muted);color:var(--blue)}
+.method-HEAD{background:var(--teal-muted);color:var(--teal)}
+.method-OPTIONS{background:var(--cyan-muted);color:var(--cyan)}
+.method-CONNECT{background:var(--orange-muted);color:var(--orange)}
+.method-TRACE{background:var(--pink-muted);color:var(--pink)}
 .status-code{min-width:36px;font-size:10px;font-weight:600;font-family:var(--font-mono);flex-shrink:0;text-align:center}
 .status-2xx{color:var(--green)}.status-3xx{color:var(--blue)}.status-4xx{color:var(--yellow)}.status-5xx{color:var(--red)}
 .request-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
@@ -150,6 +156,10 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .tree-node-header.border-PUT{border-left-color:var(--yellow)}
 .tree-node-header.border-PATCH{border-left-color:var(--purple)}
 .tree-node-header.border-DELETE{border-left-color:var(--red)}
+.tree-node-header.border-HEAD{border-left-color:var(--teal)}
+.tree-node-header.border-OPTIONS{border-left-color:var(--cyan)}
+.tree-node-header.border-CONNECT{border-left-color:var(--orange)}
+.tree-node-header.border-TRACE{border-left-color:var(--pink)}
 .tree-node-toggle{width:16px;height:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--text-tertiary);transition:transform .15s}
 .tree-node-toggle.open{transform:rotate(90deg)}
 .tree-node-icon{flex-shrink:0}
@@ -164,7 +174,9 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .tree-leaf-row:hover{background:var(--bg-hover)}
 .tree-leaf-row.GET{border-left-color:var(--green)}.tree-leaf-row.POST{border-left-color:var(--blue)}
 .tree-leaf-row.PUT{border-left-color:var(--yellow)}.tree-leaf-row.PATCH{border-left-color:var(--purple)}
-.tree-leaf-row.DELETE{border-left-color:var(--red)}.tree-leaf-row.HEAD,.tree-leaf-row.OPTIONS{border-left-color:var(--text-tertiary)}
+.tree-leaf-row.DELETE{border-left-color:var(--red)}.tree-leaf-row.HEAD{border-left-color:var(--teal)}
+.tree-leaf-row.OPTIONS{border-left-color:var(--cyan)}.tree-leaf-row.CONNECT{border-left-color:var(--orange)}
+.tree-leaf-row.TRACE{border-left-color:var(--pink)}
 .tree-leaf-method{font-family:var(--font-mono);font-weight:700;flex-shrink:0;min-width:52px;font-size:10px;text-align:center}
 .tree-leaf-path{font-family:var(--font-mono);color:var(--text-primary);margin-left:8px;font-size:11px;word-break:break-all}
 .tree-leaf-status{font-size:9px;margin-left:auto;display:flex;gap:2px;flex-shrink:0}
@@ -226,6 +238,9 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <button class="filter-chip" data-filter="POST" onclick="setFilter(this,'POST')">POST</button>
 <button class="filter-chip" data-filter="PUT" onclick="setFilter(this,'PUT')">PUT</button>
 <button class="filter-chip" data-filter="DELETE" onclick="setFilter(this,'DELETE')">DELETE</button>
+<button class="filter-chip" data-filter="PATCH" onclick="setFilter(this,'PATCH')">PATCH</button>
+<button class="filter-chip" data-filter="HEAD" onclick="setFilter(this,'HEAD')">HEAD</button>
+<button class="filter-chip" data-filter="OPTIONS" onclick="setFilter(this,'OPTIONS')">OPTIONS</button>
 </div>
 <div class="request-list" id="requestList"></div>
 </aside>
@@ -268,7 +283,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <div class="tab-panel" id="tab-resend">
 <div class="detail-section"><div class="section-label" data-i18n="edit_request">编辑请求</div>
 <div class="resend-url-row">
-<select class="method-select" id="resendMethod"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option></select>
+<select class="method-select" id="resendMethod"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option><option>CONNECT</option><option>TRACE</option></select>
 <input type="text" class="url-input" id="resendUrl" placeholder="https://api.example.com/endpoint">
 <button class="mini-btn primary" onclick="sendResend()" id="resendBtn">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -284,7 +299,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 <div class="api-map-host-select">
 <select id="apimapHostSelect" onchange="loadAPIMap()"><option value="" data-i18n="select_host">选择站点...</option></select>
 <button class="mini-btn primary" onclick="loadAPIMap()" data-i18n="refresh">刷新</button></div>
-<div class="method-legend"><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--green)"></span>GET</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--blue)"></span>POST</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--yellow)"></span>PUT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--purple)"></span>PATCH</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--red)"></span>DELETE</span></div>
+<div class="method-legend"><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--green)"></span>GET</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--blue)"></span>POST</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--yellow)"></span>PUT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--purple)"></span>PATCH</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--red)"></span>DELETE</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--teal)"></span>HEAD</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--cyan)"></span>OPTIONS</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--orange)"></span>CONNECT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--pink)"></span>TRACE</span></div>
 <div class="api-map-tree" id="apimapTree"></div></div>
 </div>
 </div></div></section></div>
