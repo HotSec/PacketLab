@@ -693,8 +693,8 @@ async function interceptAction(action) {
       b = document.getElementById('resendBody').value;
     const hrs = document.querySelectorAll('#resendHeaders .kv-editor-row'); const h = {};
     hrs.forEach(r => { const k = r.querySelector('.header-key').value.trim(); const v = r.querySelector('.header-value').value.trim(); if (k) h[k] = v; });
-    try { await apiPost('/api/intercept/action', { request_id: selectedRequestId, action: 'allow', method: m, url: u, new_headers: h, new_body: b }); } catch (e) {}
-  } else { try { await apiPost('/api/intercept/action', { request_id: selectedRequestId, action }); } catch (e) {} }
+    try { await apiPost('/api/intercept/action', { request_id: selectedRequestId, action: 'allow', method: m, url: u, new_headers: h, new_body: b }); } catch (e) { showToast('error', 'Intercept failed'); }
+  } else { try { await apiPost('/api/intercept/action', { request_id: selectedRequestId, action }); } catch (e) { showToast('error', 'Intercept failed'); } }
   removePending(selectedRequestId);
 }
 function removePending(id) {
@@ -708,7 +708,7 @@ function removePending(id) {
 // ── Utilities ────────────────────────────────
 function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function escAttr(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-function escJS(s) { return esc(s).replace(/'/g, "\\'").replace(/\\/g, '\\\\'); }
+function escJS(s) { return esc(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
 function copyToClipboard(cid) {
   const el = document.getElementById(cid); const pre = el.querySelector('pre');
   if (!pre) return;

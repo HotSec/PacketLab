@@ -557,7 +557,8 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 
 	// 去端口后合并: httpbin.org + httpbin.org:443 → httpbin.org (7)
 	hostCounts := make(map[string]int)
-	var hostOrder []string // 保持原始顺序
+	var hostOrder []string
+	total = 0
 	for rows.Next() {
 		var h string
 		var cnt int
@@ -567,6 +568,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		baseHost := stripPort(h)
 		if _, exists := hostCounts[baseHost]; !exists {
 			hostOrder = append(hostOrder, baseHost)
+			total++
 		}
 		hostCounts[baseHost] += cnt
 	}
@@ -575,8 +577,6 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	for _, h := range hostOrder {
 		hosts = append(hosts, fmt.Sprintf("%s (%d)", h, hostCounts[h]))
 	}
-	// 更新 total 为去重后的数量
-	total = len(hosts)
 	return hosts, total, nil
 }
 
