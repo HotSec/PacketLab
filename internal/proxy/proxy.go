@@ -78,15 +78,9 @@ func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture, i
 
 // setupHandlers 注册请求/响应处理器
 func (s *Server) setupHandlers() {
-	// 请求处理器 — 记录请求信息
+	// 请求处理器 — 始终记录请求信息，拦截为可选步骤
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		// 拦截检查（manual 模式会阻塞等待）
-		if s.interceptor != nil {
-			return s.interceptor.Handle(req, ctx, func(r *http.Request) {
-				_ = r // captured elsewhere
-			})
-		}
-
+		// 1. 先捕获请求信息（无论是否启用拦截）
 		captured := &models.CapturedRequest{
 			Method:     req.Method,
 			URL:        req.URL.String(),
@@ -97,8 +91,6 @@ func (s *Server) setupHandlers() {
 			ReqHeaders: flattenHeaders(req.Header),
 			CapturedAt: time.Now(),
 		}
-
-		// 读取请求体（完整转发，捕获最多 32KB）
 		if req.Body != nil {
 			bodyBytes, err := io.ReadAll(req.Body)
 			if err == nil && len(bodyBytes) > 0 {
@@ -110,8 +102,14 @@ func (s *Server) setupHandlers() {
 				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
 		}
-
 		ctx.UserData = captured
+
+		// 2. 拦截检查（manual 模式会阻塞等待）
+		if s.interceptor != nil {
+			return s.interceptor.Handle(req, ctx, func(r *http.Request) {
+				_ = r
+			})
+		}
 		return req, nil
 	})
 
