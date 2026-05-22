@@ -578,8 +578,9 @@ function renderLeaf(node, depth) {
 // Context menu
 let ctxPath = '', ctxMethod = '', ctxNote = '', ctxNoteId = 0;
 function leafClick(path, method) {
+  const host = document.getElementById('apimapHostSelect').value;
+  currentHost = host ? host : ''; currentFilter = 'all';
   document.getElementById('searchInput').value = path;
-  currentHost = ''; currentFilter = 'all';
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
   const allBtn = document.querySelector('[data-filter="all"]');
   if (allBtn) allBtn.classList.add('active');
