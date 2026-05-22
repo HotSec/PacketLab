@@ -92,7 +92,9 @@ func main() {
 		capEngine = capture.New(iface, cfg.CaptureBPF, st, apiSrv)
 		apiSrv.SetCaptureEngine(capEngine)
 		if err := capEngine.Start(); err != nil {
-			slog.Warn("抓包引擎启动失败", "iface", iface, "error", err)
+			slog.Warn("抓包引擎启动失败（可能需要 sudo 权限）",
+				"iface", iface, "error", err,
+				"hint", "如需抓包请用 sudo 启动: sudo ./packetlab --capture")
 		} else {
 			slog.Info("网卡抓包已启动", "iface", iface, "bpf", cfg.CaptureBPF)
 		}

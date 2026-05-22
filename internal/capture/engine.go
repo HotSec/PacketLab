@@ -40,6 +40,9 @@ type Stats struct {
 	HTTPFound   atomic.Int64
 }
 
+func (s Stats) Packets() int64  { return s.PacketsRecv.Load() }
+func (s Stats) HTTP() int64     { return s.HTTPFound.Load() }
+
 // New 创建抓包引擎
 func New(iface, bpf string, st *store.Store,
 	hub interface{ BroadcastCapture(req *models.CapturedRequest) }) *Engine {
@@ -60,6 +63,9 @@ func New(iface, bpf string, st *store.Store,
 
 // Start 启动抓包
 func (e *Engine) Start() error {
+	// 重新创建 stopCh（允许 Stop→Start 重新启动）
+	e.stopCh = make(chan struct{})
+
 	// 打开网卡
 	var err error
 	e.handle, err = pcap.OpenLive(e.iface, 65536, true, pcap.BlockForever)
@@ -102,22 +108,25 @@ func (e *Engine) IsRunning() bool {
 }
 
 // GetStats 获取统计
-func (e *Engine) GetStats() Stats {
-	return Stats{
-		PacketsRecv: atomic.Int64{},
-		HTTPFound:   atomic.Int64{},
-	}
+func (e *Engine) GetStats() (int64, int64) {
+	return e.stats.PacketsRecv.Load(), e.stats.HTTPFound.Load()
 }
 
 // packetLoop 循环读取数据包
 func (e *Engine) packetLoop() {
 	packetSource := gopacket.NewPacketSource(e.handle, e.handle.LinkType())
+	lastReport := time.Now()
 	for packet := range packetSource.Packets() {
 		if !e.running.Load() {
 			return
 		}
 		e.stats.PacketsRecv.Add(1)
 		e.assembler.Assemble(packet)
+		// 每 5 秒输出统计
+		if now := time.Now(); now.Sub(lastReport) >= 5*time.Second {
+			slog.Debug("capture: 数据包统计", "packets", e.stats.PacketsRecv.Load(), "http", e.stats.HTTPFound.Load())
+			lastReport = now
+		}
 	}
 }
 
@@ -195,19 +204,27 @@ func DetectInterface() string {
 	if err != nil {
 		return "en0"
 	}
-	for _, d := range devs {
-		for _, addr := range d.Addresses {
-			ip := addr.IP
-			if ip != nil && !ip.IsLoopback() && ip.To4() != nil && !strings.HasPrefix(ip.String(), "169.254") {
-				return d.Name
+	// 优先匹配物理网卡
+	preferred := []string{"en0", "en1", "eth0", "wlp2s0", "wlan0"}
+	for _, name := range preferred {
+		for _, d := range devs {
+			if d.Name == name && len(d.Addresses) > 0 {
+				slog.Info("capture: 自动检测网卡", "iface", name)
+				return name
 			}
 		}
 	}
-	// 回退到常见网卡
-	for _, name := range []string{"en0", "eth0", "wlp2s0"} {
-		for _, d := range devs {
-			if d.Name == name {
-				return name
+	// 回退：第一个有 IPv4 地址的非 loopback 非 utun 网卡
+	for _, d := range devs {
+		if strings.HasPrefix(d.Name, "utun") || strings.HasPrefix(d.Name, "lo") {
+			continue
+		}
+		for _, addr := range d.Addresses {
+			ip := addr.IP
+			if ip != nil && !ip.IsLoopback() && ip.To4() != nil &&
+				!strings.HasPrefix(ip.String(), "169.254") {
+				slog.Info("capture: 回退网卡", "iface", d.Name)
+				return d.Name
 			}
 		}
 	}
