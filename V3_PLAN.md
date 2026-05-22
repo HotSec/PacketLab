@@ -19,8 +19,8 @@
 | 拦截模式 | ✅ V3 已完成 | auto/manual + allow/drop/modify |
 | 拦截规则引擎 | ✅ V3 已完成 | 通配匹配 + SQLite 持久化 |
 | 拦截前端 UI | ✅ V3 已完成 | 待审入列表 + 编辑放过 |
-| **网卡抓包** | ❌ 待开发 | gopacket + TCP 重组 |
-| **进程关联** | ❌ 待开发 | macOS lsof / Linux proc |
+| **网卡抓包** | ✅ V3 已完成 | gopacket + TCP 重组 + 进程关联 |
+| **进程关联** | ✅ V3 已完成 | macOS lsof / Linux proc |
 
 ---
 
