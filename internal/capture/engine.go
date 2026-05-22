@@ -26,12 +26,16 @@ type Engine struct {
 	store   *store.Store
 	hub     interface{ BroadcastCapture(req *models.CapturedRequest) }
 	running atomic.Bool
+	mu      sync.Mutex
 	stopCh  chan struct{}
 	stats   Stats
-	mu      sync.Mutex
 
 	streamPool *TCPStreamPool
 	assembler  *Assembler
+
+	// 进程缓存
+	procCache   map[string]*models.ProcessInfo
+	procCacheMu sync.RWMutex
 }
 
 // Stats 抓包统计
@@ -52,21 +56,28 @@ func New(iface, bpf string, st *store.Store,
 	}
 
 	e := &Engine{
-		iface:  iface,
-		bpf:    bpf,
-		store:  st,
-		hub:    hub,
-		stopCh: make(chan struct{}),
+		iface:     iface,
+		bpf:       bpf,
+		store:     st,
+		hub:       hub,
+		stopCh:    make(chan struct{}),
+		procCache: make(map[string]*models.ProcessInfo),
 	}
 	return e
 }
 
 // Start 启动抓包
 func (e *Engine) Start() error {
-	// 重新创建 stopCh（允许 Stop→Start 重新启动）
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.running.Load() {
+		return fmt.Errorf("capture already running")
+	}
+
+	// 重新创建 stopCh
 	e.stopCh = make(chan struct{})
 
-	// 打开网卡
 	var err error
 	e.handle, err = pcap.OpenLive(e.iface, 65536, true, pcap.BlockForever)
 	if err != nil {
@@ -75,6 +86,7 @@ func (e *Engine) Start() error {
 
 	if err := e.handle.SetBPFFilter(e.bpf); err != nil {
 		e.handle.Close()
+		e.handle = nil
 		return fmt.Errorf("SetBPFFilter(%s): %w", e.bpf, err)
 	}
 
@@ -89,16 +101,35 @@ func (e *Engine) Start() error {
 	return nil
 }
 
-// Stop 停止抓包
+// Stop 停止抓包（幂等，可多次调用）
 func (e *Engine) Stop() {
-	e.running.Store(false)
-	close(e.stopCh)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.running.Swap(false) {
+		return // 已经在停止中或已停止
+	}
+
+	// 先关闭 handle，让 packetLoop 退出
 	if e.handle != nil {
 		e.handle.Close()
+		e.handle = nil
 	}
+
+	// 关闭 stopCh（gcLoop 会退出）
+	select {
+	case <-e.stopCh:
+		// 已关闭
+	default:
+		close(e.stopCh)
+	}
+
+	// 清理流——先 emit 所有 pendingReq
 	if e.assembler != nil {
-		e.assembler.FlushAll()
+		e.assembler.FlushAllWithPending(e)
+		e.assembler = nil
 	}
+
 	slog.Info("capture: 抓包已停止")
 }
 
@@ -137,7 +168,7 @@ func (e *Engine) gcLoop() {
 	for e.running.Load() {
 		select {
 		case <-ticker.C:
-			e.assembler.FlushOlderThan(time.Now().Add(-5 * time.Minute))
+			e.assembler.FlushOlderThan(time.Now().Add(-5*time.Minute), e)
 		case <-e.stopCh:
 			return
 		}
@@ -154,9 +185,21 @@ func (e *Engine) emit(req *models.CapturedRequest) {
 	e.stats.HTTPFound.Add(1)
 }
 
-// ResolveProcess 解析进程信息（平台相关）
-func ResolveProcess(srcIP net.IP, srcPort uint16) *models.ProcessInfo {
-	return resolveProcessDarwin(srcIP, srcPort)
+// ResolveProcess 解析进程信息（带缓存）
+func (e *Engine) ResolveProcess(srcIP net.IP, srcPort uint16) *models.ProcessInfo {
+	key := fmt.Sprintf("%s:%d", srcIP.String(), srcPort)
+	e.procCacheMu.RLock()
+	if p, ok := e.procCache[key]; ok {
+		e.procCacheMu.RUnlock()
+		return p
+	}
+	e.procCacheMu.RUnlock()
+
+	p := resolveProcessDarwin(srcIP, srcPort)
+	e.procCacheMu.Lock()
+	e.procCache[key] = p
+	e.procCacheMu.Unlock()
+	return p
 }
 
 // resolveProcessDarwin macOS 进程解析
@@ -302,21 +345,29 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	stream.Feed(tcp.Payload, isClientToServer)
 }
 
-// FlushOlderThan 清理过期流
-func (a *Assembler) FlushOlderThan(t time.Time) {
+// FlushOlderThan 清理过期流（先 emit pendingReq）
+func (a *Assembler) FlushOlderThan(t time.Time, engine *Engine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for key, s := range a.streams {
 		if s.lastActive.Before(t) {
+			if s.pendingReq != nil {
+				engine.emit(s.pendingReq)
+			}
 			delete(a.streams, key)
 		}
 	}
 }
 
-// FlushAll 清理所有流
-func (a *Assembler) FlushAll() {
+// FlushAllWithPending 清理所有流并 emit pendingReq
+func (a *Assembler) FlushAllWithPending(engine *Engine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	for _, s := range a.streams {
+		if s.pendingReq != nil {
+			engine.emit(s.pendingReq)
+		}
+	}
 	a.streams = make(map[string]*TCPStream)
 }
 
@@ -387,7 +438,7 @@ func (s *TCPStream) tryExtractHTTP() {
 				s.pendingReq = nil
 			}
 		} else {
-			req := parseHTTPRequest(msgData, s.srcIP, s.srcPort)
+			req := parseHTTPRequest(msgData, s.srcIP, s.srcPort, s.engine)
 			if req != nil {
 				// 保存为 pending，等待响应到达后补全再 emit
 				if s.pendingReq != nil {
@@ -405,7 +456,7 @@ func isHTTPResponse(data []byte) bool {
 	return len(data) >= 4 && (string(data[:4]) == "HTTP")
 }
 
-// findHTTPMessageEnd 查找 HTTP 消息结束位置
+// findHTTPMessageEnd 查找 HTTP 消息结束位置（支持 Content-Length 和 chunked）
 func findHTTPMessageEnd(data []byte) int {
 	idx := -1
 	for i := 0; i < len(data)-3; i++ {
@@ -417,15 +468,73 @@ func findHTTPMessageEnd(data []byte) int {
 	if idx < 0 {
 		return -1
 	}
-	cl := parseContentLength(data[:idx])
+
+	headerData := data[:idx]
+
+	// Content-Length
+	cl := parseContentLength(headerData)
 	if cl > 0 {
 		bodyEnd := idx + cl
 		if bodyEnd <= len(data) {
 			return bodyEnd
 		}
+		return -1 // 等待更多数据
+	}
+
+	// Chunked Transfer-Encoding
+	te := parseTransferEncoding(headerData)
+	if strings.Contains(te, "chunked") {
+		// 查找 chunked 结束标记: 0\r\n\r\n
+		chunkEnd := findChunkedEnd(data[idx:])
+		if chunkEnd >= 0 {
+			return idx + chunkEnd
+		}
 		return -1
 	}
+
+	// 无 Content-Length 无 chunked → 以 headers 结束
 	return idx
+}
+
+// findChunkedEnd 查找 chunked 编码的结束位置
+func findChunkedEnd(data []byte) int {
+	pos := 0
+	for pos < len(data) {
+		// 查找 \r\n
+		nl := -1
+		for i := pos; i < len(data)-1; i++ {
+			if data[i] == '\r' && data[i+1] == '\n' {
+				nl = i
+				break
+			}
+		}
+		if nl < 0 {
+			return -1
+		}
+		// 解析 chunk size (hex)
+		sizeStr := string(data[pos:nl])
+		sizeStr = strings.TrimSpace(sizeStr)
+		var size int
+		fmt.Sscanf(sizeStr, "%x", &size)
+		if size == 0 {
+			// 最后一个 chunk，需要 trailing \r\n
+			trailerEnd := nl + 2
+			if trailerEnd+1 < len(data) && data[trailerEnd] == '\r' && data[trailerEnd+1] == '\n' {
+				return trailerEnd + 2
+			}
+			if trailerEnd < len(data) && data[trailerEnd] == '\n' {
+				return trailerEnd + 1
+			}
+			return -1 // 等待更多数据
+		}
+		// 跳过 chunk data + \r\n
+		next := nl + 2 + size + 2 // \r\n + data + \r\n
+		if next > len(data) {
+			return -1
+		}
+		pos = next
+	}
+	return -1
 }
 
 // parseHTTPResponse 解析 HTTP 响应
@@ -474,22 +583,36 @@ func parseHTTPResponse(data []byte) *struct {
 	}{StatusCode: statusCode, Headers: headers, Body: body}
 }
 
-// parseContentLength 从 HTTP 头解析 Content-Length
+// parseContentLength 从 HTTP 头解析 Content-Length（健壮版）
 func parseContentLength(headerData []byte) int {
-	s := string(headerData)
+	s := strings.ToLower(string(headerData))
 	lines := strings.Split(s, "\r\n")
 	for _, line := range lines {
-		if len(line) > 16 && strings.EqualFold(line[:15], "content-length:") {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "content-length:"); ok {
 			var cl int
-			fmt.Sscanf(strings.TrimSpace(line[15:]), "%d", &cl)
+			fmt.Sscanf(strings.TrimSpace(after), "%d", &cl)
 			return cl
 		}
 	}
 	return -1
 }
 
+// parseTransferEncoding 检查是否为 chunked 传输
+func parseTransferEncoding(headerData []byte) string {
+	s := strings.ToLower(string(headerData))
+	lines := strings.Split(s, "\r\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "transfer-encoding:"); ok {
+			return strings.TrimSpace(after)
+		}
+	}
+	return ""
+}
+
 // parseHTTPRequest 解析 HTTP 请求
-func parseHTTPRequest(data []byte, srcIP net.IP, srcPort uint16) *models.CapturedRequest {
+func parseHTTPRequest(data []byte, srcIP net.IP, srcPort uint16, engine *Engine) *models.CapturedRequest {
 	s := string(data)
 	lines := strings.Split(s, "\r\n")
 	if len(lines) < 1 {
@@ -538,10 +661,10 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort uint16) *models.Capture
 		body = strings.Join(lines[bodyStart:], "\r\n")
 	}
 
-	// 进程关联
+	// 进程关联（使用引擎缓存）
 	var procPID int
 	var procName string
-	if proc := ResolveProcess(srcIP, srcPort); proc != nil {
+	if proc := engine.ResolveProcess(srcIP, srcPort); proc != nil {
 		procPID = proc.PID
 		procName = proc.Name
 	}
