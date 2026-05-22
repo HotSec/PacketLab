@@ -730,8 +730,8 @@ function toggleTreeNode(header) {
   const toggle = header.querySelector('.tree-node-toggle');
   const children = header.nextElementSibling;
   if (children && children.classList.contains('tree-node-children')) {
-    const isOpen = toggle.classList.toggle('open');
-    children.style.maxHeight = isOpen ? children.scrollHeight + 'px' : '0px';
+    toggle.classList.toggle('open');
+    children.classList.toggle('open');
   }
 }
 

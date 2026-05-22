@@ -182,7 +182,8 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .tree-node-icon{flex-shrink:0}
 .tree-node-name{font-family:var(--font-mono);color:var(--text-primary);font-weight:550;font-size:12px}
 .tree-node-count{font-size:10px;color:var(--text-tertiary);margin-left:3px}
-.tree-node-children{padding-left:22px;overflow:hidden;max-height:0;transition:max-height .2s ease}
+.tree-node-children{padding-left:22px;overflow:hidden;max-height:0;transition:max-height .25s ease}
+.tree-node-children.open{overflow:visible;max-height:5000px}
 .tree-node-methods{display:flex;flex-wrap:wrap;gap:2px;margin-left:auto;flex-shrink:0}
 .tree-method-tag{padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700;font-family:var(--font-mono);line-height:1.6}
 /* Leaf rows — one per method, colored left border */
