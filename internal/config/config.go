@@ -8,14 +8,18 @@ import (
 
 // Config 集中化应用配置 (fail-fast on invalid values)
 type Config struct {
-	ProxyPort  int
-	APIPort    int
-	DBPath     string
-	NoProxy    bool
-	NoMitm     bool
-	Insecure   bool // 是否跳过 TLS 证书校验（仅开发环境）
-	BaseDir    string
-	CertDir    string
+	ProxyPort     int
+	APIPort       int
+	DBPath        string
+	NoProxy       bool
+	NoMitm        bool
+	Insecure      bool // 是否跳过 TLS 证书校验（仅开发环境）
+	BaseDir       string
+	CertDir       string
+	Capture       bool
+	CaptureIface  string
+	CaptureBPF    string
+	CaptureNoProc bool
 }
 
 // Default validated default values
@@ -27,7 +31,8 @@ const (
 )
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
-func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool) (*Config, error) {
+func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
+	capture bool, captureIface, captureBPF string, captureNoProc bool) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -53,14 +58,18 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool)
 	}
 
 	cfg := &Config{
-		ProxyPort: proxyPort,
-		APIPort:   apiPort,
-		DBPath:    dbPath,
-		NoProxy:   noProxy,
-		NoMitm:    noMitm,
-		Insecure:  insecure,
-		BaseDir:   baseDir,
-		CertDir:   filepath.Join(baseDir, "certs"),
+		ProxyPort:     proxyPort,
+		APIPort:       apiPort,
+		DBPath:        dbPath,
+		NoProxy:       noProxy,
+		NoMitm:        noMitm,
+		Insecure:      insecure,
+		BaseDir:       baseDir,
+		CertDir:       filepath.Join(baseDir, "certs"),
+		Capture:       capture,
+		CaptureIface:  captureIface,
+		CaptureBPF:    captureBPF,
+		CaptureNoProc: captureNoProc,
 	}
 	return cfg, nil
 }

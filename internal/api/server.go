@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"packetlab/internal/capture"
 	"packetlab/internal/models"
 	"packetlab/internal/store"
 
@@ -22,11 +23,16 @@ const maxRequestBodySize = 10 * 1024 * 1024 // 10 MB
 
 // Server API 服务器
 type Server struct {
-	store       *store.Store
-	hub         *wsHub
-	mux         *http.ServeMux
-	frontend    http.Handler
-	insecure    bool
+	store         *store.Store
+	hub           *wsHub
+	mux           *http.ServeMux
+	frontend      http.Handler
+	insecure      bool
+	captureEngine interface {
+		IsRunning() bool
+		Start() error
+		Stop()
+	}
 	interceptor interface {
 		GetMode() string
 		SetMode(mode string)
@@ -81,6 +87,12 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/intercept/rules", s.handleInterceptRules)
 	mux.HandleFunc("/api/intercept/rules/", s.handleInterceptRuleByID)
 
+	// 网卡抓包
+	mux.HandleFunc("/api/capture/status", s.handleCaptureStatus)
+	mux.HandleFunc("/api/capture/interfaces", s.handleCaptureInterfaces)
+	mux.HandleFunc("/api/capture/start", s.handleCaptureStart)
+	mux.HandleFunc("/api/capture/stop", s.handleCaptureStop)
+
 	// WebSocket
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
@@ -95,6 +107,15 @@ func (s *Server) setupRoutes() {
 // Handler 返回 HTTP Handler（含 CORS + 安全头）
 func (s *Server) Handler() http.Handler {
 	return securityHeadersMiddleware(corsMiddleware(s.mux))
+}
+
+// SetCaptureEngine 设置抓包引擎
+func (s *Server) SetCaptureEngine(ce interface {
+	IsRunning() bool
+	Start() error
+	Stop()
+}) {
+	s.captureEngine = ce
 }
 
 // SetInterceptor 设置拦截控制器引用
@@ -564,6 +585,59 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
 	}
+}
+
+// ========================================
+// 网卡抓包
+// ========================================
+
+func (s *Server) handleCaptureStatus(w http.ResponseWriter, r *http.Request) {
+	if s.captureEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"running": false, "available": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"running":   s.captureEngine.IsRunning(),
+		"available": true,
+	})
+}
+
+func (s *Server) handleCaptureInterfaces(w http.ResponseWriter, r *http.Request) {
+	ifaces, err := capture.ListInterfaces()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, ifaces)
+}
+
+func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.captureEngine == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Capture engine not available"})
+		return
+	}
+	if err := s.captureEngine.Start(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}
+
+func (s *Server) handleCaptureStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.captureEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "no engine"})
+		return
+	}
+	s.captureEngine.Stop()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
 // ========================================

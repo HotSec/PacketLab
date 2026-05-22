@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"packetlab/internal/api"
+	"packetlab/internal/capture"
 	"packetlab/internal/config"
 	"packetlab/internal/models"
 	"packetlab/internal/proxy"
@@ -31,6 +32,11 @@ func main() {
 	noProxy := flag.Bool("no-proxy", false, "仅启动 API，不启动代理")
 	noMitm := flag.Bool("no-mitm", false, "禁用 HTTPS MITM 解密")
 	insecure := flag.Bool("insecure", false, "重发请求时跳过 TLS 证书验证（仅开发环境）")
+
+	captureFlag   := flag.Bool("capture", false, "启用网卡抓包")
+	captureIFace  := flag.String("capture-iface", "", "指定抓包网卡（默认自动检测）")
+	captureBPF    := flag.String("capture-bpf", "tcp port 80 or tcp port 443", "BPF 过滤器")
+	captureNoProc := flag.Bool("capture-no-proc", false, "禁用进程关联")
 	flag.Parse()
 
 	// 结构化日志
@@ -38,7 +44,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	// 集中化配置 fail-fast 校验
-	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure)
+	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure,
+		*captureFlag, *captureIFace, *captureBPF, *captureNoProc)
 	if err != nil {
 		slog.Error("配置加载失败", "error", err)
 		os.Exit(1)
@@ -74,6 +81,22 @@ func main() {
 		interceptor.SetRules(rules)
 	}
 	apiSrv.SetInterceptor(interceptor)
+
+	// 网卡抓包引擎
+	var capEngine *capture.Engine
+	if cfg.Capture {
+		iface := cfg.CaptureIface
+		if iface == "" {
+			iface = capture.DetectInterface()
+		}
+		capEngine = capture.New(iface, cfg.CaptureBPF, st, apiSrv)
+		apiSrv.SetCaptureEngine(capEngine)
+		if err := capEngine.Start(); err != nil {
+			slog.Warn("抓包引擎启动失败", "iface", iface, "error", err)
+		} else {
+			slog.Info("网卡抓包已启动", "iface", iface, "bpf", cfg.CaptureBPF)
+		}
+	}
 
 	// 捕获回调
 	onCapture := func(req *models.CapturedRequest) {

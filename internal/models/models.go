@@ -19,19 +19,32 @@ type CapturedRequest struct {
 	DurationMs  int64             `json:"duration_ms"`
 	SizeBytes   int64             `json:"size_bytes"`
 	CapturedAt  time.Time         `json:"captured_at"`
+	CaptureMode string            `json:"capture_mode,omitempty"` // "proxy" | "nic"
+	ProcessPID  int               `json:"process_pid,omitempty"`
+	ProcessName string            `json:"process_name,omitempty"`
+}
+
+// ProcessInfo 进程信息
+type ProcessInfo struct {
+	PID     int    `json:"pid"`
+	Name    string `json:"name"`
+	Cmdline string `json:"cmdline,omitempty"`
 }
 
 // RequestListItem 列表项的简略信息
 type RequestListItem struct {
-	ID         int64     `json:"id"`
-	Method     string    `json:"method"`
-	URL        string    `json:"url"`
-	Host       string    `json:"host"`
-	StatusCode int       `json:"status_code"`
-	DurationMs int64     `json:"duration_ms"`
-	SizeBytes  int64     `json:"size_bytes"`
-	CapturedAt time.Time `json:"captured_at"`
-	IsHTTPS    bool      `json:"is_https"`
+	ID          int64     `json:"id"`
+	Method      string    `json:"method"`
+	URL         string    `json:"url"`
+	Host        string    `json:"host"`
+	StatusCode  int       `json:"status_code"`
+	DurationMs  int64     `json:"duration_ms"`
+	SizeBytes   int64     `json:"size_bytes"`
+	CapturedAt  time.Time `json:"captured_at"`
+	IsHTTPS     bool      `json:"is_https"`
+	CaptureMode string    `json:"capture_mode,omitempty"`
+	ProcessPID  int       `json:"process_pid,omitempty"`
+	ProcessName string    `json:"process_name,omitempty"`
 }
 
 // ResendRequest 重发请求的结构

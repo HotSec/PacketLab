@@ -736,6 +736,19 @@ function toggleTreeNode(header) {
   }
 }
 
+// ── Capture Toggle ────────────────────────────
+let captureRunning = false;
+async function toggleNICCapture() {
+  const url = captureRunning ? '/api/capture/stop' : '/api/capture/start';
+  try {
+    await apiPost(url, {});
+    captureRunning = !captureRunning;
+    const btn = document.getElementById('captureToggleBtn');
+    if (btn) btn.classList.toggle('recording', captureRunning);
+    const label = document.getElementById('captureLabel');
+    if (label) label.textContent = captureRunning ? '抓包中' : '抓包';
+  } catch (e) { showToast('error', 'Capture: ' + e.message); }
+}
 // ── Init ─────────────────────────────────────
 (function init() {
   applyLang();

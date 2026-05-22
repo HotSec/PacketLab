@@ -115,9 +115,14 @@ func (s *Store) migrate() error {
 	);
 
 	INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto');
+
+	ALTER TABLE requests ADD COLUMN capture_mode TEXT DEFAULT 'proxy';
+	ALTER TABLE requests ADD COLUMN process_pid INTEGER DEFAULT 0;
+	ALTER TABLE requests ADD COLUMN process_name TEXT DEFAULT '';
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	// 列可能已存在（数据库升级场景），忽略错误
+	_, _ = s.db.Exec(schema)
+	return nil
 }
 
 // Save 保存一条捕获的请求
@@ -137,13 +142,14 @@ func (s *Store) saveLocked(req *models.CapturedRequest) (int64, error) {
 	}
 
 	result, err := s.db.Exec(
-		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.Method, req.URL, req.Host, req.Path, req.Protocol, boolToInt(req.IsHTTPS),
 		string(reqHeadersJSON), truncateStr(req.ReqBody, 32768),
 		req.StatusCode, string(resHeadersJSON),
 		truncateStr(req.ResBody, 65536), req.DurationMs, req.SizeBytes,
 		req.CapturedAt.Format(time.RFC3339),
+		req.CaptureMode, req.ProcessPID, req.ProcessName,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert request: %w", err)
@@ -168,8 +174,8 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(
-		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, fmt.Errorf("prepare: %w", err)
 	}
@@ -188,6 +194,7 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 			string(reqHeadersJSON), truncateStr(req.ReqBody, 32768),
 			req.StatusCode, string(resHeadersJSON), truncateStr(req.ResBody, 65536),
 			req.DurationMs, req.SizeBytes, req.CapturedAt.Format(time.RFC3339),
+			req.CaptureMode, req.ProcessPID, req.ProcessName,
 		)
 		if err != nil {
 			return ids, fmt.Errorf("exec batch: %w", err)
@@ -237,7 +244,7 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 	}
 
 	querySQL := fmt.Sprintf(
-		`SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https
+		`SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name
 		 FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
 	args = append(args, limit, offset)
 
@@ -252,7 +259,8 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 		var item models.RequestListItem
 		var capturedAt string
 		if err := rows.Scan(&item.ID, &item.Method, &item.URL, &item.Host,
-			&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS); err != nil {
+			&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS,
+			&item.CaptureMode, &item.ProcessPID, &item.ProcessName); err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
 		}
 		item.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
