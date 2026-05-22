@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 构建全部平台二进制 ───────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          [ "$GOOS" = "windows" ] && EXT=".exe" || EXT=""
+          cd cmd/proxy
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "../../packetlab-${GOOS}-${GOARCH}${EXT}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packetlab-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: packetlab-${{ matrix.goos }}-${{ matrix.goarch }}*
+
+  # ── 创建 GitHub Release ──────────────────────────────────────────
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract changelog
+        id: changelog
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # 优先从 CHANGELOG.md 提取该版本的发布说明
+          if [ -f CHANGELOG.md ]; then
+            awk "/^## ${VERSION} /{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md > /tmp/release_body.md
+          fi
+          # 兜底: 使用 tag annotation message
+          if [ ! -s /tmp/release_body.md ]; then
+            git tag -l --format='%(contents)' "${VERSION}" > /tmp/release_body.md
+          fi
+          # 再兜底
+          if [ ! -s /tmp/release_body.md ]; then
+            echo "See [commits](https://github.com/${GITHUB_REPOSITORY}/commits/${VERSION}) for details." > /tmp/release_body.md
+          fi
+          cat /tmp/release_body.md
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum packetlab-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.changelog.outputs.version }}
+          body_path: /tmp/release_body.md
+          files: dist/*
+          draft: false
+          prerelease: false
