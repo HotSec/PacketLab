@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -93,7 +94,7 @@ func (s *Server) setupHandlers() {
 			CapturedAt: time.Now(),
 		}
 		if req.Body != nil {
-			bodyBytes, err := io.ReadAll(req.Body)
+			bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, 32*1024+1))
 			if err == nil && len(bodyBytes) > 0 {
 				if len(bodyBytes) > 32*1024 {
 					captured.ReqBody = string(bodyBytes[:32*1024])
@@ -132,7 +133,7 @@ func (s *Server) setupHandlers() {
 
 		// 读取响应体（完整转发，捕获最多 64KB）
 		if resp.Body != nil {
-			bodyBytes, err := io.ReadAll(resp.Body)
+			bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
 			if err == nil && len(bodyBytes) > 0 {
 				captured.SizeBytes = int64(len(bodyBytes))
 				if len(bodyBytes) > 64*1024 {
@@ -164,6 +165,10 @@ func (s *Server) setupHandlers() {
 // Start 启动代理服务
 func (s *Server) Start() error {
 	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return fmt.Errorf("proxy already running")
+	}
 	s.running = true
 	s.mu.Unlock()
 

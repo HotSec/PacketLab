@@ -55,11 +55,13 @@ func New(dbPath string) (*Store, error) {
 
 func (s *Store) initReadConn(dbPath string) {
 	dbRO, err := sql.Open("sqlite", dbPath+"?mode=ro")
-	if err == nil {
-		dbRO.SetMaxOpenConns(1)
-		dbRO.SetConnMaxLifetime(0)
-		s.dbRO = dbRO
+	if err != nil {
+		slog.Warn("failed to open read-only DB, reads will use write conn", "error", err)
+		return
 	}
+	dbRO.SetMaxOpenConns(1)
+	dbRO.SetConnMaxLifetime(0)
+	s.dbRO = dbRO
 }
 
 // migrate 建表
@@ -722,6 +724,8 @@ func truncateStr(s string, maxLen int) string {
 // ========================================
 
 func (s *Store) GetSetting(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var val string
 	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
 	if err == sql.ErrNoRows {
@@ -731,6 +735,8 @@ func (s *Store) GetSetting(key string) (string, error) {
 }
 
 func (s *Store) SetSetting(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", key, value)
 	return err
 }
@@ -740,6 +746,8 @@ func (s *Store) SetSetting(key, value string) error {
 // ========================================
 
 func (s *Store) SaveRule(rule *models.InterceptRule) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result, err := s.db.Exec(
 		"INSERT INTO intercept_rules (pattern, action, enabled) VALUES (?, ?, ?)",
 		rule.Pattern, rule.Action, boolToInt(rule.Enabled),
@@ -751,6 +759,8 @@ func (s *Store) SaveRule(rule *models.InterceptRule) (int64, error) {
 }
 
 func (s *Store) ListRules() ([]models.InterceptRule, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	rows, err := s.db.Query("SELECT id, pattern, action, enabled, created_at FROM intercept_rules ORDER BY id")
 	if err != nil {
 		return nil, err
@@ -766,15 +776,22 @@ func (s *Store) ListRules() ([]models.InterceptRule, error) {
 		r.CreatedAt, _ = time.Parse(time.RFC3339, ca)
 		rules = append(rules, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list rules: %w", err)
+	}
 	return rules, nil
 }
 
 func (s *Store) UpdateRule(id int64, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec("UPDATE intercept_rules SET enabled = ? WHERE id = ?", boolToInt(enabled), id)
 	return err
 }
 
 func (s *Store) DeleteRule(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec("DELETE FROM intercept_rules WHERE id = ?", id)
 	return err
 }

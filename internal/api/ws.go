@@ -161,6 +161,7 @@ func (h *wsHub) broadcastIntercept(req *models.PendingRequest) {
 		select {
 		case client.send <- msg:
 		default:
+			slog.Warn("ws intercept notification dropped, client buffer full")
 		}
 	}
 }

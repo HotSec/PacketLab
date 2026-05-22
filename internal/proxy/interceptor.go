@@ -199,9 +199,10 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	}
 }
 
-// matchRule 简单通配匹配
+// matchRule 简单通配匹配（host 大小写不敏感）
 func matchRule(pattern, host, path string) bool {
-	// 精确 host 匹配
+	host = strings.ToLower(host)
+	pattern = strings.ToLower(pattern)
 	if pattern == host {
 		return true
 	}
