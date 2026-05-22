@@ -178,7 +178,12 @@ func (e *Engine) gcLoop() {
 // emit 输出 HTTP 请求到存储
 func (e *Engine) emit(req *models.CapturedRequest) {
 	req.CaptureMode = "nic"
-	e.store.Save(req)
+	id, err := e.store.Save(req)
+	if err != nil {
+		slog.Warn("capture: save failed", "url", req.URL, "error", err)
+		return
+	}
+	req.ID = id
 	if e.hub != nil {
 		e.hub.BroadcastCapture(req)
 	}
@@ -196,6 +201,9 @@ func (e *Engine) ResolveProcess(srcIP net.IP, srcPort uint16) *models.ProcessInf
 	e.procCacheMu.RUnlock()
 
 	p := resolveProcessDarwin(srcIP, srcPort)
+	if p == nil {
+		return nil
+	}
 	e.procCacheMu.Lock()
 	e.procCache[key] = p
 	e.procCacheMu.Unlock()
@@ -345,16 +353,20 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	stream.Feed(tcp.Payload, isClientToServer)
 }
 
-// FlushOlderThan 清理过期流（先 emit pendingReq）
+// FlushOlderThan 清理过期流（持流锁保护，先 emit pendingReq）
 func (a *Assembler) FlushOlderThan(t time.Time, engine *Engine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for key, s := range a.streams {
+		s.mu.Lock()
 		if s.lastActive.Before(t) {
 			if s.pendingReq != nil {
 				engine.emit(s.pendingReq)
 			}
+			s.mu.Unlock()
 			delete(a.streams, key)
+		} else {
+			s.mu.Unlock()
 		}
 	}
 }
@@ -364,9 +376,11 @@ func (a *Assembler) FlushAllWithPending(engine *Engine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, s := range a.streams {
+		s.mu.Lock()
 		if s.pendingReq != nil {
 			engine.emit(s.pendingReq)
 		}
+		s.mu.Unlock()
 	}
 	a.streams = make(map[string]*TCPStream)
 }
@@ -396,27 +410,24 @@ func (p *TCPStreamPool) New(srcIP net.IP, srcPort layers.TCPPort, dstIP net.IP, 
 	}
 }
 
-// TCPStream 单个 TCP 流（双方向数据合并）
+// TCPStream 单个 TCP 流（双方向数据合并，线程安全）
 type TCPStream struct {
-	engine     *Engine
-	srcIP      net.IP
-	srcPort    uint16
-	dstPort    uint16 // 目标端口（用于判断 HTTP/HTTPS）
-	buf        []byte
+	mu        sync.Mutex
+	engine    *Engine
+	srcIP     net.IP
+	srcPort   uint16
+	dstPort   uint16
+	buf       []byte
 	lastActive time.Time
-	pendingReq *models.CapturedRequest // 等待匹配响应的请求
-	msgCut     int                      // 已消费的消息边界
+	pendingReq *models.CapturedRequest
 }
 
-// Feed 喂入 TCP 数据（direction=true 表示 client→server）
+// Feed 喂入 TCP 数据（持锁保护，与 GC/Stop 互斥）
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastActive = time.Now()
 	s.buf = append(s.buf, data...)
-	// 缓冲区超限：丢弃已消费部分，保留未处理数据
-	if len(s.buf) > 2*1024*1024 && s.msgCut > 0 {
-		s.buf = s.buf[s.msgCut:]
-		s.msgCut = 0
-	}
 	if len(s.buf) > 2*1024*1024 {
 		s.buf = s.buf[len(s.buf)-2*1024*1024:]
 	}
@@ -432,7 +443,6 @@ func (s *TCPStream) tryExtractHTTP() {
 		}
 		msgData := s.buf[:idx]
 		s.buf = s.buf[idx:]
-		s.msgCut += idx // 跟踪已消费位置
 
 		// 判断是请求还是响应
 		if isHTTPResponse(msgData) {
@@ -530,13 +540,13 @@ func findChunkedEnd(data []byte) int {
 		if nl < 0 {
 			return -1
 		}
-		// 解析 chunk size (hex)
-		sizeStr := string(data[pos:nl])
-		sizeStr = strings.TrimSpace(sizeStr)
-		var size int
-		fmt.Sscanf(sizeStr, "%x", &size)
+		// 解析 chunk size (hex)，使用 uint64 防溢出
+		sizeStr := strings.TrimSpace(string(data[pos:nl]))
+		var size uint64
+		if _, err := fmt.Sscanf(sizeStr, "%x", &size); err != nil || size > 100*1024*1024 {
+			return -1 // 无效或过大 chunk
+		}
 		if size == 0 {
-			// 最后一个 chunk，需要 trailing \r\n
 			trailerEnd := nl + 2
 			if trailerEnd+1 < len(data) && data[trailerEnd] == '\r' && data[trailerEnd+1] == '\n' {
 				return trailerEnd + 2
@@ -544,10 +554,9 @@ func findChunkedEnd(data []byte) int {
 			if trailerEnd < len(data) && data[trailerEnd] == '\n' {
 				return trailerEnd + 1
 			}
-			return -1 // 等待更多数据
+			return -1
 		}
-		// 跳过 chunk data + \r\n
-		next := nl + 2 + size + 2 // \r\n + data + \r\n
+		next := nl + 2 + int(size) + 2
 		if next > len(data) {
 			return -1
 		}

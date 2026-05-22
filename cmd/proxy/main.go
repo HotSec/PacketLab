@@ -167,6 +167,11 @@ func main() {
 	sig := <-shutdownCh
 	slog.Info("收到关闭信号，开始优雅退出...", "signal", sig.String())
 
+	// 停止抓包引擎（清洗 pendingReq）
+	if capEngine != nil {
+		capEngine.Stop()
+	}
+
 	// 优雅关闭 API 服务器（30s 超时）
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

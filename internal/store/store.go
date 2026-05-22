@@ -63,65 +63,69 @@ func (s *Store) initReadConn(dbPath string) {
 }
 
 // migrate 建表
+// migrate 建表（逐条执行，ALTER 容错）
 func (s *Store) migrate() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS requests (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		method      TEXT    NOT NULL,
-		url         TEXT    NOT NULL,
-		host        TEXT    NOT NULL,
-		path        TEXT    NOT NULL,
-		protocol    TEXT    NOT NULL DEFAULT 'HTTP/1.1',
-		is_https    INTEGER NOT NULL DEFAULT 0,
-		req_headers TEXT    NOT NULL DEFAULT '{}',
-		req_body    TEXT    NOT NULL DEFAULT '',
-		status_code INTEGER NOT NULL DEFAULT 0,
-		res_headers TEXT    NOT NULL DEFAULT '{}',
-		res_body    TEXT    NOT NULL DEFAULT '',
-		duration_ms INTEGER NOT NULL DEFAULT 0,
-		size_bytes  INTEGER NOT NULL DEFAULT 0,
-		captured_at TEXT    NOT NULL DEFAULT (datetime('now'))
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host);
-	CREATE INDEX IF NOT EXISTS idx_requests_method ON requests(method);
-	CREATE INDEX IF NOT EXISTS idx_requests_captured_at ON requests(captured_at);
-	CREATE INDEX IF NOT EXISTS idx_requests_host_path ON requests(host, path);
-
-	CREATE TABLE IF NOT EXISTS api_notes (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		host       TEXT    NOT NULL,
-		path       TEXT    NOT NULL DEFAULT '/',
-		method     TEXT    NOT NULL DEFAULT '',
-		note       TEXT    NOT NULL DEFAULT '',
-		created_at TEXT    NOT NULL DEFAULT (datetime('now')),
-		updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
-		UNIQUE(host, path, method)
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_api_notes_host ON api_notes(host);
-
-	CREATE TABLE IF NOT EXISTS settings (
-		key   TEXT PRIMARY KEY,
-		value TEXT NOT NULL
-	);
-
-	CREATE TABLE IF NOT EXISTS intercept_rules (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		pattern    TEXT NOT NULL,
-		action     TEXT NOT NULL DEFAULT 'allow',
-		enabled    INTEGER NOT NULL DEFAULT 1,
-		created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-
-	INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto');
-
-	ALTER TABLE requests ADD COLUMN capture_mode TEXT DEFAULT 'proxy';
-	ALTER TABLE requests ADD COLUMN process_pid INTEGER DEFAULT 0;
-	ALTER TABLE requests ADD COLUMN process_name TEXT DEFAULT '';
-	`
-	// 列可能已存在（数据库升级场景），忽略错误
-	_, _ = s.db.Exec(schema)
+	stmtList := []string{
+		`CREATE TABLE IF NOT EXISTS requests (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			method      TEXT    NOT NULL,
+			url         TEXT    NOT NULL,
+			host        TEXT    NOT NULL,
+			path        TEXT    NOT NULL,
+			protocol    TEXT    NOT NULL DEFAULT 'HTTP/1.1',
+			is_https    INTEGER NOT NULL DEFAULT 0,
+			req_headers TEXT    NOT NULL DEFAULT '{}',
+			req_body    TEXT    NOT NULL DEFAULT '',
+			status_code INTEGER NOT NULL DEFAULT 0,
+			res_headers TEXT    NOT NULL DEFAULT '{}',
+			res_body    TEXT    NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			size_bytes  INTEGER NOT NULL DEFAULT 0,
+			captured_at TEXT    NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host)`,
+		`CREATE INDEX IF NOT EXISTS idx_requests_method ON requests(method)`,
+		`CREATE INDEX IF NOT EXISTS idx_requests_captured_at ON requests(captured_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_requests_host_path ON requests(host, path)`,
+		`CREATE TABLE IF NOT EXISTS api_notes (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			host       TEXT NOT NULL,
+			path       TEXT NOT NULL DEFAULT '/',
+			method     TEXT NOT NULL DEFAULT '',
+			note       TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(host, path, method)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_notes_host ON api_notes(host)`,
+		`CREATE TABLE IF NOT EXISTS settings (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS intercept_rules (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			pattern    TEXT NOT NULL,
+			action     TEXT NOT NULL DEFAULT 'allow',
+			enabled    INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto')`,
+	}
+	for _, stmt := range stmtList {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate %s: %w", truncateStr(stmt, 40), err)
+		}
+	}
+	alterList := []string{
+		`ALTER TABLE requests ADD COLUMN capture_mode TEXT DEFAULT 'proxy'`,
+		`ALTER TABLE requests ADD COLUMN process_pid INTEGER DEFAULT 0`,
+		`ALTER TABLE requests ADD COLUMN process_name TEXT DEFAULT ''`,
+	}
+	for _, stmt := range alterList {
+		if _, err := s.db.Exec(stmt); err != nil {
+			slog.Warn("migrate alter (ignored, column may exist)", "sql", truncateStr(stmt, 50), "error", err)
+		}
+	}
 	return nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"packetlab/internal/capture"
@@ -528,6 +529,10 @@ func (s *Server) handleInterceptRules(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
 			return
 		}
+		if rule.Pattern == "" || (rule.Action != "allow" && rule.Action != "block") {
+			writeJSON(w, http.StatusBadRequest, apiError("pattern required, action must be allow or block"))
+			return
+		}
 		id, err := s.store.SaveRule(&rule)
 		if err != nil {
 			slog.Error("save rule failed", "error", err)
@@ -563,6 +568,8 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 		}
 		if err := s.store.UpdateRule(id, body.Enabled); err != nil {
 			slog.Error("update rule failed", "id", id, "error", err)
+			writeJSON(w, http.StatusInternalServerError, apiError(err.Error()))
+			return
 		}
 		if s.interceptor != nil {
 			rules, err := s.store.ListRules()
@@ -574,6 +581,8 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 	case http.MethodDelete:
 		if err := s.store.DeleteRule(id); err != nil {
 			slog.Error("delete rule failed", "id", id, "error", err)
+			writeJSON(w, http.StatusInternalServerError, apiError(err.Error()))
+			return
 		}
 		if s.interceptor != nil {
 			rules, err := s.store.ListRules()
@@ -646,7 +655,11 @@ func (s *Server) handleCaptureStop(w http.ResponseWriter, r *http.Request) {
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // 本地工具，允许所有来源
+		origin := r.Header.Get("Origin")
+		return origin == "" ||
+			strings.HasPrefix(origin, "http://localhost") ||
+			strings.HasPrefix(origin, "http://127.0.0.1") ||
+			strings.HasPrefix(origin, "http://[::1]")
 	},
 }
 
