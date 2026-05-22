@@ -10,6 +10,8 @@
 
 ## 功能 1：网卡流量捕获 + 进程关联
 
+> 📋 详细实施方案见 [docs/NETWORK_CAPTURE.md](docs/NETWORK_CAPTURE.md)
+
 ### 架构决策
 
 | 决策项 | 选择 | 理由 |
