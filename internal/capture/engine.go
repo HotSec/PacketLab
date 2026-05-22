@@ -391,6 +391,7 @@ func (p *TCPStreamPool) New(srcIP net.IP, srcPort layers.TCPPort, dstIP net.IP, 
 		engine:     p.engine,
 		srcIP:      srcIP,
 		srcPort:    uint16(srcPort),
+		dstPort:    uint16(dstPort),
 		lastActive: time.Now(),
 	}
 }
@@ -400,15 +401,22 @@ type TCPStream struct {
 	engine     *Engine
 	srcIP      net.IP
 	srcPort    uint16
+	dstPort    uint16 // 目标端口（用于判断 HTTP/HTTPS）
 	buf        []byte
 	lastActive time.Time
 	pendingReq *models.CapturedRequest // 等待匹配响应的请求
+	msgCut     int                      // 已消费的消息边界
 }
 
 // Feed 喂入 TCP 数据（direction=true 表示 client→server）
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.lastActive = time.Now()
 	s.buf = append(s.buf, data...)
+	// 缓冲区超限：丢弃已消费部分，保留未处理数据
+	if len(s.buf) > 2*1024*1024 && s.msgCut > 0 {
+		s.buf = s.buf[s.msgCut:]
+		s.msgCut = 0
+	}
 	if len(s.buf) > 2*1024*1024 {
 		s.buf = s.buf[len(s.buf)-2*1024*1024:]
 	}
@@ -424,6 +432,7 @@ func (s *TCPStream) tryExtractHTTP() {
 		}
 		msgData := s.buf[:idx]
 		s.buf = s.buf[idx:]
+		s.msgCut += idx // 跟踪已消费位置
 
 		// 判断是请求还是响应
 		if isHTTPResponse(msgData) {
@@ -438,7 +447,7 @@ func (s *TCPStream) tryExtractHTTP() {
 				s.pendingReq = nil
 			}
 		} else {
-			req := parseHTTPRequest(msgData, s.srcIP, s.srcPort, s.engine)
+			req := parseHTTPRequest(msgData, s.srcIP, s.srcPort, s.dstPort, s.engine)
 			if req != nil {
 				// 保存为 pending，等待响应到达后补全再 emit
 				if s.pendingReq != nil {
@@ -456,13 +465,23 @@ func isHTTPResponse(data []byte) bool {
 	return len(data) >= 4 && (string(data[:4]) == "HTTP")
 }
 
-// findHTTPMessageEnd 查找 HTTP 消息结束位置（支持 Content-Length 和 chunked）
+// findHTTPMessageEnd 查找 HTTP 消息结束位置（支持 CRLF / LF / Content-Length / chunked）
 func findHTTPMessageEnd(data []byte) int {
 	idx := -1
+	// 优先 CRLF
 	for i := 0; i < len(data)-3; i++ {
 		if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
 			idx = i + 4
 			break
+		}
+	}
+	// 回退 LFLF（非标准但常见）
+	if idx < 0 {
+		for i := 0; i < len(data)-1; i++ {
+			if data[i] == '\n' && data[i+1] == '\n' {
+				idx = i + 2
+				break
+			}
 		}
 	}
 	if idx < 0 {
@@ -537,17 +556,29 @@ func findChunkedEnd(data []byte) int {
 	return -1
 }
 
-// parseHTTPResponse 解析 HTTP 响应
+// parseHTTPResponse 解析 HTTP 响应（字节级 body 提取）
 func parseHTTPResponse(data []byte) *struct {
 	StatusCode int
 	Headers    map[string]string
 	Body       string
 } {
-	s := string(data)
-	lines := strings.Split(s, "\r\n")
+	headerEnd := -1
+	for i := 0; i < len(data)-3; i++ {
+		if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
+			headerEnd = i
+			break
+		}
+	}
+	if headerEnd < 0 {
+		return nil
+	}
+
+	headerData := string(data[:headerEnd])
+	lines := strings.Split(headerData, "\r\n")
 	if len(lines) < 1 {
 		return nil
 	}
+
 	// 状态行: HTTP/1.1 200 OK
 	parts := strings.SplitN(lines[0], " ", 3)
 	if len(parts) < 2 {
@@ -560,20 +591,16 @@ func parseHTTPResponse(data []byte) *struct {
 	}
 
 	headers := make(map[string]string)
-	bodyStart := -1
-	for i, line := range lines[1:] {
-		if line == "" {
-			bodyStart = i + 2
-			break
-		}
+	for _, line := range lines[1:] {
 		if ci := strings.Index(line, ":"); ci > 0 {
 			headers[strings.TrimSpace(line[:ci])] = strings.TrimSpace(line[ci+1:])
 		}
 	}
 
 	body := ""
-	if bodyStart > 0 && bodyStart < len(lines) {
-		body = strings.Join(lines[bodyStart:], "\r\n")
+	bodyBytes := data[headerEnd+4:]
+	if len(bodyBytes) > 0 {
+		body = string(bodyBytes)
 	}
 
 	return &struct {
@@ -611,10 +638,22 @@ func parseTransferEncoding(headerData []byte) string {
 	return ""
 }
 
-// parseHTTPRequest 解析 HTTP 请求
-func parseHTTPRequest(data []byte, srcIP net.IP, srcPort uint16, engine *Engine) *models.CapturedRequest {
-	s := string(data)
-	lines := strings.Split(s, "\r\n")
+// parseHTTPRequest 解析 HTTP 请求（字节级 body 提取）
+func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine *Engine) *models.CapturedRequest {
+	// 查找 \r\n\r\n 分隔符（header 结束）
+	headerEnd := -1
+	for i := 0; i < len(data)-3; i++ {
+		if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
+			headerEnd = i
+			break
+		}
+	}
+	if headerEnd < 0 {
+		return nil
+	}
+
+	headerData := string(data[:headerEnd])
+	lines := strings.Split(headerData, "\r\n")
 	if len(lines) < 1 {
 		return nil
 	}
@@ -630,12 +669,7 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort uint16, engine *Engine)
 	// 解析 Headers
 	headers := make(map[string]string)
 	host := ""
-	bodyStart := -1
-	for i, line := range lines[1:] {
-		if line == "" {
-			bodyStart = i + 2 // 跳过空行
-			break
-		}
+	for _, line := range lines[1:] {
 		if colonIdx := strings.Index(line, ":"); colonIdx > 0 {
 			key := strings.TrimSpace(line[:colonIdx])
 			val := strings.TrimSpace(line[colonIdx+1:])
@@ -650,18 +684,26 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort uint16, engine *Engine)
 		host = srcIP.String()
 	}
 
-	// 构造 URL
-	url := fmt.Sprintf("https://%s%s", host, urlPath)
+	// 构造 URL：根据目标端口判断 scheme
+	scheme := "http"
+	isHTTPS := false
+	if dstPort == 443 {
+		scheme = "https"
+		isHTTPS = true
+	}
+	url := fmt.Sprintf("%s://%s%s", scheme, host, urlPath)
 	if !strings.HasPrefix(urlPath, "/") {
-		url = fmt.Sprintf("https://%s/%s", host, urlPath)
+		url = fmt.Sprintf("%s://%s/%s", scheme, host, urlPath)
 	}
 
+	// 字节级提取 body（避免 lines.Split 误分割二进制内容）
 	body := ""
-	if bodyStart > 0 && bodyStart < len(lines) {
-		body = strings.Join(lines[bodyStart:], "\r\n")
+	bodyBytes := data[headerEnd+4:]
+	if len(bodyBytes) > 0 {
+		body = string(bodyBytes)
 	}
 
-	// 进程关联（使用引擎缓存）
+	// 进程关联
 	var procPID int
 	var procName string
 	if proc := engine.ResolveProcess(srcIP, srcPort); proc != nil {
@@ -675,7 +717,7 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort uint16, engine *Engine)
 		Host:        host,
 		Path:        urlPath,
 		Protocol:    "HTTP/1.1",
-		IsHTTPS:     false,
+		IsHTTPS:     isHTTPS,
 		ReqHeaders:  headers,
 		ReqBody:     body,
 		CapturedAt:  time.Now(),
