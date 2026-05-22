@@ -250,7 +250,7 @@ func NewAssembler(pool *TCPStreamPool) *Assembler {
 	}
 }
 
-// Assemble 组装数据包到流中
+// Assemble 组装数据包到流中（双方向归一化）
 func (a *Assembler) Assemble(packet gopacket.Packet) {
 	ipLayer := packet.Layer(layers.LayerTypeIPv4)
 	tcpLayer := packet.Layer(layers.LayerTypeTCP)
@@ -260,13 +260,30 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	ip, _ := ipLayer.(*layers.IPv4)
 	tcp, _ := tcpLayer.(*layers.TCP)
 
-	// 只处理有数据的 TCP 包
 	if len(tcp.Payload) == 0 {
 		return
 	}
 
-	// 流 ID = srcIP:srcPort->dstIP:dstPort
-	streamKey := fmt.Sprintf("%s:%d", ip.SrcIP, tcp.SrcPort)
+	// 归一化 4 元组流键：同一 TCP 连接的双方向映射到同一流
+	// key = "min(src,dst):min(sport,dport):max(src,dst):max(sport,dport)"
+	srcIPStr := ip.SrcIP.String()
+	dstIPStr := ip.DstIP.String()
+	srcPort := uint16(tcp.SrcPort)
+	dstPort := uint16(tcp.DstPort)
+
+	var keyA, keyB string
+	var portA, portB uint16
+	var ipA, ipB net.IP
+	if srcIPStr < dstIPStr || (srcIPStr == dstIPStr && srcPort < dstPort) {
+		keyA, keyB = srcIPStr, dstIPStr
+		portA, portB = srcPort, dstPort
+		ipA, ipB = ip.SrcIP, ip.DstIP
+	} else {
+		keyA, keyB = dstIPStr, srcIPStr
+		portA, portB = dstPort, srcPort
+		ipA, ipB = ip.DstIP, ip.SrcIP
+	}
+	streamKey := fmt.Sprintf("%s:%d-%s:%d", keyA, portA, keyB, portB)
 
 	a.mu.Lock()
 	stream, ok := a.streams[streamKey]
@@ -275,12 +292,14 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 			a.mu.Unlock()
 			return
 		}
-		stream = a.pool.New(ip.SrcIP, tcp.SrcPort, ip.DstIP, tcp.DstPort)
+		stream = a.pool.New(ipA, layers.TCPPort(portA), ipB, layers.TCPPort(portB))
 		a.streams[streamKey] = stream
 	}
 	a.mu.Unlock()
 
-	stream.Feed(tcp.Payload)
+	// 判断方向：src 是否等于流记录的 A 端
+	isClientToServer := srcIPStr == keyA && srcPort == portA
+	stream.Feed(tcp.Payload, isClientToServer)
 }
 
 // FlushOlderThan 清理过期流
@@ -325,45 +344,69 @@ func (p *TCPStreamPool) New(srcIP net.IP, srcPort layers.TCPPort, dstIP net.IP, 
 	}
 }
 
-// TCPStream 单个 TCP 流
+// TCPStream 单个 TCP 流（双方向数据合并）
 type TCPStream struct {
 	engine     *Engine
 	srcIP      net.IP
 	srcPort    uint16
 	buf        []byte
 	lastActive time.Time
+	pendingReq *models.CapturedRequest // 等待匹配响应的请求
 }
 
-// Feed 喂入 TCP 数据
-func (s *TCPStream) Feed(data []byte) {
+// Feed 喂入 TCP 数据（direction=true 表示 client→server）
+func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.lastActive = time.Now()
 	s.buf = append(s.buf, data...)
 	if len(s.buf) > 2*1024*1024 {
-		s.buf = s.buf[len(s.buf)-2*1024*1024:] // 截断到 2MB
+		s.buf = s.buf[len(s.buf)-2*1024*1024:]
 	}
 	s.tryExtractHTTP()
 }
 
-// tryExtractHTTP 尝试从流中提取 HTTP 请求
+// tryExtractHTTP 尝试从流中提取 HTTP 请求和响应
 func (s *TCPStream) tryExtractHTTP() {
 	for {
-		idx := findHTTPRequestEnd(s.buf)
+		idx := findHTTPMessageEnd(s.buf)
 		if idx < 0 {
 			return
 		}
-		reqData := s.buf[:idx]
+		msgData := s.buf[:idx]
 		s.buf = s.buf[idx:]
 
-		req := parseHTTPRequest(reqData, s.srcIP, s.srcPort)
-		if req != nil {
-			s.engine.emit(req)
+		// 判断是请求还是响应
+		if isHTTPResponse(msgData) {
+			resp := parseHTTPResponse(msgData)
+			if resp != nil && s.pendingReq != nil {
+				s.pendingReq.StatusCode = resp.StatusCode
+				s.pendingReq.ResHeaders = resp.Headers
+				s.pendingReq.ResBody = resp.Body
+				s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
+				s.pendingReq.SizeBytes = int64(len(msgData))
+				s.engine.emit(s.pendingReq)
+				s.pendingReq = nil
+			}
+		} else {
+			req := parseHTTPRequest(msgData, s.srcIP, s.srcPort)
+			if req != nil {
+				// 保存为 pending，等待响应到达后补全再 emit
+				if s.pendingReq != nil {
+					// 前一个请求未收到响应（pipeline），直接 emit
+					s.engine.emit(s.pendingReq)
+				}
+				s.pendingReq = req
+			}
 		}
 	}
 }
 
-// findHTTPRequestEnd 查找 HTTP 请求结束位置
-func findHTTPRequestEnd(data []byte) int {
-	// 查找 \r\n\r\n（请求头结束）
+// isHTTPResponse 判断是否是 HTTP 响应（以 HTTP/ 开头）
+func isHTTPResponse(data []byte) bool {
+	return len(data) >= 4 && (string(data[:4]) == "HTTP")
+}
+
+// findHTTPMessageEnd 查找 HTTP 消息结束位置
+func findHTTPMessageEnd(data []byte) int {
 	idx := -1
 	for i := 0; i < len(data)-3; i++ {
 		if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
@@ -374,16 +417,61 @@ func findHTTPRequestEnd(data []byte) int {
 	if idx < 0 {
 		return -1
 	}
-	// 检查是否有 Content-Length
 	cl := parseContentLength(data[:idx])
 	if cl > 0 {
 		bodyEnd := idx + cl
 		if bodyEnd <= len(data) {
 			return bodyEnd
 		}
-		return -1 // 等待更多数据
+		return -1
 	}
 	return idx
+}
+
+// parseHTTPResponse 解析 HTTP 响应
+func parseHTTPResponse(data []byte) *struct {
+	StatusCode int
+	Headers    map[string]string
+	Body       string
+} {
+	s := string(data)
+	lines := strings.Split(s, "\r\n")
+	if len(lines) < 1 {
+		return nil
+	}
+	// 状态行: HTTP/1.1 200 OK
+	parts := strings.SplitN(lines[0], " ", 3)
+	if len(parts) < 2 {
+		return nil
+	}
+	var statusCode int
+	fmt.Sscanf(parts[1], "%d", &statusCode)
+	if statusCode < 100 || statusCode > 599 {
+		return nil
+	}
+
+	headers := make(map[string]string)
+	bodyStart := -1
+	for i, line := range lines[1:] {
+		if line == "" {
+			bodyStart = i + 2
+			break
+		}
+		if ci := strings.Index(line, ":"); ci > 0 {
+			headers[strings.TrimSpace(line[:ci])] = strings.TrimSpace(line[ci+1:])
+		}
+	}
+
+	body := ""
+	if bodyStart > 0 && bodyStart < len(lines) {
+		body = strings.Join(lines[bodyStart:], "\r\n")
+	}
+
+	return &struct {
+		StatusCode int
+		Headers    map[string]string
+		Body       string
+	}{StatusCode: statusCode, Headers: headers, Body: body}
 }
 
 // parseContentLength 从 HTTP 头解析 Content-Length
