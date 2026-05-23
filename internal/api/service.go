@@ -1,0 +1,195 @@
+package api
+
+import (
+	"bytes"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"time"
+
+	"packetlab/internal/models"
+	"packetlab/internal/store"
+)
+
+type ResendService struct {
+	store    *store.Store
+	hub      *wsHub
+	insecure bool
+}
+
+func NewResendService(st *store.Store, hub *wsHub, insecure bool) *ResendService {
+	return &ResendService{store: st, hub: hub, insecure: insecure}
+}
+
+type ResendResult struct {
+	ID         int64             `json:"id"`
+	StatusCode int               `json:"status_code"`
+	ResHeaders map[string]string `json:"res_headers"`
+	ResBody    string            `json:"res_body"`
+	DurationMs int64             `json:"duration_ms"`
+	SizeBytes  int64             `json:"size_bytes"`
+}
+
+func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error) {
+	parsedURL, err := url.Parse(req.URL)
+	if err != nil {
+		return nil, ErrValidation(fmt.Sprintf("invalid URL: %s", err.Error()))
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return nil, ErrValidation(fmt.Sprintf("unsupported scheme: %s", parsedURL.Scheme))
+	}
+
+	isHTTPS := parsedURL.Scheme == "https"
+	startTime := time.Now()
+
+	var bodyReader io.Reader
+	if req.Body != "" {
+		bodyReader = bytes.NewBufferString(req.Body)
+	}
+
+	httpReq, err := http.NewRequest(req.Method, req.URL, bodyReader)
+	if err != nil {
+		return nil, ErrValidation(fmt.Sprintf("create request: %s", err.Error()))
+	}
+
+	for k, v := range req.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	if httpReq.Header.Get("User-Agent") == "" {
+		httpReq.Header.Set("User-Agent", "PacketLab/2.0")
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: s.insecure},
+		},
+	}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, ErrBadGateway(fmt.Sprintf("send request: %s", err.Error()))
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
+
+	result := &ResendResult{
+		StatusCode: resp.StatusCode,
+		ResHeaders: FlattenHeaders(resp.Header),
+		ResBody:    string(respBody),
+		DurationMs: time.Since(startTime).Milliseconds(),
+		SizeBytes:  int64(len(respBody)),
+	}
+
+	captured := &models.CapturedRequest{
+		Method:     req.Method,
+		URL:        req.URL,
+		Host:       parsedURL.Host,
+		Path:       parsedURL.Path,
+		Protocol:   resp.Proto,
+		IsHTTPS:    isHTTPS,
+		ReqHeaders: req.Headers,
+		ReqBody:    req.Body,
+		StatusCode: resp.StatusCode,
+		ResHeaders: result.ResHeaders,
+		ResBody:    result.ResBody,
+		DurationMs: result.DurationMs,
+		SizeBytes:  result.SizeBytes,
+		CapturedAt: time.Now(),
+	}
+
+	id, err := s.store.Save(captured)
+	if err != nil {
+		return nil, ErrInternal("failed to save resend result")
+	}
+	result.ID = id
+
+	if s.hub != nil {
+		s.hub.broadcast(captured)
+	}
+
+	return result, nil
+}
+
+type HARService struct {
+	store *store.Store
+}
+
+func NewHARService(st *store.Store) *HARService {
+	return &HARService{store: st}
+}
+
+type HAREntry struct {
+	StartedDateTime string                 `json:"startedDateTime"`
+	Time            int64                  `json:"time"`
+	Request         map[string]interface{} `json:"request"`
+	Response        map[string]interface{} `json:"response"`
+	Cache           map[string]interface{} `json:"cache"`
+	Timings         map[string]interface{} `json:"timings"`
+	ServerIPAddress string                 `json:"serverIPAddress"`
+}
+
+func (s *HARService) Export(limit int) (map[string]interface{}, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+
+	items, err := s.store.ListFull("", "", "", false, limit, 0)
+	if err != nil {
+		return nil, ErrInternal("failed to query requests for HAR export")
+	}
+
+	entries := make([]map[string]interface{}, 0, len(items))
+	for _, req := range items {
+		entry := map[string]interface{}{
+			"startedDateTime": req.CapturedAt.Format("2006-01-02T15:04:05.000Z"),
+			"time":            req.DurationMs,
+			"request": map[string]interface{}{
+				"method":      req.Method,
+				"url":         req.URL,
+				"httpVersion": "HTTP/1.1",
+				"headers":     toHARHeaders(req.ReqHeaders),
+				"headersSize": -1,
+				"bodySize":    len(req.ReqBody),
+			},
+			"response": map[string]interface{}{
+				"status":      req.StatusCode,
+				"statusText":  http.StatusText(req.StatusCode),
+				"httpVersion": "HTTP/1.1",
+				"headers":     toHARHeaders(req.ResHeaders),
+				"headersSize": -1,
+				"bodySize":    len(req.ResBody),
+				"content": map[string]interface{}{
+					"size": len(req.ResBody),
+					"text": req.ResBody,
+				},
+			},
+			"cache":            map[string]interface{}{},
+			"timings":          map[string]interface{}{"send": 0, "wait": req.DurationMs, "receive": 0},
+			"serverIPAddress":  req.Host,
+		}
+		entries = append(entries, entry)
+	}
+
+	return map[string]interface{}{
+		"log": map[string]interface{}{
+			"version": "1.2",
+			"creator": map[string]string{
+				"name":    "PacketLab",
+				"version": "2.0",
+			},
+			"entries": entries,
+		},
+	}, nil
+}
+
+func toHARHeaders(headers map[string]string) []map[string]string {
+	h := make([]map[string]string, 0, len(headers))
+	for k, v := range headers {
+		h = append(h, map[string]string{"name": k, "value": v})
+	}
+	return h
+}

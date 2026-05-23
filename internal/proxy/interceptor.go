@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"packetlab/internal/api"
 	"packetlab/internal/models"
+	"packetlab/internal/store"
 
 	"github.com/elazarl/goproxy"
 )
@@ -22,6 +24,7 @@ type Interceptor struct {
 	pending  map[string]*pendingReq
 	onNotify func(req *models.PendingRequest)
 	timeout  time.Duration
+	logCh    chan *models.InterceptLog
 }
 
 type pendingReq struct {
@@ -33,16 +36,21 @@ type pendingReq struct {
 }
 
 // NewInterceptor 创建拦截控制器
-func NewInterceptor(timeoutSec int, onNotify func(req *models.PendingRequest)) *Interceptor {
+func NewInterceptor(timeoutSec int, onNotify func(req *models.PendingRequest), st *store.Store) *Interceptor {
 	if timeoutSec <= 0 {
 		timeoutSec = 15
 	}
-	return &Interceptor{
+	it := &Interceptor{
 		mode:     "auto",
 		pending:  make(map[string]*pendingReq),
 		onNotify: onNotify,
 		timeout:  time.Duration(timeoutSec) * time.Second,
+		logCh:    make(chan *models.InterceptLog, 1024),
 	}
+	if st != nil {
+		it.startLogWriter(st)
+	}
+	return it
 }
 
 // SetMode 设置拦截模式
@@ -57,6 +65,16 @@ func (it *Interceptor) GetMode() string {
 	it.mu.RLock()
 	defer it.mu.RUnlock()
 	return it.mode
+}
+
+func (it *Interceptor) startLogWriter(st *store.Store) {
+	go func() {
+		for log := range it.logCh {
+			if err := st.SaveInterceptLog(log); err != nil {
+				slog.Warn("failed to save intercept log", "error", err)
+			}
+		}
+	}()
 }
 
 // SetRules 设置规则列表
@@ -100,6 +118,17 @@ func (it *Interceptor) Resolve(id string, result models.InterceptResult) error {
 
 	p.timer.Stop()
 	result.RequestID = id
+
+	// 记录拦截日志（非阻塞）
+	it.writeLog(&models.InterceptLog{
+		Action:        result.Action,
+		RequestURL:    p.req.URL.String(),
+		RequestMethod: p.req.Method,
+		RequestHost:   p.req.URL.Host,
+		RulePattern:   "",
+		Mode:          "manual",
+	})
+
 	p.result <- result
 	return nil
 }
@@ -120,9 +149,26 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			}
 			if matchRule(rule.Pattern, req.URL.Host, req.URL.Path) {
 				if rule.Action == "block" {
+					// 记录拦截日志（非阻塞）
+					it.writeLog(&models.InterceptLog{
+						Action:        "drop",
+						RequestURL:    req.URL.String(),
+						RequestMethod: req.Method,
+						RequestHost:   req.URL.Host,
+						RulePattern:   rule.Pattern,
+						Mode:          "auto",
+					})
 					return nil, goproxy.NewResponse(req, "text/plain", 403, "Blocked by PacketLab rule: "+rule.Pattern)
 				}
 				// allow → 放行
+				it.writeLog(&models.InterceptLog{
+					Action:        "allow",
+					RequestURL:    req.URL.String(),
+					RequestMethod: req.Method,
+					RequestHost:   req.URL.Host,
+					RulePattern:   rule.Pattern,
+					Mode:          "auto",
+				})
 				break
 			}
 		}
@@ -195,8 +241,26 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			delete(it.pending, id)
 		}
 		it.mu.Unlock()
+		it.writeLog(&models.InterceptLog{
+			Action:        "allow",
+			RequestURL:    req.URL.String(),
+			RequestMethod: req.Method,
+			RequestHost:   req.URL.Host,
+			RulePattern:   "",
+			Mode:          "manual",
+		})
 		storeFunc(req)
 		return req, nil
+	}
+}
+
+// writeLog 非阻塞写入拦截日志到 channel
+func (it *Interceptor) writeLog(log *models.InterceptLog) {
+	select {
+	case it.logCh <- log:
+	default:
+		slog.Warn("intercept log channel full, dropping log",
+			"action", log.Action, "url", log.RequestURL)
 	}
 }
 

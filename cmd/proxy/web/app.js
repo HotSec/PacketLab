@@ -69,29 +69,63 @@ let ws = null, wsReconnectTimer = null;
 let requestVersion = 0;
 
 // ── API Client ───────────────────────────────
+const ERROR_MESSAGES = {
+  NOT_FOUND: '请求的资源不存在',
+  VALIDATION_ERROR: '输入参数有误，请检查后重试',
+  METHOD_NOT_ALLOWED: '请求方法不被允许',
+  INTERNAL_ERROR: '服务器内部错误，请稍后重试',
+  SERVICE_UNAVAILABLE: '服务暂不可用，请稍后重试',
+  BAD_GATEWAY: '上游服务不可达，请检查目标地址',
+  RATE_LIMITED: '请求过于频繁，请稍后重试',
+  CONFLICT: '操作冲突，请刷新后重试',
+};
+
+function getErrorMessage(body, status) {
+  if (body && body.code && ERROR_MESSAGES[body.code]) return ERROR_MESSAGES[body.code];
+  if (body && body.message) return body.message;
+  if (body && body.error) return body.error;
+  if (status === 404) return '请求的资源不存在';
+  if (status === 429) return '请求过于频繁，请稍后重试';
+  if (status >= 500) return '服务器错误，请稍后重试';
+  if (status >= 400) return '请求参数有误';
+  return '网络请求失败';
+}
+
+async function apiRequest(path, options) {
+  try {
+    const r = await fetch(API_BASE + path, options);
+    if (!r.ok) {
+      let body = null;
+      try { body = await r.json(); } catch {}
+      const msg = getErrorMessage(body, r.status);
+      showToast('error', msg);
+      const err = new Error(msg);
+      err.code = body?.code || '';
+      err.status = r.status;
+      err.requestId = body?.request_id || '';
+      throw err;
+    }
+    if (r.status === 204) return null;
+    return r.json();
+  } catch (e) {
+    if (e instanceof TypeError && e.message.includes('fetch')) {
+      showToast('error', '无法连接服务器，请检查网络');
+    }
+    throw e;
+  }
+}
+
 async function apiGet(p) {
-  const r = await fetch(API_BASE + p);
-  if (!r.ok) { const msg = `API ${r.status}`; showToast('error', msg); throw new Error(msg); }
-  return r.json();
+  return apiRequest(p);
 }
 async function apiPost(p, b) {
-  const r = await fetch(API_BASE + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
-  if (!r.ok) {
-    let msg = `API ${r.status}`;
-    try { const body = await r.json(); if (body.error) msg = body.error; } catch {}
-    showToast('error', msg); throw new Error(msg);
-  }
-  return r.json();
+  return apiRequest(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
 }
 async function apiDelete(p) {
-  const r = await fetch(API_BASE + p, { method: 'DELETE' });
-  if (!r.ok) { const msg = `API ${r.status}`; showToast('error', msg); throw new Error(msg); }
-  return r.json();
+  return apiRequest(p, { method: 'DELETE' });
 }
 async function apiPut(p, b) {
-  const r = await fetch(API_BASE + p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
-  if (!r.ok) { const msg = `API ${r.status}`; showToast('error', msg); throw new Error(msg); }
-  return r.json();
+  return apiRequest(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
 }
 
 // ── Data Loading ─────────────────────────────
@@ -876,6 +910,49 @@ async function startCaptureFromPanel() {
       showToast('error', '启动失败: ' + msg);
   }
 }
+// ── Intercept Logs ──────────────────────────
+function switchRulesTab(tab) {
+  document.querySelectorAll('.rules-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.rules-tab').forEach(t => { if (t.textContent.trim().startsWith(tab === 'rules' ? '规则' : '拦截')) t.classList.add('active'); });
+  document.getElementById('rulesPanelContent').style.display = tab === 'rules' ? '' : 'none';
+  document.getElementById('logsPanelContent').style.display = tab === 'logs' ? '' : 'none';
+  if (tab === 'logs') loadInterceptLogs();
+}
+
+async function loadInterceptLogs() {
+  try {
+    const action = document.getElementById('logActionFilter').value;
+    const limit = document.getElementById('logLimitSelect').value || '50';
+    const p = new URLSearchParams();
+    if (action) p.set('action', action);
+    p.set('limit', limit);
+    const r = await apiGet('/api/intercept/logs?' + p.toString());
+    renderInterceptLogs(r.data || []);
+  } catch (e) { console.warn('loadInterceptLogs failed:', e); }
+}
+
+function renderInterceptLogs(logs) {
+  const container = document.getElementById('logList');
+  if (!logs || logs.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-tertiary);padding:16px;text-align:center;font-size:11px">暂无拦截日志</div>';
+    return;
+  }
+  container.innerHTML = logs.map(l => {
+    const actionLabel = { allow: 'ALLOW', drop: 'DROP', modify: 'MODIFY' }[l.action] || l.action;
+    const time = l.created_at ? new Date(l.created_at.replace(' ', 'T') + 'Z').toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+    const rule = l.rule_pattern ? `<span style="color:var(--accent);font-size:9px">${esc(l.rule_pattern)}</span>` : '';
+    return `<div class="log-item">
+      <span class="log-item-action ${l.action}">${actionLabel}</span>
+      <span class="log-item-url" title="${esc(l.request_url)}">${esc(l.request_method)} ${esc(l.request_url)}</span>
+      <span class="log-item-meta">
+        ${rule}
+        <span class="log-item-mode">${l.mode}</span>
+        <span class="log-item-time">${time}</span>
+      </span>
+    </div>`;
+  }).join('');
+}
+
 // ── Init ─────────────────────────────────────
 (function init() {
   applyLang();

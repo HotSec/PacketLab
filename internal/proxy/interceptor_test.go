@@ -1,0 +1,278 @@
+package proxy
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync"
+	"testing"
+	"time"
+
+	"packetlab/internal/models"
+)
+
+// ========================================
+// NewInterceptor
+// ========================================
+
+func TestNewInterceptorDefaultMode(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	if it.GetMode() != "auto" {
+		t.Errorf("expected mode=auto, got %s", it.GetMode())
+	}
+}
+
+func TestNewInterceptorTimeout(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	if it.timeout != 15*time.Second {
+		t.Errorf("expected timeout=15s, got %v", it.timeout)
+	}
+}
+
+func TestNewInterceptorZeroTimeout(t *testing.T) {
+	it := NewInterceptor(0, nil, nil)
+	if it.timeout != 15*time.Second {
+		t.Errorf("expected default timeout=15s for zero input, got %v", it.timeout)
+	}
+}
+
+// ========================================
+// SetMode / GetMode
+// ========================================
+
+func TestSetGetMode(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	it.SetMode("manual")
+	if it.GetMode() != "manual" {
+		t.Errorf("expected mode=manual, got %s", it.GetMode())
+	}
+	it.SetMode("auto")
+	if it.GetMode() != "auto" {
+		t.Errorf("expected mode=auto, got %s", it.GetMode())
+	}
+}
+
+// ========================================
+// SetRules + matchRule
+// ========================================
+
+func TestMatchRuleExact(t *testing.T) {
+	if !matchRule("example.com", "example.com", "/") {
+		t.Error("expected exact host match")
+	}
+	if matchRule("example.com", "other.com", "/") {
+		t.Error("expected no match for different host")
+	}
+}
+
+func TestMatchRuleWildcard(t *testing.T) {
+	if !matchRule("*.example.com", "sub.example.com", "/api") {
+		t.Error("expected wildcard match *.example.com → sub.example.com")
+	}
+	if matchRule("*.example.com", "other.com", "/api") {
+		t.Error("expected no match for wildcard on different host")
+	}
+}
+
+func TestMatchRuleHostPathPrefix(t *testing.T) {
+	if !matchRule("example.com/api", "example.com", "/api/v1/users") {
+		t.Error("expected host/path prefix match")
+	}
+	if matchRule("example.com/api", "example.com", "/other") {
+		t.Error("expected no match for different path")
+	}
+}
+
+func TestMatchRuleCaseInsensitive(t *testing.T) {
+	if !matchRule("EXAMPLE.COM", "example.com", "/") {
+		t.Error("expected case-insensitive host match")
+	}
+}
+
+// ========================================
+// GetPending
+// ========================================
+
+func TestGetPendingEmpty(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	pending := it.GetPending()
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending, got %d", len(pending))
+	}
+}
+
+// ========================================
+// Resolve — invalid id
+// ========================================
+
+func TestResolveInvalidID(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	err := it.Resolve("nonexistent", models.InterceptResult{Action: "allow"})
+	if err == nil {
+		t.Error("expected error for invalid request id")
+	}
+}
+
+// ========================================
+// Handle — auto mode with block rule
+// ========================================
+
+func TestHandleAutoBlock(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	it.SetMode("auto")
+	it.SetRules([]models.InterceptRule{
+		{Pattern: "*.blocked.com", Action: "block", Enabled: true},
+	})
+
+	req := httptest.NewRequest("GET", "https://evil.blocked.com/phish", nil)
+
+	_, resp := it.Handle(req, nil, func(r *http.Request) {})
+	if resp == nil {
+		t.Error("expected blocked response, got nil")
+	} else if resp.StatusCode != 403 {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+// ========================================
+// Handle — auto mode with allow rule (pass through)
+// ========================================
+
+func TestHandleAutoAllow(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	it.SetMode("auto")
+	it.SetRules([]models.InterceptRule{
+		{Pattern: "*.allowed.com", Action: "allow", Enabled: true},
+	})
+
+	req := httptest.NewRequest("GET", "https://sub.allowed.com/api", nil)
+
+	resultReq, resultResp := it.Handle(req, nil, func(r *http.Request) {})
+	if resultResp != nil {
+		t.Error("expected nil response for allow rule")
+	}
+	if resultReq != req {
+		t.Error("expected request to pass through")
+	}
+}
+
+// ========================================
+// Handle — auto mode, no rule match
+// ========================================
+
+func TestHandleAutoNoMatch(t *testing.T) {
+	it := NewInterceptor(15, nil, nil)
+	it.SetMode("auto")
+	it.SetRules([]models.InterceptRule{
+		{Pattern: "*.example.com", Action: "block", Enabled: true},
+	})
+
+	req := httptest.NewRequest("GET", "https://other.com/", nil)
+
+	resultReq, resultResp := it.Handle(req, nil, func(r *http.Request) {})
+	if resultResp != nil {
+		t.Error("expected nil response for no match")
+	}
+	if resultReq != req {
+		t.Error("expected request to pass through")
+	}
+}
+
+// ========================================
+// Handle — manual mode, pushes to pending
+// ========================================
+
+func TestHandleManualPending(t *testing.T) {
+	var mu sync.Mutex
+	var notified *models.PendingRequest
+
+	it := NewInterceptor(15, func(req *models.PendingRequest) {
+		mu.Lock()
+		notified = req
+		mu.Unlock()
+	}, nil)
+	it.SetMode("manual")
+
+	reqURL, _ := url.Parse("https://httpbin.org/post")
+	req := &http.Request{
+		Method: "POST",
+		URL:    reqURL,
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+	}
+
+	// Start Handle in goroutine (it will block waiting)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		it.Handle(req, nil, func(r *http.Request) {})
+	}()
+
+	// Wait for notification
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	n := notified
+	mu.Unlock()
+
+	if n == nil {
+		t.Fatal("expected notification")
+	}
+	if n.Method != "POST" {
+		t.Errorf("expected POST, got %s", n.Method)
+	}
+	if n.Host != "httpbin.org" {
+		t.Errorf("expected httpbin.org, got %s", n.Host)
+	}
+
+	// Resolve to unblock
+	err := it.Resolve(n.ID, models.InterceptResult{Action: "allow", RequestID: n.ID})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// Wait for Handle to return
+	select {
+	case <-done:
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handle did not return after resolve")
+	}
+
+	mu.Lock()
+	// Verify pending list is empty after resolve
+	pending := it.GetPending()
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending after resolve, got %d", len(pending))
+	}
+	mu.Unlock()
+}
+
+// ========================================
+// Handle — manual timeout auto-releases
+// ========================================
+
+func TestHandleManualTimeout(t *testing.T) {
+	it := NewInterceptor(1, nil, nil) // 1 second timeout
+	it.SetMode("manual")
+
+	reqURL, _ := url.Parse("https://httpbin.org/get")
+	req := &http.Request{
+		Method: "GET",
+		URL:    reqURL,
+		Header: http.Header{},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		it.Handle(req, nil, func(r *http.Request) {})
+	}()
+
+	// Wait for timeout (1s + buffer)
+	select {
+	case <-done:
+		// OK — request auto-released via timeout
+	case <-time.After(3 * time.Second):
+		t.Fatal("Handle did not return after timeout")
+	}
+}

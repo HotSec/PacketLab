@@ -75,7 +75,7 @@ func main() {
 	}
 	interceptor := proxy.NewInterceptor(15, func(req *models.PendingRequest) {
 		apiSrv.BroadcastIntercept(req)
-	})
+	}, st)
 	interceptor.SetMode(interceptMode)
 	if rules, err := st.ListRules(); err == nil {
 		interceptor.SetRules(rules)

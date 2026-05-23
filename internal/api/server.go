@@ -1,17 +1,11 @@
 package api
 
 import (
-	"bytes"
-	"crypto/tls"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"packetlab/internal/capture"
@@ -21,15 +15,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const maxRequestBodySize = 10 * 1024 * 1024 // 10 MB
+const maxRequestBodySize = 10 * 1024 * 1024
 
-// Server API 服务器
 type Server struct {
 	store         *store.Store
 	hub           *wsHub
 	mux           *http.ServeMux
 	frontend      http.Handler
-	insecure      bool
+	resendSvc     *ResendService
+	harSvc        *HARService
+	rateLimiter   *rateLimiter
 	captureEngine interface {
 		IsRunning() bool
 		Start() error
@@ -45,31 +40,29 @@ type Server struct {
 	}
 }
 
-// New 创建 API 服务器
 func New(st *store.Store, frontendHandler http.Handler, insecure bool) *Server {
 	hub := newWSHub()
 	go hub.run()
 
 	s := &Server{
-		store:    st,
-		hub:      hub,
-		frontend: frontendHandler,
-		insecure: insecure,
+		store:       st,
+		hub:         hub,
+		frontend:    frontendHandler,
+		resendSvc:   NewResendService(st, hub, insecure),
+		harSvc:      NewHARService(st),
+		rateLimiter: newRateLimiter(30, time.Minute),
 	}
 
 	s.setupRoutes()
 	return s
 }
 
-// setupRoutes 注册路由
 func (s *Server) setupRoutes() {
 	mux := http.NewServeMux()
 
-	// 健康检查
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/ready", s.handleReady)
 
-	// API 路由
 	mux.HandleFunc("/api/requests", s.handleListRequests)
 	mux.HandleFunc("/api/requests/", s.handleRequestByID)
 	mux.HandleFunc("/api/resend", s.handleResend)
@@ -77,35 +70,30 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/proxy/status", s.handleProxyStatus)
 
-	// API 地图
 	mux.HandleFunc("/api/apimap", s.handleAPIMap)
 	mux.HandleFunc("/api/apimap/notes", s.handleAPINotes)
 	mux.HandleFunc("/api/apimap/notes/", s.handleAPINoteByID)
 	mux.HandleFunc("/api/apimap/hosts", s.handleAPIHosts)
 
-	// 拦截
 	mux.HandleFunc("/api/intercept/mode", s.handleInterceptMode)
 	mux.HandleFunc("/api/intercept/pending", s.handleInterceptPending)
 	mux.HandleFunc("/api/intercept/action", s.handleInterceptAction)
 	mux.HandleFunc("/api/intercept/rules", s.handleInterceptRules)
 	mux.HandleFunc("/api/intercept/rules/", s.handleInterceptRuleByID)
 
-	// 网卡抓包
+	mux.HandleFunc("/api/intercept/logs", s.handleInterceptLogs)
+
 	mux.HandleFunc("/api/capture/status", s.handleCaptureStatus)
 	mux.HandleFunc("/api/capture/interfaces", s.handleCaptureInterfaces)
 	mux.HandleFunc("/api/capture/start", s.handleCaptureStart)
 	mux.HandleFunc("/api/capture/stop", s.handleCaptureStop)
 
-	// 导出
 	mux.HandleFunc("/api/export/har", s.handleExportHAR)
 
-	// 监控
 	mux.HandleFunc("/api/metrics", s.handleMetrics)
 
-	// WebSocket
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
-	// 静态文件（SPA fallback）
 	if s.frontend != nil {
 		mux.Handle("/", s.frontend)
 	}
@@ -113,12 +101,11 @@ func (s *Server) setupRoutes() {
 	s.mux = mux
 }
 
-// Handler 返回 HTTP Handler（含 CORS + 安全头）
 func (s *Server) Handler() http.Handler {
-	return securityHeadersMiddleware(corsMiddleware(s.mux))
+	h := securityHeadersMiddleware(corsMiddleware(recoveryMiddleware(requestIDMiddleware(requestIDInjectorMiddleware(s.mux)))))
+	return rateLimitMiddleware(s.rateLimiter)(h)
 }
 
-// SetCaptureEngine 设置抓包引擎
 func (s *Server) SetCaptureEngine(ce interface {
 	IsRunning() bool
 	Start() error
@@ -128,7 +115,6 @@ func (s *Server) SetCaptureEngine(ce interface {
 	s.captureEngine = ce
 }
 
-// SetInterceptor 设置拦截控制器引用
 func (s *Server) SetInterceptor(interceptor interface {
 	GetMode() string
 	SetMode(mode string)
@@ -139,12 +125,10 @@ func (s *Server) SetInterceptor(interceptor interface {
 	s.interceptor = interceptor
 }
 
-// BroadcastIntercept 广播待审批请求到 WebSocket
 func (s *Server) BroadcastIntercept(req *models.PendingRequest) {
 	s.hub.broadcastIntercept(req)
 }
 
-// BroadcastCapture 广播新捕获的请求
 func (s *Server) BroadcastCapture(req *models.CapturedRequest) {
 	s.hub.broadcast(req)
 }
@@ -178,10 +162,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 // Handlers
 // ========================================
 
-// handleListRequests GET /api/requests
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 
@@ -201,8 +184,8 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 
 	items, total, err := s.store.List(method, search, host, errorOnly, limit, offset)
 	if err != nil {
-		slog.Error("list requests failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to list requests"))
+		slog.Error("list requests failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to list requests"))
 		return
 	}
 
@@ -213,16 +196,15 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRequestByID GET/DELETE /api/requests/{id}
 func (s *Server) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Path[len("/api/requests/"):]
 	if idStr == "" {
-		writeJSON(w, http.StatusBadRequest, apiError("Missing id"))
+		writeAppError(w, ErrValidation("Missing id"))
 		return
 	}
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError("Invalid id"))
+		writeAppError(w, ErrValidation("Invalid id"))
 		return
 	}
 
@@ -232,14 +214,14 @@ func (s *Server) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteRequest(w, r, id)
 	default:
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 	}
 }
 
 func (s *Server) getRequest(w http.ResponseWriter, r *http.Request, id int64) {
 	req, err := s.store.Get(id)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, apiError("Not found"))
+		writeAppError(w, ErrNotFound("Request", strconv.FormatInt(id, 10)))
 		return
 	}
 	writeJSON(w, http.StatusOK, req)
@@ -247,98 +229,69 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request, id int64) {
 
 func (s *Server) deleteRequest(w http.ResponseWriter, r *http.Request, id int64) {
 	if err := s.store.Delete(id); err != nil {
-		slog.Error("delete request failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to delete request"))
+		slog.Error("delete request failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to delete request"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// handleResend POST /api/resend
 func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 
-	// 限制请求体大小
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 
 	var body models.ResendRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON or body too large (max 10MB)"))
+		writeAppError(w, ErrValidation("Invalid JSON or body too large (max 10MB)"))
 		return
 	}
 
-	// 输入校验
 	if body.Method == "" {
-		writeJSON(w, http.StatusBadRequest, apiError("Method is required"))
+		writeAppError(w, ErrValidation("Method is required"))
 		return
 	}
 	if body.URL == "" {
-		writeJSON(w, http.StatusBadRequest, apiError("URL is required"))
+		writeAppError(w, ErrValidation("URL is required"))
 		return
 	}
 
-	// 执行重发
-	resp, err := doResend(&body, s.insecure)
+	result, err := s.resendSvc.Resend(&body)
 	if err != nil {
-		slog.Warn("resend failed", "url", body.URL, "error", err)
-		writeJSON(w, http.StatusBadGateway, apiError(err.Error()))
+		if appErr, ok := err.(*AppError); ok {
+			slog.Warn("resend failed", "url", body.URL, "error", appErr.Message, "request_id", RequestIDFromContext(r.Context()))
+			writeAppError(w, appErr)
+		} else {
+			slog.Warn("resend failed", "url", body.URL, "error", err, "request_id", RequestIDFromContext(r.Context()))
+			writeAppError(w, ErrBadGateway(err.Error()))
+		}
 		return
 	}
 
-	// 保存到历史
-	captured := &models.CapturedRequest{
-		Method:     body.Method,
-		URL:        body.URL,
-		Host:       resp.Host,
-		Path:       resp.Path,
-		Protocol:   resp.Proto,
-		IsHTTPS:    resp.IsHTTPS,
-		ReqHeaders: body.Headers,
-		ReqBody:    body.Body,
-		StatusCode: resp.StatusCode,
-		ResHeaders: resp.ResHeaders,
-		ResBody:    resp.ResBody,
-		DurationMs: resp.DurationMs,
-		SizeBytes:  resp.SizeBytes,
-		CapturedAt: time.Now(),
-	}
-
-	id, err := s.store.Save(captured)
-	if err != nil {
-		slog.Error("save resend result failed", "error", err)
-	}
-	resp.ID = id
-
-	if s.hub != nil {
-		s.hub.broadcast(captured)
-	}
-
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, result)
 }
 
-// handleClear POST /api/clear
 func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 	if err := s.store.Clear(); err != nil {
-		slog.Error("clear failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to clear"))
+		slog.Error("clear failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to clear"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 }
 
-// handleStats GET /api/stats
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	total, errs, totalSize, err := s.store.Stats()
 	if err != nil {
-		slog.Error("stats failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to get stats"))
+		slog.Error("stats failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to get stats"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -348,7 +301,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleProxyStatus GET /api/proxy/status
 func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"running": true,
@@ -362,18 +314,18 @@ func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIMap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 	host := r.URL.Query().Get("host")
 	if host == "" {
-		writeJSON(w, http.StatusBadRequest, apiError("host required"))
+		writeAppError(w, ErrValidation("host required"))
 		return
 	}
 	tree, err := s.store.GetAPIMap(host)
 	if err != nil {
-		slog.Error("apimap failed", "host", host, "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to build API map"))
+		slog.Error("apimap failed", "host", host, "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to build API map"))
 		return
 	}
 	writeJSON(w, http.StatusOK, tree)
@@ -386,8 +338,8 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
 
 	hosts, total, err := s.store.ListHosts(search, limit, offset)
 	if err != nil {
-		slog.Error("list hosts failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to list hosts"))
+		slog.Error("list hosts failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to list hosts"))
 		return
 	}
 	if hosts == nil {
@@ -402,7 +354,7 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPINotes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 
@@ -410,11 +362,11 @@ func (s *Server) handleAPINotes(w http.ResponseWriter, r *http.Request) {
 
 	var body models.APINoteRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+		writeAppError(w, ErrValidation("Invalid JSON"))
 		return
 	}
 	if body.Host == "" {
-		writeJSON(w, http.StatusBadRequest, apiError("host is required"))
+		writeAppError(w, ErrValidation("host is required"))
 		return
 	}
 
@@ -426,8 +378,8 @@ func (s *Server) handleAPINotes(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.store.SaveAPINote(note)
 	if err != nil {
-		slog.Error("save note failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to save note"))
+		slog.Error("save note failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to save note"))
 		return
 	}
 	note.ID = id
@@ -436,18 +388,18 @@ func (s *Server) handleAPINotes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPINoteByID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 	idStr := r.URL.Path[len("/api/apimap/notes/"):]
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError("Invalid id"))
+		writeAppError(w, ErrValidation("Invalid id"))
 		return
 	}
 	if err := s.store.DeleteAPINote(id); err != nil {
-		slog.Error("delete note failed", "id", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, apiError("Failed to delete note"))
+		slog.Error("delete note failed", "id", id, "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to delete note"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -459,7 +411,7 @@ func (s *Server) handleAPINoteByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
 	if s.interceptor == nil {
-		writeJSON(w, http.StatusServiceUnavailable, apiError("Interceptor not available"))
+		writeAppError(w, ErrUnavailable("Interceptor not available"))
 		return
 	}
 	switch r.Method {
@@ -468,11 +420,11 @@ func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var body struct{ Mode string `json:"mode"` }
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+			writeAppError(w, ErrValidation("Invalid JSON"))
 			return
 		}
 		if body.Mode != "auto" && body.Mode != "manual" {
-			writeJSON(w, http.StatusBadRequest, apiError("mode must be auto or manual"))
+			writeAppError(w, ErrValidation("mode must be auto or manual"))
 			return
 		}
 		s.interceptor.SetMode(body.Mode)
@@ -481,7 +433,7 @@ func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"mode": body.Mode})
 	default:
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 	}
 }
 
@@ -495,11 +447,11 @@ func (s *Server) handleInterceptPending(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleInterceptAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 	if s.interceptor == nil {
-		writeJSON(w, http.StatusServiceUnavailable, apiError("Interceptor not available"))
+		writeAppError(w, ErrUnavailable("Interceptor not available"))
 		return
 	}
 
@@ -507,11 +459,11 @@ func (s *Server) handleInterceptAction(w http.ResponseWriter, r *http.Request) {
 
 	var result models.InterceptResult
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+		writeAppError(w, ErrValidation("Invalid JSON"))
 		return
 	}
 	if err := s.interceptor.Resolve(result.RequestID, result); err != nil {
-		writeJSON(w, http.StatusNotFound, apiError(err.Error()))
+		writeAppError(w, ErrNotFound("Pending request", result.RequestID))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
@@ -522,8 +474,8 @@ func (s *Server) handleInterceptRules(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		rules, err := s.store.ListRules()
 		if err != nil {
-			slog.Error("list rules failed", "error", err)
-			writeJSON(w, http.StatusInternalServerError, apiError("Failed to list rules"))
+			slog.Error("list rules failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+			writeAppError(w, ErrInternal("Failed to list rules"))
 			return
 		}
 		if rules == nil {
@@ -535,17 +487,17 @@ func (s *Server) handleInterceptRules(w http.ResponseWriter, r *http.Request) {
 
 		var rule models.InterceptRule
 		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+			writeAppError(w, ErrValidation("Invalid JSON"))
 			return
 		}
 		if rule.Pattern == "" || (rule.Action != "allow" && rule.Action != "block") {
-			writeJSON(w, http.StatusBadRequest, apiError("pattern required, action must be allow or block"))
+			writeAppError(w, ErrValidation("pattern required, action must be allow or block"))
 			return
 		}
 		id, err := s.store.SaveRule(&rule)
 		if err != nil {
-			slog.Error("save rule failed", "error", err)
-			writeJSON(w, http.StatusInternalServerError, apiError("Failed to save rule"))
+			slog.Error("save rule failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+			writeAppError(w, ErrInternal("Failed to save rule"))
 			return
 		}
 		rule.ID = id
@@ -557,7 +509,7 @@ func (s *Server) handleInterceptRules(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusCreated, rule)
 	default:
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 	}
 }
 
@@ -565,19 +517,19 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 	idStr := r.URL.Path[len("/api/intercept/rules/"):]
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError("Invalid id"))
+		writeAppError(w, ErrValidation("Invalid id"))
 		return
 	}
 	switch r.Method {
 	case http.MethodPut:
 		var body struct{ Enabled bool `json:"enabled"` }
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSON(w, http.StatusBadRequest, apiError("Invalid JSON"))
+			writeAppError(w, ErrValidation("Invalid JSON"))
 			return
 		}
 		if err := s.store.UpdateRule(id, body.Enabled); err != nil {
-			slog.Error("update rule failed", "id", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, apiError(err.Error()))
+			slog.Error("update rule failed", "id", id, "error", err, "request_id", RequestIDFromContext(r.Context()))
+			writeAppError(w, ErrInternal("Failed to update rule"))
 			return
 		}
 		if s.interceptor != nil {
@@ -589,8 +541,8 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 	case http.MethodDelete:
 		if err := s.store.DeleteRule(id); err != nil {
-			slog.Error("delete rule failed", "id", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, apiError(err.Error()))
+			slog.Error("delete rule failed", "id", id, "error", err, "request_id", RequestIDFromContext(r.Context()))
+			writeAppError(w, ErrInternal("Failed to delete rule"))
 			return
 		}
 		if s.interceptor != nil {
@@ -601,8 +553,45 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	default:
-		writeJSON(w, http.StatusMethodNotAllowed, apiError("Method not allowed"))
+		writeAppError(w, ErrMethodNotAllowed())
 	}
+}
+
+// ========================================
+// 拦截日志
+// ========================================
+
+func (s *Server) handleInterceptLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAppError(w, ErrMethodNotAllowed())
+		return
+	}
+
+	action := r.URL.Query().Get("action")
+	since := r.URL.Query().Get("since")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	logs, total, err := s.store.ListInterceptLogs(action, since, limit, offset)
+	if err != nil {
+		slog.Error("list intercept logs failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to list intercept logs"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"data":   logs,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }
 
 // ========================================
@@ -623,7 +612,7 @@ func (s *Server) handleCaptureStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCaptureInterfaces(w http.ResponseWriter, r *http.Request) {
 	ifaces, err := capture.ListInterfaces()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAppError(w, ErrInternal(err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, ifaces)
@@ -631,7 +620,7 @@ func (s *Server) handleCaptureInterfaces(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 
@@ -647,20 +636,15 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		body.BPF = "tcp port 80 or tcp port 443"
 	}
 
-	// 如果引擎已存在但参数不同，先停止旧的
 	if s.captureEngine != nil && s.captureEngine.IsRunning() {
 		s.captureEngine.Stop()
 	}
-	// 每次重新创建引擎以应用用户选择的网卡和 BPF
 	ce := capture.New(body.Interface, body.BPF, s.store, s)
 	s.SetCaptureEngine(ce)
 
 	if err := s.captureEngine.Start(); err != nil {
-		slog.Error("capture start failed", "iface", body.Interface, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
-			"hint":  "可能需要 sudo 权限运行",
-		})
+		slog.Error("capture start failed", "iface", body.Interface, "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal(err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -672,7 +656,7 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCaptureStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAppError(w, ErrMethodNotAllowed())
 		return
 	}
 	if s.captureEngine == nil {
@@ -694,69 +678,20 @@ func (s *Server) handleExportHAR(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	items, _, err := s.store.List("", "", "", false, limit, 0)
+
+	har, err := s.harSvc.Export(limit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, apiError(err.Error()))
+		if appErr, ok := err.(*AppError); ok {
+			writeAppError(w, appErr)
+		} else {
+			writeAppError(w, ErrInternal("Failed to export HAR"))
+		}
 		return
 	}
 
-	entries := make([]map[string]interface{}, 0, len(items))
-	for _, item := range items {
-		req, err := s.store.Get(item.ID)
-		if err != nil || req == nil {
-			continue
-		}
-		entry := map[string]interface{}{
-			"startedDateTime": req.CapturedAt.Format("2006-01-02T15:04:05.000Z"),
-			"time":            req.DurationMs,
-			"request": map[string]interface{}{
-				"method":      req.Method,
-				"url":         req.URL,
-				"httpVersion": "HTTP/1.1",
-				"headers":     toHARHeaders(req.ReqHeaders),
-				"headersSize": -1,
-				"bodySize":    len(req.ReqBody),
-			},
-			"response": map[string]interface{}{
-				"status":      req.StatusCode,
-				"statusText":  http.StatusText(req.StatusCode),
-				"httpVersion": "HTTP/1.1",
-				"headers":     toHARHeaders(req.ResHeaders),
-				"headersSize": -1,
-				"bodySize":    len(req.ResBody),
-				"content": map[string]interface{}{
-					"size": len(req.ResBody),
-					"text": req.ResBody,
-				},
-			},
-			"cache":      map[string]interface{}{},
-			"timings":    map[string]interface{}{"send": 0, "wait": req.DurationMs, "receive": 0},
-			"serverIPAddress": req.Host,
-		}
-		entries = append(entries, entry)
-	}
-
-	har := map[string]interface{}{
-		"log": map[string]interface{}{
-			"version": "1.2",
-			"creator": map[string]string{
-				"name":    "PacketLab",
-				"version": "2.0",
-			},
-			"entries": entries,
-		},
-	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", "attachment; filename=packetlab.har")
 	json.NewEncoder(w).Encode(har)
-}
-
-func toHARHeaders(headers map[string]string) []map[string]string {
-	var h []map[string]string
-	for k, v := range headers {
-		h = append(h, map[string]string{"name": k, "value": v})
-	}
-	return h
 }
 
 // ========================================
@@ -775,20 +710,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			"gc_pause_ms": mem.PauseNs[(mem.NumGC+255)%256] / 1000000,
 		},
 	}
-	// 抓包引擎指标
 	if s.captureEngine != nil {
 		metrics["capture"] = s.captureEngine.GetMetrics()
 	}
 	writeJSON(w, http.StatusOK, metrics)
 }
 
+// ========================================
+// WebSocket
+// ========================================
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
-		return origin == "" ||
-			strings.HasPrefix(origin, "http://localhost") ||
-			strings.HasPrefix(origin, "http://127.0.0.1") ||
-			strings.HasPrefix(origin, "http://[::1]")
+		return isAllowedOrigin(origin)
 	},
 }
 
@@ -812,82 +747,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // ========================================
-// Resend Logic
+// Utilities
 // ========================================
-
-type resendResult struct {
-	ID         int64             `json:"id"`
-	StatusCode int               `json:"status_code"`
-	Host       string            `json:"-"`
-	Path       string            `json:"-"`
-	Proto      string            `json:"-"`
-	IsHTTPS    bool              `json:"-"`
-	ResHeaders map[string]string `json:"res_headers"`
-	ResBody    string            `json:"res_body"`
-	DurationMs int64             `json:"duration_ms"`
-	SizeBytes  int64             `json:"size_bytes"`
-}
-
-func doResend(req *models.ResendRequest, insecure bool) (*resendResult, error) {
-	parsedURL, err := url.Parse(req.URL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
-	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported scheme: %s", parsedURL.Scheme)
-	}
-
-	isHTTPS := parsedURL.Scheme == "https"
-	startTime := time.Now()
-
-	var bodyReader io.Reader
-	if req.Body != "" {
-		bodyReader = bytes.NewBufferString(req.Body)
-	}
-
-	httpReq, err := http.NewRequest(req.Method, req.URL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	for k, v := range req.Headers {
-		httpReq.Header.Set(k, v)
-	}
-	if httpReq.Header.Get("User-Agent") == "" {
-		httpReq.Header.Set("User-Agent", "PacketLab/2.0")
-	}
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
-		},
-	}
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 限制读取响应体大小
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
-	if err != nil {
-		slog.Warn("resend read response body failed", "url", req.URL, "error", err)
-	}
-
-	return &resendResult{
-		StatusCode: resp.StatusCode,
-		Host:       parsedURL.Host,
-		Path:       parsedURL.Path,
-		Proto:      resp.Proto,
-		IsHTTPS:    isHTTPS,
-		ResHeaders: FlattenHeaders(resp.Header),
-		ResBody:    string(respBody),
-		DurationMs: time.Since(startTime).Milliseconds(),
-		SizeBytes:  int64(len(respBody)),
-	}, nil
-}
 
 func FlattenHeaders(h http.Header) map[string]string {
 	result := make(map[string]string)
@@ -899,49 +760,16 @@ func FlattenHeaders(h http.Header) map[string]string {
 	return result
 }
 
-// ========================================
-// Utilities
-// ========================================
-
-func apiError(msg string) map[string]string {
-	return map[string]string{"error": msg}
-}
-
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	body, err := json.Marshal(data)
 	if err != nil {
 		slog.Warn("writeJSON marshal failed", "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"internal error"}`))
+		w.Write([]byte(`{"code":"INTERNAL_ERROR","message":"internal error"}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(body)
-}
-
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-func securityHeadersMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("X-XSS-Protection", "1; mode=block")
-		next.ServeHTTP(w, r)
-	})
 }

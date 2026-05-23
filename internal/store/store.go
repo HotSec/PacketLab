@@ -66,11 +66,20 @@ func (s *Store) initReadConn(dbPath string) {
 	s.dbRO = dbRO
 }
 
-// migrate 建表
-// migrate 建表（逐条执行，ALTER 容错）
+// migrate 建表（版本化迁移）
 func (s *Store) migrate() error {
-	stmtList := []string{
-		`CREATE TABLE IF NOT EXISTS requests (
+	s.db.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")
+
+	var currentVersion int
+	s.db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion)
+
+	type migration struct {
+		version int
+		sql     string
+	}
+
+	migrations := []migration{
+		{1, `CREATE TABLE IF NOT EXISTS requests (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
 			method      TEXT    NOT NULL,
 			url         TEXT    NOT NULL,
@@ -86,12 +95,12 @@ func (s *Store) migrate() error {
 			duration_ms INTEGER NOT NULL DEFAULT 0,
 			size_bytes  INTEGER NOT NULL DEFAULT 0,
 			captured_at TEXT    NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host)`,
-		`CREATE INDEX IF NOT EXISTS idx_requests_method ON requests(method)`,
-		`CREATE INDEX IF NOT EXISTS idx_requests_captured_at ON requests(captured_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_requests_host_path ON requests(host, path)`,
-		`CREATE TABLE IF NOT EXISTS api_notes (
+		)`},
+		{2, `CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host)`},
+		{3, `CREATE INDEX IF NOT EXISTS idx_requests_method ON requests(method)`},
+		{4, `CREATE INDEX IF NOT EXISTS idx_requests_captured_at ON requests(captured_at)`},
+		{5, `CREATE INDEX IF NOT EXISTS idx_requests_host_path ON requests(host, path)`},
+		{6, `CREATE TABLE IF NOT EXISTS api_notes (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
 			host       TEXT NOT NULL,
 			path       TEXT NOT NULL DEFAULT '/',
@@ -100,36 +109,54 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
 			UNIQUE(host, path, method)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_api_notes_host ON api_notes(host)`,
-		`CREATE TABLE IF NOT EXISTS settings (
+		)`},
+		{7, `CREATE INDEX IF NOT EXISTS idx_api_notes_host ON api_notes(host)`},
+		{8, `CREATE TABLE IF NOT EXISTS settings (
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS intercept_rules (
+		)`},
+		{9, `CREATE TABLE IF NOT EXISTS intercept_rules (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
 			pattern    TEXT NOT NULL,
 			action     TEXT NOT NULL DEFAULT 'allow',
 			enabled    INTEGER NOT NULL DEFAULT 1,
 			created_at TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto')`,
+		)`},
+		{10, `CREATE TABLE IF NOT EXISTS intercept_logs (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			action         TEXT NOT NULL,
+			request_url    TEXT NOT NULL,
+			request_method TEXT NOT NULL DEFAULT 'GET',
+			request_host   TEXT NOT NULL DEFAULT '',
+			rule_pattern   TEXT NOT NULL DEFAULT '',
+			mode           TEXT NOT NULL DEFAULT 'manual',
+			created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+		)`},
+		{11, `CREATE INDEX IF NOT EXISTS idx_intercept_logs_action ON intercept_logs(action)`},
+		{12, `CREATE INDEX IF NOT EXISTS idx_intercept_logs_created_at ON intercept_logs(created_at)`},
+		{13, `INSERT OR IGNORE INTO settings (key, value) VALUES ('intercept_mode', 'auto')`},
+		{14, `ALTER TABLE requests ADD COLUMN capture_mode TEXT DEFAULT 'proxy'`},
+		{15, `ALTER TABLE requests ADD COLUMN process_pid INTEGER DEFAULT 0`},
+		{16, `ALTER TABLE requests ADD COLUMN process_name TEXT DEFAULT ''`},
 	}
-	for _, stmt := range stmtList {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return fmt.Errorf("migrate %s: %w", truncateStr(stmt, 40), err)
+
+	for _, m := range migrations {
+		if m.version <= currentVersion {
+			continue
 		}
-	}
-	alterList := []string{
-		`ALTER TABLE requests ADD COLUMN capture_mode TEXT DEFAULT 'proxy'`,
-		`ALTER TABLE requests ADD COLUMN process_pid INTEGER DEFAULT 0`,
-		`ALTER TABLE requests ADD COLUMN process_name TEXT DEFAULT ''`,
-	}
-	for _, stmt := range alterList {
-		if _, err := s.db.Exec(stmt); err != nil {
-			slog.Warn("migrate alter (ignored, column may exist)", "sql", truncateStr(stmt, 50), "error", err)
+		if _, err := s.db.Exec(m.sql); err != nil {
+			if m.version >= 14 {
+				slog.Warn("migrate alter (ignored, column may exist)", "version", m.version, "error", err)
+			} else {
+				return fmt.Errorf("migrate v%d: %w", m.version, err)
+			}
 		}
+		if _, err := s.db.Exec("INSERT INTO schema_migrations (version) VALUES (?)", m.version); err != nil {
+			return fmt.Errorf("record migration v%d: %w", m.version, err)
+		}
+		slog.Info("migration applied", "version", m.version)
 	}
+
 	return nil
 }
 
@@ -312,6 +339,68 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 	}
 
 	return &req, nil
+}
+
+// ListFull 获取请求完整详情列表（分页 + 过滤，消除 N+1 查询）
+func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, offset int) ([]models.CapturedRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	where := []string{"1=1"}
+	args := []interface{}{}
+
+	if method != "" && method != "all" {
+		where = append(where, "method = ?")
+		args = append(args, method)
+	}
+	if host != "" {
+		where = append(where, "(host = ? OR host LIKE ? || ':%')")
+		hostNoPort := stripPort(host)
+		args = append(args, host, hostNoPort)
+	} else if search != "" {
+		where = append(where, "(url LIKE ? OR host LIKE ? OR CAST(status_code AS TEXT) LIKE ?)")
+		pattern := "%" + search + "%"
+		args = append(args, pattern, pattern, pattern)
+	}
+	if errorOnly {
+		where = append(where, "status_code >= 400")
+	}
+
+	whereClause := strings.Join(where, " AND ")
+
+	querySQL := fmt.Sprintf(
+		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at
+		 FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
+	args = append(args, limit, offset)
+
+	rows, err := s.db.Query(querySQL, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query full: %w", err)
+	}
+	defer rows.Close()
+
+	var items []models.CapturedRequest
+	for rows.Next() {
+		var req models.CapturedRequest
+		var reqHeadersJSON, resHeadersJSON, capturedAt string
+		if err := rows.Scan(&req.ID, &req.Method, &req.URL, &req.Host, &req.Path, &req.Protocol, &req.IsHTTPS,
+			&reqHeadersJSON, &req.ReqBody, &req.StatusCode, &resHeadersJSON, &req.ResBody,
+			&req.DurationMs, &req.SizeBytes, &capturedAt); err != nil {
+			continue
+		}
+		json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders)
+		json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders)
+		req.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
+		if req.ReqHeaders == nil {
+			req.ReqHeaders = make(map[string]string)
+		}
+		if req.ResHeaders == nil {
+			req.ResHeaders = make(map[string]string)
+		}
+		items = append(items, req)
+	}
+
+	return items, nil
 }
 
 // Delete 删除单条请求
@@ -584,7 +673,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	// 去端口后合并: httpbin.org + httpbin.org:443 → httpbin.org (7)
 	hostCounts := make(map[string]int)
 	var hostOrder []string
-	total = 0
+	distinctTotal := 0
 	for rows.Next() {
 		var h string
 		var cnt int
@@ -594,7 +683,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		baseHost := stripPort(h)
 		if _, exists := hostCounts[baseHost]; !exists {
 			hostOrder = append(hostOrder, baseHost)
-			total++
+			distinctTotal++
 		}
 		hostCounts[baseHost] += cnt
 	}
@@ -685,6 +774,95 @@ func splitPath(path string) []string {
 		return []string{}
 	}
 	return strings.Split(path, "/")
+}
+
+// ========================================
+// Intercept Logs
+// ========================================
+
+// SaveInterceptLog 保存一条拦截操作日志
+func (s *Store) SaveInterceptLog(log *models.InterceptLog) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.db.Exec(
+		`INSERT INTO intercept_logs (action, request_url, request_method, request_host, rule_pattern, mode, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+		log.Action, log.RequestURL, log.RequestMethod, log.RequestHost, log.RulePattern, log.Mode,
+	)
+	if err != nil {
+		return fmt.Errorf("insert intercept log: %w", err)
+	}
+
+	id, _ := result.LastInsertId()
+	log.ID = id
+
+	// 读取刚插入的时间
+	var createdAt string
+	s.db.QueryRow("SELECT created_at FROM intercept_logs WHERE id = ?", id).Scan(&createdAt)
+	log.CreatedAt = createdAt
+
+	return nil
+}
+
+// ListInterceptLogs 查询拦截日志（支持按 action 过滤、分页）
+func (s *Store) ListInterceptLogs(action, since string, limit, offset int) ([]models.InterceptLog, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	where := []string{"1=1"}
+	args := []interface{}{}
+
+	if action != "" {
+		where = append(where, "action = ?")
+		args = append(args, action)
+	}
+	if since != "" {
+		where = append(where, "created_at >= ?")
+		args = append(args, since)
+	}
+
+	whereClause := strings.Join(where, " AND ")
+
+	var total int
+	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM intercept_logs WHERE %s", whereClause)
+	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count intercept logs: %w", err)
+	}
+
+	querySQL := fmt.Sprintf(
+		`SELECT id, action, request_url, request_method, request_host, rule_pattern, mode, created_at
+		 FROM intercept_logs WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
+	args = append(args, limit, offset)
+
+	rows, err := s.db.Query(querySQL, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query intercept logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []models.InterceptLog
+	for rows.Next() {
+		var l models.InterceptLog
+		if err := rows.Scan(&l.ID, &l.Action, &l.RequestURL, &l.RequestMethod,
+			&l.RequestHost, &l.RulePattern, &l.Mode, &l.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("scan intercept log: %w", err)
+		}
+		logs = append(logs, l)
+	}
+
+	if logs == nil {
+		logs = []models.InterceptLog{}
+	}
+
+	return logs, total, nil
 }
 
 // ========================================

@@ -103,6 +103,30 @@ type InterceptResult struct {
 	NewBody    string            `json:"new_body,omitempty"`
 }
 
+// InterceptLog 拦截操作日志
+type InterceptLog struct {
+	ID            int64  `json:"id"`
+	Action        string `json:"action"`         // "allow" | "drop" | "modify"
+	RequestURL    string `json:"request_url"`
+	RequestMethod string `json:"request_method"`
+	RequestHost   string `json:"request_host"`
+	RulePattern   string `json:"rule_pattern"` // auto 模式命中规则时的 pattern，manual 模式为空
+	Mode          string `json:"mode"`          // "auto" | "manual"
+	CreatedAt     string `json:"created_at"`
+}
+
+// CleanupRequest POST /api/maintenance/cleanup 请求体
+type CleanupRequest struct {
+	RetentionDays int `json:"retention_days"` // 可选，默认从 settings 表读取
+}
+
+// CleanupResponse 返回体
+type CleanupResponse struct {
+	DeletedRequests int64 `json:"deleted_requests"`
+	DeletedLogs     int64 `json:"deleted_logs"`
+	RetentionDays   int   `json:"retention_days"`
+}
+
 // PendingRequest 待审批请求
 type PendingRequest struct {
 	ID        string            `json:"id"`

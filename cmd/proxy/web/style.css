@@ -399,3 +399,30 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .rule-item-actions button.disabled{background:var(--text-tertiary-muted);color:var(--text-tertiary)}
 .rule-item-actions button.delete:hover{background:var(--red-muted);color:var(--red);border-color:var(--red)}
 .capture-status{font-size:12px;padding:8px 0;margin-bottom:8px;border-bottom:1px solid var(--border-default)}
+
+/* ===== Intercept Logs Panel ===== */
+.rules-tabs{display:flex;gap:0;margin-bottom:12px;border-bottom:1px solid var(--border-subtle)}
+.rules-tab{padding:6px 16px;font-size:12px;font-weight:550;color:var(--text-secondary);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:all .15s}
+.rules-tab:hover{color:var(--text-primary)}
+.rules-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.logs-filter-row{display:flex;gap:6px;margin-bottom:10px}
+.logs-filter-row select{padding:4px 8px;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-elevated);color:var(--text-primary);font-size:11px;outline:none}
+.log-list{max-height:260px;overflow-y:auto;font-size:11px}
+.log-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--border-subtle);font-family:var(--font-mono)}
+.log-item:last-child{border-bottom:none}
+.log-item:hover{background:var(--bg-hover)}
+.log-item-action{font-weight:600;font-size:9px;padding:1px 6px;border-radius:3px;flex-shrink:0;min-width:52px;text-align:center}
+.log-item-action.allow{background:var(--green-muted);color:var(--green)}
+.log-item-action.drop{background:var(--red-muted);color:var(--red)}
+.log-item-action.modify{background:var(--yellow-muted);color:var(--yellow)}
+.log-item-url{flex:1;color:var(--text-primary);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.log-item-meta{display:flex;gap:4px;flex-shrink:0}
+.log-item-mode{font-size:9px;padding:1px 5px;border-radius:3px;color:var(--text-tertiary);background:var(--bg-hover)}
+.log-item-time{font-size:9px;color:var(--text-tertiary)}
+
+/* ===== Virtual Scroll ===== */
+.request-list-virtual .request-item{content-visibility:auto;contain-intrinsic-size:auto 48px}
+
+/* ===== Copy Format Buttons ===== */
+.copy-format-btns{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
+.copy-format-btns .mini-btn{gap:3px;display:inline-flex;align-items:center}

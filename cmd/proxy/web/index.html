@@ -145,12 +145,24 @@
 <div class="modal-overlay hidden" id="rulesPanel">
 <div class="modal-box" style="max-width:560px">
 <div class="modal-title">拦截规则管理</div>
+<div class="rules-tabs">
+<button class="rules-tab active" onclick="switchRulesTab('rules')">规则</button>
+<button class="rules-tab" onclick="switchRulesTab('logs')">拦截日志</button>
+</div>
+<div id="rulesPanelContent">
 <div class="rule-add-row">
 <input type="text" id="newRulePattern" placeholder="*.example.com or host/path" style="flex:1">
 <select id="newRuleAction" style="width:80px"><option value="allow">Allow</option><option value="block">Block</option></select>
 <button class="mini-btn primary" onclick="addRule()">添加</button>
 </div>
-<div class="rule-list" id="ruleList"></div>
+<div class="rule-list" id="ruleList"></div></div>
+<div id="logsPanelContent" style="display:none">
+<div class="logs-filter-row">
+<select id="logActionFilter" onchange="loadInterceptLogs()"><option value="">全部操作</option><option value="allow">Allow</option><option value="drop">Drop</option><option value="modify">Modify</option></select>
+<select id="logLimitSelect" onchange="loadInterceptLogs()"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option></select>
+</div>
+<div class="log-list" id="logList"></div>
+</div>
 <div class="modal-actions">
 <button class="modal-btn" onclick="closeRulesPanel()">关闭</button>
 </div></div></div>
