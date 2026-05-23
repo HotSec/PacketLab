@@ -629,7 +629,9 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.captureEngine == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Capture engine not available"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "Capture engine not available (启动时需 --capture 参数并使用 sudo)",
+		})
 		return
 	}
 	if err := s.captureEngine.Start(); err != nil {

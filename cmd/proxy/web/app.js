@@ -76,7 +76,11 @@ async function apiGet(p) {
 }
 async function apiPost(p, b) {
   const r = await fetch(API_BASE + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
-  if (!r.ok) { const msg = `API ${r.status}`; showToast('error', msg); throw new Error(msg); }
+  if (!r.ok) {
+    let msg = `API ${r.status}`;
+    try { const body = await r.json(); if (body.error) msg = body.error; } catch {}
+    showToast('error', msg); throw new Error(msg);
+  }
   return r.json();
 }
 async function apiDelete(p) {
