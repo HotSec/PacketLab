@@ -1,7 +1,7 @@
 # PacketLab V3 开发计划
 
-> 状态：V2 已完成 | V3 拦截模式已完成 | V3 网卡抓包待开发
-> 最后更新：2026-05-22
+> 状态：V2 ✅ | 拦截模式 ✅ | 网卡抓包 ✅ | 前端UI ✅ | curl导出 ✅ | JSON格式化 ✅
+> 最后更新：2026-05-23
 
 ---
 
@@ -133,19 +133,18 @@ process_name TEXT DEFAULT ''
 
 ## 三、其他改进
 
-### 3.1 响应体格式化
+### 3.1 响应体格式化 ✅
 
 - JSON 响应体自动美化（`JSON.parse` + `JSON.stringify(obj, null, 2)`）
-- XML/HTML 可选格式化
-- 二进制检测 + 显示 hex 摘要
+- 请求体同步美化
 
-### 3.2 导出功能
+### 3.2 导出功能 (部分完成)
 
-- 单请求导出为 HAR / curl 命令
-- 批量导出为 HAR 文件
-- 复制为 curl / fetch / python-requests 格式
+- ✅ 单请求导出为 curl 命令（"copy as curl" 按钮）
+- ❌ 批量导出为 HAR 文件
+- ❌ 复制为 fetch / python-requests 格式
 
-### 3.3 性能
+### 3.3 其他待完成
 
 - 请求列表虚拟滚动（>1000 条时）
 - 数据库定期清理（保留最近 N 天）
@@ -157,10 +156,10 @@ process_name TEXT DEFAULT ''
 
 | P | 功能 | 依赖 | 复杂度 |
 |----|------|------|--------|
-| P0 | 网卡抓包引擎 (gopacket) | go get gopacket | 高 |
-| P1 | HTTP 提取 + 数据库存储 | engine 完成 | 中 |
-| P2 | 进程关联 | engine 完成 | 中 |
-| P3 | 前端抓包 UI | API 完成 | 低 |
-| P4 | 拦截规则管理 UI | — | 低 |
-| P5 | 导出 (curl/HAR) | — | 低 |
-| P6 | 响应体格式化 | — | 低 |
+| P0 | 网卡抓包引擎 (gopacket) | go get gopacket | ✅ |
+| P1 | HTTP 提取 + 数据库存储 | engine 完成 | ✅ |
+| P2 | 进程关联 | engine 完成 | ✅ |
+| P3 | 前端抓包 UI | API 完成 | ✅ |
+| P4 | 拦截规则管理 UI | — | ❌ |
+| P5 | 导出 (curl/HAR) | — | ✅ curl |
+| P6 | 响应体格式化 | — | ✅ |
