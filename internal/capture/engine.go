@@ -165,7 +165,7 @@ func (e *Engine) packetLoop() {
 
 // gcLoop 定期清理过期流
 func (e *Engine) gcLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for e.running.Load() {
 		select {
@@ -174,7 +174,7 @@ func (e *Engine) gcLoop() {
 			a := e.assembler
 			e.mu.Unlock()
 			if a != nil {
-				a.FlushOlderThan(time.Now().Add(-5*time.Minute), e)
+				a.FlushOlderThan(time.Now().Add(-2*time.Minute), e)
 			}
 		case <-e.stopCh:
 			return
@@ -426,7 +426,7 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	a.mu.Lock()
 	stream, ok := a.streams[streamKey]
 	if !ok {
-		if len(a.streams) >= 1000 {
+		if len(a.streams) >= 2000 {
 			a.mu.Unlock()
 			return
 		}

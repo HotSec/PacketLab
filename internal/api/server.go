@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +98,9 @@ func (s *Server) setupRoutes() {
 
 	// 导出
 	mux.HandleFunc("/api/export/har", s.handleExportHAR)
+
+	// 监控
+	mux.HandleFunc("/api/metrics", s.handleMetrics)
 
 	// WebSocket
 	mux.HandleFunc("/ws", s.handleWebSocket)
@@ -751,6 +756,44 @@ func toHARHeaders(headers map[string]string) []map[string]string {
 		h = append(h, map[string]string{"name": k, "value": v})
 	}
 	return h
+}
+
+// ========================================
+// 监控指标
+// ========================================
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	sysMem, _ := getSysMemory()
+	metrics := map[string]interface{}{
+		"goroutines": runtime.NumGoroutine(),
+		"memory": map[string]interface{}{
+			"alloc_mb":    mem.Alloc / 1024 / 1024,
+			"sys_mb":      mem.Sys / 1024 / 1024,
+			"heap_mb":     mem.HeapInuse / 1024 / 1024,
+			"gc_pause_ms": mem.PauseNs[(mem.NumGC+255)%256] / 1000000,
+		},
+		"system": map[string]interface{}{
+			"total_mb": sysMem,
+		},
+	}
+	writeJSON(w, http.StatusOK, metrics)
+}
+
+func getSysMemory() (uint64, error) {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			var kb uint64
+			fmt.Sscanf(line, "MemTotal: %d kB", &kb)
+			return kb / 1024, nil
+		}
+	}
+	return 0, fmt.Errorf("MemTotal not found")
 }
 
 var upgrader = websocket.Upgrader{
