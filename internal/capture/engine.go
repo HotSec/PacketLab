@@ -509,7 +509,7 @@ type TCPStream struct {
 	pendingReq *models.CapturedRequest
 }
 
-const streamBufMax = 256 * 1024 // 256KB max per stream
+const streamBufMax = 2 * 1024 * 1024 // 2MB max per stream
 
 // Feed 喂入 TCP 数据
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
@@ -548,8 +548,8 @@ func (s *TCPStream) safeTruncate() {
 	// 只在完整消息边界之前截断
 	if lastBoundary > 0 {
 		discard := lastBoundary
-		if discard > len(s.buf)-64*1024 {
-			discard = len(s.buf) - 64*1024
+		if discard > len(s.buf)-256*1024 {
+			discard = len(s.buf) - 256*1024
 		}
 		if discard > 0 {
 			s.buf = s.buf[discard:]
