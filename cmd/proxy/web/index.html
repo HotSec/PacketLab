@@ -28,6 +28,9 @@
 <button class="icon-btn" data-i18n-title="clear_history" title="清空记录" onclick="clearHistory()">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
 </button>
+<button class="icon-btn" data-i18n-title="export_har" title="导出 HAR" onclick="exportHAR()">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+</button>
 <button class="icon-btn" onclick="toggleInterceptMode()" id="interceptModeBtn" data-i18n-title="intercept_mode" title="拦截模式: 自动">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
 </button>
@@ -35,6 +38,7 @@
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
 </button>
 <span class="mode-indicator mode-auto" id="modeIndicator">AUTO</span>
+<button class="mini-btn" onclick="openRulesPanel()" style="margin-left:4px" data-i18n-title="rules_manage" title="规则管理">⚙</button>
 </div>
 </header>
 <div class="main-content">
@@ -136,6 +140,20 @@
 <div class="ctx-separator"></div>
 <div class="ctx-item" onclick="ctxFilterHost()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg> 按此站点过滤</div>
 </div>
+
+<!-- Rules Panel -->
+<div class="modal-overlay hidden" id="rulesPanel">
+<div class="modal-box" style="max-width:560px">
+<div class="modal-title">拦截规则管理</div>
+<div class="rule-add-row">
+<input type="text" id="newRulePattern" placeholder="*.example.com or host/path" style="flex:1">
+<select id="newRuleAction" style="width:80px"><option value="allow">Allow</option><option value="block">Block</option></select>
+<button class="mini-btn primary" onclick="addRule()">添加</button>
+</div>
+<div class="rule-list" id="ruleList"></div>
+<div class="modal-actions">
+<button class="modal-btn" onclick="closeRulesPanel()">关闭</button>
+</div></div></div>
 
 <script src="app.js"></script>
 </body>

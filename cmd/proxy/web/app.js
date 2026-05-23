@@ -84,6 +84,11 @@ async function apiDelete(p) {
   if (!r.ok) { const msg = `API ${r.status}`; showToast('error', msg); throw new Error(msg); }
   return r.json();
 }
+async function apiPut(p, b) {
+  const r = await fetch(API_BASE + p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+  if (!r.ok) { const msg = `API ${r.status}`; showToast('error', msg); throw new Error(msg); }
+  return r.json();
+}
 
 // ── Data Loading ─────────────────────────────
 async function loadRequests() {
@@ -612,6 +617,57 @@ function ctxFilterHost() {
 }
 function closeCtx() { document.getElementById('ctxMenu').classList.add('hidden'); }
 
+// ── Rules Panel ──────────────────────────────
+async function openRulesPanel() {
+  document.getElementById('rulesPanel').classList.remove('hidden');
+  await loadRules();
+}
+function closeRulesPanel() { document.getElementById('rulesPanel').classList.add('hidden'); }
+async function loadRules() {
+  try {
+    const rules = await apiGet('/api/intercept/rules');
+    let html = rules.map(r => `
+      <div class="rule-item">
+        <span class="rule-item-pattern">${esc(r.pattern)}</span>
+        <span class="rule-item-action ${r.action}">${r.action.toUpperCase()}</span>
+        <div class="rule-item-actions">
+          <button class="${r.enabled ? 'enabled' : 'disabled'}" onclick="toggleRule(${r.id},${!r.enabled})">${r.enabled ? 'ON' : 'OFF'}</button>
+          <button class="delete" onclick="deleteRule(${r.id})">✕</button>
+        </div>
+      </div>`).join('');
+    document.getElementById('ruleList').innerHTML = html || '<div style="color:var(--text-tertiary);padding:8px 0">暂无规则</div>';
+  } catch(e) { showToast('error', '加载规则失败'); }
+}
+async function addRule() {
+  const pattern = document.getElementById('newRulePattern').value.trim();
+  const action = document.getElementById('newRuleAction').value;
+  if (!pattern) { showToast('error', '请输入匹配模式'); return; }
+  try {
+    await apiPost('/api/intercept/rules', { pattern, action, enabled: true });
+    document.getElementById('newRulePattern').value = '';
+    showToast('success', '规则已添加');
+    await loadRules();
+  } catch(e) { showToast('error', '添加失败: ' + e.message); }
+}
+async function toggleRule(id, enabled) {
+  try {
+    await apiPut('/api/intercept/rules/' + id, { enabled });
+    if (typeof currentHost !== 'undefined' && currentHost) {
+      const r = await apiGet('/api/intercept/rules');
+      // rules auto-reload via server-side interceptor
+    }
+    await loadRules();
+  } catch(e) { showToast('error', '操作失败'); }
+}
+async function deleteRule(id) {
+  if (!confirm('删除该规则？')) return;
+  try {
+    await apiDelete('/api/intercept/rules/' + id);
+    await loadRules();
+    showToast('success', '已删除');
+  } catch(e) { showToast('error', '删除失败'); }
+}
+
 let noteEditHost = '', noteEditPath = '', noteEditMethod = '', noteEditId = 0;
 function editAPINoteLeaf(path, method, note, noteId) {
   noteEditHost = document.getElementById('apimapHostSelect').value;
@@ -729,6 +785,15 @@ function copyAsCurl() {
 function formatJSONBody(el, text) {
   try { const obj = JSON.parse(text); return JSON.stringify(obj, null, 2); }
   catch { return text; }
+}
+function exportHAR() {
+  const a = document.createElement('a');
+  a.href = '/api/export/har?limit=500';
+  a.download = 'packetlab.har';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => document.body.removeChild(a), 100);
+  showToast('success', 'HAR 文件下载中...');
 }
 function showToast(type, msg) {
   const c = document.getElementById('toastContainer');

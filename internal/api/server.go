@@ -94,6 +94,9 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/capture/start", s.handleCaptureStart)
 	mux.HandleFunc("/api/capture/stop", s.handleCaptureStop)
 
+	// 导出
+	mux.HandleFunc("/api/export/har", s.handleExportHAR)
+
 	// WebSocket
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
@@ -650,8 +653,80 @@ func (s *Server) handleCaptureStop(w http.ResponseWriter, r *http.Request) {
 }
 
 // ========================================
-// WebSocket
+// 导出
 // ========================================
+
+func (s *Server) handleExportHAR(w http.ResponseWriter, r *http.Request) {
+	limit := 500
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	items, _, err := s.store.List("", "", "", false, limit, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError(err.Error()))
+		return
+	}
+
+	entries := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		req, err := s.store.Get(item.ID)
+		if err != nil || req == nil {
+			continue
+		}
+		entry := map[string]interface{}{
+			"startedDateTime": req.CapturedAt.Format("2006-01-02T15:04:05.000Z"),
+			"time":            req.DurationMs,
+			"request": map[string]interface{}{
+				"method":      req.Method,
+				"url":         req.URL,
+				"httpVersion": "HTTP/1.1",
+				"headers":     toHARHeaders(req.ReqHeaders),
+				"headersSize": -1,
+				"bodySize":    len(req.ReqBody),
+			},
+			"response": map[string]interface{}{
+				"status":      req.StatusCode,
+				"statusText":  http.StatusText(req.StatusCode),
+				"httpVersion": "HTTP/1.1",
+				"headers":     toHARHeaders(req.ResHeaders),
+				"headersSize": -1,
+				"bodySize":    len(req.ResBody),
+				"content": map[string]interface{}{
+					"size": len(req.ResBody),
+					"text": req.ResBody,
+				},
+			},
+			"cache":      map[string]interface{}{},
+			"timings":    map[string]interface{}{"send": 0, "wait": req.DurationMs, "receive": 0},
+			"serverIPAddress": req.Host,
+		}
+		entries = append(entries, entry)
+	}
+
+	har := map[string]interface{}{
+		"log": map[string]interface{}{
+			"version": "1.2",
+			"creator": map[string]string{
+				"name":    "PacketLab",
+				"version": "2.0",
+			},
+			"entries": entries,
+		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", "attachment; filename=packetlab.har")
+	json.NewEncoder(w).Encode(har)
+}
+
+func toHARHeaders(headers map[string]string) []map[string]string {
+	var h []map[string]string
+	for k, v := range headers {
+		h = append(h, map[string]string{"name": k, "value": v})
+	}
+	return h
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
