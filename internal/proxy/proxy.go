@@ -134,14 +134,16 @@ func (s *Server) setupHandlers() {
 		// 读取响应体（完整转发，捕获最多 64KB）
 		if resp.Body != nil {
 			bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
-			if err == nil && len(bodyBytes) > 0 {
+			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // 始终恢复 body
+			if err != nil {
+				slog.Warn("proxy: read response body failed", "url", captured.URL, "error", err)
+			} else if len(bodyBytes) > 0 {
 				captured.SizeBytes = int64(len(bodyBytes))
 				if len(bodyBytes) > 64*1024 {
 					captured.ResBody = string(bodyBytes[:64*1024])
 				} else {
 					captured.ResBody = string(bodyBytes)
 				}
-				resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
 		}
 

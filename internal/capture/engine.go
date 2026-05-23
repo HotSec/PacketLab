@@ -36,6 +36,10 @@ type Engine struct {
 	// 进程缓存
 	procCache   map[string]*models.ProcessInfo
 	procCacheMu sync.RWMutex
+
+	// 批量发射 buffer
+	emitMu   sync.Mutex
+	emitBuf  []*models.CapturedRequest
 }
 
 // Stats 抓包统计
@@ -169,7 +173,12 @@ func (e *Engine) gcLoop() {
 	for e.running.Load() {
 		select {
 		case <-ticker.C:
-			e.assembler.FlushOlderThan(time.Now().Add(-5*time.Minute), e)
+			e.mu.Lock()
+			a := e.assembler
+			e.mu.Unlock()
+			if a != nil {
+				a.FlushOlderThan(time.Now().Add(-5*time.Minute), e)
+			}
 		case <-e.stopCh:
 			return
 		}
@@ -233,26 +242,32 @@ var emitBuf struct {
 }
 
 func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
-	emitBuf.mu.Lock()
-	emitBuf.items = append(emitBuf.items, req)
-	n := len(emitBuf.items)
-	emitBuf.mu.Unlock()
+	if !e.running.Load() {
+		return
+	}
+	e.emitMu.Lock()
+	e.emitBuf = append(e.emitBuf, req)
+	n := len(e.emitBuf)
+	e.emitMu.Unlock()
 	if n >= 20 {
 		e.flushEmitBuf()
 	}
 }
 
 func (e *Engine) flushEmitBuf() {
-	emitBuf.mu.Lock()
-	if len(emitBuf.items) == 0 {
-		emitBuf.mu.Unlock()
+	e.emitMu.Lock()
+	if len(e.emitBuf) == 0 || !e.running.Load() {
+		e.emitBuf = nil
+		e.emitMu.Unlock()
 		return
 	}
-	batch := emitBuf.items
-	emitBuf.items = nil
-	emitBuf.mu.Unlock()
+	batch := e.emitBuf
+	e.emitBuf = nil
+	e.emitMu.Unlock()
 	e.bulkEmit(batch)
 }
+
+// bullkEmit → bulkEmit 批量输出
 
 // ResolveProcess 解析进程信息（批量 lsof 建表 + 缓存）
 func (e *Engine) ResolveProcess(srcIP net.IP, srcPort uint16) *models.ProcessInfo {
