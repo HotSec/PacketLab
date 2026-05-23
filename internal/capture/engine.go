@@ -508,7 +508,7 @@ func (p *TCPStreamPool) New(srcIP net.IP, srcPort layers.TCPPort, dstIP net.IP, 
 	}
 }
 
-// TCPStream 单个 TCP 流（ring buffer + 线程安全）
+// TCPStream 单个 TCP 流（append buffer + 线程安全）
 type TCPStream struct {
 	mu         sync.Mutex
 	engine     *Engine
@@ -516,53 +516,40 @@ type TCPStream struct {
 	srcPort    uint16
 	dstPort    uint16
 	buf        []byte
-	wpos       int // 写指针
 	lastActive time.Time
 	pendingReq *models.CapturedRequest
 }
 
-const streamBufSize = 256 * 1024 // 256KB ring buffer per stream
+const streamBufMax = 256 * 1024 // 256KB max per stream
 
-// Feed 喂入 TCP 数据（ring buffer 循环写入）
+// Feed 喂入 TCP 数据（append + 消费已解析数据）
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastActive = time.Now()
 
-	// 首次分配 ring buffer
-	if s.buf == nil {
-		s.buf = make([]byte, streamBufSize)
-	}
-
-	// 环形写入
-	for len(data) > 0 {
-		n := copy(s.buf[s.wpos:], data)
-		s.wpos = (s.wpos + n) % streamBufSize
-		data = data[n:]
-		if len(data) > 0 && s.wpos == 0 {
-			// 回绕了一遍，覆盖旧数据
-			copy(s.buf, data[:min(len(data), streamBufSize)])
-			break
+	s.buf = append(s.buf, data...)
+	// 超限时丢弃已解析的消息边界之前的数据
+	if len(s.buf) > streamBufMax {
+		// 保留最后 64KB 保证不丢正在解析的消息
+		keep := len(s.buf) - (streamBufMax - 64*1024)
+		if keep < 0 {
+			keep = 0
 		}
+		s.buf = s.buf[keep:]
 	}
 	s.tryExtractHTTP()
 }
 
-// tryExtractHTTP 从 ring buffer 线性读取并提取 HTTP
+// tryExtractHTTP 从 buf 中提取 HTTP 请求/响应并消费
 func (s *TCPStream) tryExtractHTTP() {
-	// 将 ring buffer 线性化为可读切片
-	linear := make([]byte, streamBufSize)
-	n := copy(linear, s.buf[s.wpos:])
-	n += copy(linear[n:], s.buf[:s.wpos])
-	data := linear[:n]
-
 	for {
-		idx := findHTTPMessageEnd(data)
+		idx := findHTTPMessageEnd(s.buf)
 		if idx < 0 {
 			return
 		}
-		msgData := data[:idx]
-		data = data[idx:]
+		msgData := s.buf[:idx]
+		s.buf = s.buf[idx:] // 消费已解析数据
 
 		if isHTTPResponse(msgData) {
 			resp := parseHTTPResponse(msgData)
@@ -586,8 +573,6 @@ func (s *TCPStream) tryExtractHTTP() {
 		}
 	}
 }
-
-func min(a, b int) int { if a < b { return a }; return b }
 
 // isHTTPResponse 判断是否是 HTTP 响应（以 HTTP/ 开头）
 func isHTTPResponse(data []byte) bool {
