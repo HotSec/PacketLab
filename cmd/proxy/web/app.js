@@ -804,11 +804,16 @@ function showToast(type, msg) {
   const c = document.getElementById('toastContainer');
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    ${type === 'success' ? '<polyline points="20 6 9 17 4 12"/>' : '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>'}
-    </svg>${msg}`;
+  const icons = {
+    success: '<polyline points="20 6 9 17 4 12"/>',
+    error: '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>',
+    warn: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'
+  };
+  const svg = icons[type] || icons.error;
+  toast.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${svg}</svg><span>${msg.replace(/\n/g, '<br>')}</span>`;
   c.appendChild(toast);
-  setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity .2s'; }, 2200);
+  setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity .2s'; }, 2800);
   setTimeout(() => toast.remove(), 2500);
 }
 function toggleTreeNode(header) {
@@ -823,15 +828,50 @@ function toggleTreeNode(header) {
 // ── Capture Toggle ────────────────────────────
 let captureRunning = false;
 async function toggleNICCapture() {
-  const url = captureRunning ? '/api/capture/stop' : '/api/capture/start';
-  try {
-    await apiPost(url, {});
-    captureRunning = !captureRunning;
-    const btn = document.getElementById('captureToggleBtn');
-    if (btn) btn.classList.toggle('recording', captureRunning);
-    const label = document.getElementById('captureLabel');
-    if (label) label.textContent = captureRunning ? '抓包中' : '抓包';
-  } catch (e) { showToast('error', 'Capture: ' + e.message); }
+  const btn = document.getElementById('captureToggleBtn');
+  if (captureRunning) {
+    // 停止抓包
+    try {
+      await apiPost('/api/capture/stop', {});
+      captureRunning = false;
+      if (btn) btn.classList.remove('recording');
+      showToast('success', '网卡抓包已停止');
+    } catch (e) { showToast('error', '停止失败: ' + e.message); }
+  } else {
+    // 先检查是否可用
+    try {
+      const status = await apiGet('/api/capture/status');
+      if (!status.available) {
+        showToast('warn', '网卡抓包不可用\n启动时需加 --capture 参数并使用 sudo');
+        return;
+      }
+      if (status.running) {
+        captureRunning = true;
+        if (btn) btn.classList.add('recording');
+        showToast('info', '抓包已在运行中');
+        return;
+      }
+    } catch {
+      showToast('error', '无法检查抓包状态');
+      return;
+    }
+    // 启动抓包
+    try {
+      await apiPost('/api/capture/start', {});
+      captureRunning = true;
+      if (btn) btn.classList.add('recording');
+      showToast('success', '网卡抓包已启动');
+    } catch (e) {
+      const msg = e.message || 'unknown';
+      if (msg.includes('permission') || msg.includes('Permission')) {
+        showToast('warn', '权限不足，请用 sudo 启动\nsudo ./packetlab --capture');
+      } else if (msg.includes('not available') || msg.includes('503')) {
+        showToast('warn', '抓包引擎不可用\n启动时需加 --capture 参数');
+      } else {
+        showToast('error', '启动失败: ' + msg);
+      }
+    }
+  }
 }
 // ── Init ─────────────────────────────────────
 (function init() {
