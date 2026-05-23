@@ -23,15 +23,15 @@ type BatchWriter struct {
 // NewBatchWriter 创建批量写入器
 func NewBatchWriter(st *store.Store, onSave func(req *models.CapturedRequest), batchSize int, flushInterval time.Duration) *BatchWriter {
 	if batchSize <= 0 {
-		batchSize = 50
+		batchSize = 200
 	}
 	if flushInterval <= 0 {
-		flushInterval = 200 * time.Millisecond
+		flushInterval = 100 * time.Millisecond
 	}
 
 	bw := &BatchWriter{
 		store:     st,
-		ch:        make(chan *models.CapturedRequest, 2048),
+		ch:        make(chan *models.CapturedRequest, 8192),
 		onSave:    onSave,
 		stopCh:    make(chan struct{}),
 		batchSize: batchSize,

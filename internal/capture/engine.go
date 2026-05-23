@@ -184,7 +184,7 @@ func (e *Engine) gcLoop() {
 
 // flushLoop 定期刷新 emit 缓冲区
 func (e *Engine) flushLoop() {
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for e.running.Load() {
 		select {
@@ -246,7 +246,7 @@ func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
 	e.emitBuf = append(e.emitBuf, req)
 	n := len(e.emitBuf)
 	e.emitMu.Unlock()
-	if n >= 20 {
+	if n >= 100 {
 		e.flushEmitBuf()
 	}
 }

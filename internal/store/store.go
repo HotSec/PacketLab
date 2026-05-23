@@ -33,8 +33,9 @@ func New(dbPath string) (*Store, error) {
 	for _, p := range []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
-		"PRAGMA cache_size=-8000",
+		"PRAGMA cache_size=-32000",
 		"PRAGMA busy_timeout=5000",
+		"PRAGMA wal_autocheckpoint=1000",
 	} {
 		if _, err := db.Exec(p); err != nil {
 			slog.Warn("PRAGMA failed", "pragma", p, "error", err)
