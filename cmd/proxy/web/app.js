@@ -293,7 +293,7 @@ function fillContent(r, isPending) {
   const rh = r.reqHeaders || {};
   document.getElementById('req-headers-content').textContent =
     Object.keys(rh).length > 0 ? Object.entries(rh).map(([k, v]) => `${k}: ${v}`).join('\n') : t('empty');
-  document.getElementById('req-body-content').textContent = r.reqBody || t('empty');
+  document.getElementById('req-body-content').textContent = formatJSONBody('req', r.reqBody) || t('empty');
 
   // 响应 tab
   const sc = `status-${Math.floor(r.status / 100)}xx`;
@@ -303,7 +303,7 @@ function fillContent(r, isPending) {
   const rsh = r.resHeaders || {};
   document.getElementById('res-headers-content').textContent =
     Object.keys(rsh).length > 0 ? Object.entries(rsh).map(([k, v]) => `${k}: ${v}`).join('\n') : t('empty');
-  document.getElementById('res-body-content').textContent = r.resBody || t('empty');
+  document.getElementById('res-body-content').textContent = formatJSONBody('res', r.resBody) || t('empty');
 
   // 重发 tab
   document.getElementById('resendMethod').value = r.method || 'GET';
@@ -715,6 +715,20 @@ function copyToClipboard(cid) {
   const el = document.getElementById(cid); const pre = el.querySelector('pre');
   if (!pre) return;
   navigator.clipboard.writeText(pre.textContent).then(() => showToast('success', t('copied'))).catch(() => showToast('error', 'Copy failed'));
+}
+function copyAsCurl() {
+  const req = requestDetailCache;
+  if (!req) return;
+  let curl = `curl -X ${req.method} '${req.url}'`;
+  if (req.req_headers) Object.entries(req.req_headers).forEach(([k, v]) => {
+    curl += ` -H '${k}: ${v}'`;
+  });
+  if (req.req_body) curl += ` -d '${req.req_body.replace(/'/g, "\\'")}'`;
+  navigator.clipboard.writeText(curl).then(() => showToast('success', 'curl 命令已复制')).catch(() => showToast('error', 'Copy failed'));
+}
+function formatJSONBody(el, text) {
+  try { const obj = JSON.parse(text); return JSON.stringify(obj, null, 2); }
+  catch { return text; }
 }
 function showToast(type, msg) {
   const c = document.getElementById('toastContainer');

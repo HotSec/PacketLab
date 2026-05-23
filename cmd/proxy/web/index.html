@@ -31,6 +31,9 @@
 <button class="icon-btn" onclick="toggleInterceptMode()" id="interceptModeBtn" data-i18n-title="intercept_mode" title="拦截模式: 自动">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
 </button>
+<button class="icon-btn" data-i18n-title="capture_toggle" title="网卡抓包" onclick="toggleNICCapture()" id="captureToggleBtn">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+</button>
 <span class="mode-indicator mode-auto" id="modeIndicator">AUTO</span>
 </div>
 </header>
@@ -71,7 +74,8 @@
 <div class="kv-row"><span class="kv-key">URL</span><span class="kv-value" id="req-url"></span></div>
 <div class="kv-row"><span class="kv-key">Method</span><span class="kv-value" id="req-method"></span></div>
 <div class="kv-row"><span class="kv-key">Host</span><span class="kv-value" id="req-host"></span></div>
-<div class="kv-row"><span class="kv-key">Protocol</span><span class="kv-value" id="req-protocol"></span></div></div>
+<div class="kv-row"><span class="kv-key">Protocol</span><span class="kv-value" id="req-protocol"></span></div>
+<button class="mini-btn" onclick="copyAsCurl()" style="margin-top:8px">📋 copy as curl</button></div>
 <div class="detail-section"><div class="section-label" data-i18n="req_headers">请求头</div>
 <div id="req-headers" class="code-block"><div class="code-block-header"><span class="code-block-lang">Headers</span><button class="mini-btn" onclick="copyToClipboard('req-headers')" data-i18n="copy">复制</button></div><pre id="req-headers-content"></pre></div></div>
 <div class="detail-section"><div class="section-label" data-i18n="req_body">请求体</div>

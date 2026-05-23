@@ -34,6 +34,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .capture-btn:hover{background:var(--bg-hover)}
 .capture-btn:active{transform:scale(.97)}
 .capture-btn.recording{background:var(--red-muted);border-color:var(--red);color:var(--red)}
+#captureToggleBtn.recording{background:var(--green-muted);border-color:var(--green);color:var(--green)}
 .mode-indicator{font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;flex-shrink:0}
 .mode-auto{background:var(--green-muted);color:var(--green)}
 .mode-manual{background:var(--yellow-muted);color:var(--yellow)}
