@@ -239,7 +239,7 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 	}
 
 	if err := tx.Commit(); err != nil {
-		return ids, fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 
 	return ids, nil

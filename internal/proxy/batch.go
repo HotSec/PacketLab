@@ -88,16 +88,33 @@ func (bw *BatchWriter) loop() {
 		if n == 0 {
 			return
 		}
-		ids, err := bw.store.SaveBatch(batch)
-		if err != nil {
-			slog.Error("batch write failed", "error", err, "count", n)
-		} else {
-			for i, req := range batch {
-				if i < len(ids) {
-					req.ID = ids[i]
+
+		saved := false
+		for attempt := 1; attempt <= 3; attempt++ {
+			ids, err := bw.store.SaveBatch(batch)
+			if err == nil {
+				for i, req := range batch {
+					if i < len(ids) {
+						req.ID = ids[i]
+					}
+					if bw.onSave != nil {
+						bw.onSave(req)
+					}
 				}
-				if bw.onSave != nil {
-					bw.onSave(req)
+				saved = true
+				break
+			}
+			slog.Warn("batch write failed, retrying", "attempt", attempt, "error", err, "count", n)
+		}
+
+		if !saved {
+			slog.Error("batch write failed after 3 retries, falling back to sync", "count", n)
+			for _, req := range batch {
+				if id, err := bw.store.Save(req); err == nil {
+					req.ID = id
+					if bw.onSave != nil {
+						bw.onSave(req)
+					}
 				}
 			}
 		}
