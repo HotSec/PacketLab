@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -35,6 +34,7 @@ type Server struct {
 		IsRunning() bool
 		Start() error
 		Stop()
+		GetMetrics() map[string]interface{}
 	}
 	interceptor interface {
 		GetMode() string
@@ -123,6 +123,7 @@ func (s *Server) SetCaptureEngine(ce interface {
 	IsRunning() bool
 	Start() error
 	Stop()
+	GetMetrics() map[string]interface{}
 }) {
 	s.captureEngine = ce
 }
@@ -765,7 +766,6 @@ func toHARHeaders(headers map[string]string) []map[string]string {
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
-	sysMem, _ := getSysMemory()
 	metrics := map[string]interface{}{
 		"goroutines": runtime.NumGoroutine(),
 		"memory": map[string]interface{}{
@@ -774,26 +774,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			"heap_mb":     mem.HeapInuse / 1024 / 1024,
 			"gc_pause_ms": mem.PauseNs[(mem.NumGC+255)%256] / 1000000,
 		},
-		"system": map[string]interface{}{
-			"total_mb": sysMem,
-		},
+	}
+	// 抓包引擎指标
+	if s.captureEngine != nil {
+		metrics["capture"] = s.captureEngine.GetMetrics()
 	}
 	writeJSON(w, http.StatusOK, metrics)
-}
-
-func getSysMemory() (uint64, error) {
-	b, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(line, "MemTotal:") {
-			var kb uint64
-			fmt.Sscanf(line, "MemTotal: %d kB", &kb)
-			return kb / 1024, nil
-		}
-	}
-	return 0, fmt.Errorf("MemTotal not found")
 }
 
 var upgrader = websocket.Upgrader{

@@ -45,6 +45,10 @@ type Engine struct {
 	emitHead   int
 	emitTail   int
 	emitMu     sync.Mutex
+
+	// 2.5Gbps 支撑: 内存环形缓冲区 + 异步写入
+	ringBuf *MemRingBuffer
+	writer  *AsyncWriterPool
 }
 
 const emitBufSize = 65536 // 64K entries ring buffer
@@ -110,6 +114,11 @@ func (e *Engine) Start() error {
 
 	e.running.Store(true)
 
+	// 2.5Gbps: 初始化内存环形缓冲区 + 异步写入池
+	e.ringBuf = NewMemRingBuffer(262144) // 262K entries
+	e.writer = NewAsyncWriterPool(e.store, e.ringBuf, 4, 30*time.Millisecond)
+	e.writer.Start()
+
 	for i := 0; i < e.workers; i++ {
 		e.workerSg.Add(1)
 		go e.workerLoop(i)
@@ -143,6 +152,10 @@ func (e *Engine) Stop() {
 
 	// flush 剩余 emit 数据
 	e.flushEmitBuf()
+	// 停止异步写入池
+	if e.writer != nil {
+		e.writer.Stop()
+	}
 
 	slog.Info("capture: 抓包已停止")
 }
@@ -155,6 +168,23 @@ func (e *Engine) IsRunning() bool {
 // GetStats 获取统计
 func (e *Engine) GetStats() (int64, int64) {
 	return e.stats.PacketsRecv.Load(), e.stats.HTTPFound.Load()
+}
+
+// GetMetrics 获取运行指标
+func (e *Engine) GetMetrics() map[string]interface{} {
+	m := map[string]interface{}{
+		"packets":  e.stats.PacketsRecv.Load(),
+		"http":     e.stats.HTTPFound.Load(),
+		"running":  e.running.Load(),
+	}
+	if e.ringBuf != nil {
+		m["ring_usage"] = e.ringBuf.Usage()
+		m["ring_dropped"] = e.ringBuf.Dropped()
+	}
+	if e.writer != nil {
+		m["writer_written"] = e.writer.Written()
+	}
+	return m
 }
 
 // packetLoop 读取数据包并分发到 worker
@@ -276,15 +306,20 @@ func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
 	if !e.running.Load() {
 		return
 	}
+	// 2.5Gbps: 直接写入内存环形缓冲区（零阻塞）
+	if e.ringBuf != nil {
+		e.ringBuf.Push(req)
+		return
+	}
+	// 回退到旧 emit 管道
 	e.emitMu.Lock()
 	if e.emitBuf == nil {
 		e.emitBuf = make([]*models.CapturedRequest, emitBufSize)
 	}
-	// 环形写入
 	next := (e.emitHead + 1) % emitBufSize
 	if next == e.emitTail {
 		e.emitMu.Unlock()
-		e.flushEmitBuf() // buffer 满，强制刷新
+		e.flushEmitBuf()
 		e.emitMu.Lock()
 		next = (e.emitHead + 1) % emitBufSize
 	}
