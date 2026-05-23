@@ -26,20 +26,22 @@ type wsClient struct {
 
 // wsHub WebSocket 中心
 type wsHub struct {
-	clients     map[*wsClient]bool
-	broadcastCh chan *models.CapturedRequest
-	register    chan *wsClient
-	unregister  chan *wsClient
-	stopCh      chan struct{}
+	clients          map[*wsClient]bool
+	broadcastCh      chan *models.CapturedRequest
+	interceptCh      chan *models.PendingRequest
+	register         chan *wsClient
+	unregister       chan *wsClient
+	stopCh           chan struct{}
 }
 
 func newWSHub() *wsHub {
 	return &wsHub{
-		clients:     make(map[*wsClient]bool),
-		broadcastCh: make(chan *models.CapturedRequest, 256),
-		register:    make(chan *wsClient),
-		unregister:  make(chan *wsClient),
-		stopCh:      make(chan struct{}),
+		clients:          make(map[*wsClient]bool),
+		broadcastCh:      make(chan *models.CapturedRequest, 256),
+		interceptCh:      make(chan *models.PendingRequest, 64),
+		register:         make(chan *wsClient),
+		unregister:       make(chan *wsClient),
+		stopCh:           make(chan struct{}),
 	}
 }
 
@@ -63,7 +65,6 @@ func (h *wsHub) run() {
 			slog.Info("ws client disconnected", "total", len(h.clients))
 
 		case req := <-h.broadcastCh:
-			// 序列化为简略列表项
 			msg, err := json.Marshal(map[string]interface{}{
 				"type": "new_request",
 				"data": models.RequestListItem{
@@ -88,6 +89,22 @@ func (h *wsHub) run() {
 				default:
 					close(client.send)
 					delete(h.clients, client)
+				}
+			}
+
+		case req := <-h.interceptCh:
+			msg, err := json.Marshal(map[string]interface{}{
+				"type": "intercept_request",
+				"data": req,
+			})
+			if err != nil {
+				continue
+			}
+			for client := range h.clients {
+				select {
+				case client.send <- msg:
+				default:
+					slog.Warn("ws intercept notification dropped, client buffer full")
 				}
 			}
 		}
@@ -157,19 +174,10 @@ func (h *wsHub) broadcast(req *models.CapturedRequest) {
 
 // broadcastIntercept 广播待审批请求
 func (h *wsHub) broadcastIntercept(req *models.PendingRequest) {
-	msg, err := json.Marshal(map[string]interface{}{
-		"type": "intercept_request",
-		"data": req,
-	})
-	if err != nil {
-		return
-	}
-	for client := range h.clients {
-		select {
-		case client.send <- msg:
-		default:
-			slog.Warn("ws intercept notification dropped, client buffer full")
-		}
+	select {
+	case h.interceptCh <- req:
+	default:
+		slog.Warn("ws intercept channel full, dropping message")
 	}
 }
 

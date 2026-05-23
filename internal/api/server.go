@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"runtime"
@@ -628,7 +629,10 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		Interface string `json:"interface"`
 		BPF       string `json:"bpf"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeAppError(w, ErrValidation("Invalid JSON"))
+		return
+	}
 	if body.Interface == "" {
 		body.Interface = capture.DetectInterface()
 	}

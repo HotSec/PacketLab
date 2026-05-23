@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"time"
 
 	"packetlab/internal/models"
@@ -16,11 +17,24 @@ import (
 type ResendService struct {
 	store    *store.Store
 	hub      *wsHub
-	insecure bool
+	client   *http.Client
 }
 
 func NewResendService(st *store.Store, hub *wsHub, insecure bool) *ResendService {
-	return &ResendService{store: st, hub: hub, insecure: insecure}
+	transport := &http.Transport{
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecure},
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	return &ResendService{
+		store: st,
+		hub:   hub,
+		client: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		},
+	}
 }
 
 type ResendResult struct {
@@ -61,14 +75,7 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 		httpReq.Header.Set("User-Agent", "PacketLab/2.0")
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: s.insecure},
-		},
-	}
-
-	resp, err := client.Do(httpReq)
+	resp, err := s.client.Do(httpReq)
 	if err != nil {
 		return nil, ErrBadGateway(fmt.Sprintf("send request: %s", err.Error()))
 	}
@@ -122,16 +129,6 @@ func NewHARService(st *store.Store) *HARService {
 	return &HARService{store: st}
 }
 
-type HAREntry struct {
-	StartedDateTime string                 `json:"startedDateTime"`
-	Time            int64                  `json:"time"`
-	Request         map[string]interface{} `json:"request"`
-	Response        map[string]interface{} `json:"response"`
-	Cache           map[string]interface{} `json:"cache"`
-	Timings         map[string]interface{} `json:"timings"`
-	ServerIPAddress string                 `json:"serverIPAddress"`
-}
-
 func (s *HARService) Export(limit int) (map[string]interface{}, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 500
@@ -145,7 +142,7 @@ func (s *HARService) Export(limit int) (map[string]interface{}, error) {
 	entries := make([]map[string]interface{}, 0, len(items))
 	for _, req := range items {
 		entry := map[string]interface{}{
-			"startedDateTime": req.CapturedAt.Format("2006-01-02T15:04:05.000Z"),
+			"startedDateTime": req.CapturedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 			"time":            req.DurationMs,
 			"request": map[string]interface{}{
 				"method":      req.Method,
@@ -187,9 +184,15 @@ func (s *HARService) Export(limit int) (map[string]interface{}, error) {
 }
 
 func toHARHeaders(headers map[string]string) []map[string]string {
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	h := make([]map[string]string, 0, len(headers))
-	for k, v := range headers {
-		h = append(h, map[string]string{"name": k, "value": v})
+	for _, k := range keys {
+		h = append(h, map[string]string{"name": k, "value": headers[k]})
 	}
 	return h
 }

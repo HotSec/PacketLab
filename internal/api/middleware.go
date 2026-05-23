@@ -26,7 +26,7 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
 		if id == "" {
-			id = uuid.New().String()[:8]
+			id = uuid.New().String()[:12]
 		}
 		w.Header().Set("X-Request-ID", id)
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
@@ -87,6 +87,7 @@ type rateLimiter struct {
 	visitors map[string]*visitorInfo
 	rate     int
 	window   time.Duration
+	stopCh   chan struct{}
 }
 
 type visitorInfo struct {
@@ -99,6 +100,7 @@ func newRateLimiter(rate int, window time.Duration) *rateLimiter {
 		visitors: make(map[string]*visitorInfo),
 		rate:     rate,
 		window:   window,
+		stopCh:   make(chan struct{}),
 	}
 	go rl.cleanup()
 	return rl
@@ -121,16 +123,25 @@ func (rl *rateLimiter) allow(key string) bool {
 func (rl *rateLimiter) cleanup() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		rl.mu.Lock()
-		now := time.Now()
-		for k, v := range rl.visitors {
-			if now.After(v.resetAt) {
-				delete(rl.visitors, k)
+	for {
+		select {
+		case <-ticker.C:
+			rl.mu.Lock()
+			now := time.Now()
+			for k, v := range rl.visitors {
+				if now.After(v.resetAt) {
+					delete(rl.visitors, k)
+				}
 			}
+			rl.mu.Unlock()
+		case <-rl.stopCh:
+			return
 		}
-		rl.mu.Unlock()
 	}
+}
+
+func (rl *rateLimiter) stop() {
+	close(rl.stopCh)
 }
 
 func rateLimitMiddleware(limiter *rateLimiter) func(http.Handler) http.Handler {
@@ -171,12 +182,8 @@ type requestIDWriter struct {
 	requestID string
 }
 
-func (w *requestIDWriter) WriteHeader(code int) {
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *requestIDWriter) Write(b []byte) (int, error) {
-	return w.ResponseWriter.Write(b)
+func (w *requestIDWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func requestIDInjectorMiddleware(next http.Handler) http.Handler {
@@ -190,15 +197,6 @@ func writeAppError(w http.ResponseWriter, err *AppError) {
 	if riw, ok := w.(*requestIDWriter); ok && riw.requestID != "" && err.RequestID == "" {
 		cp := *err
 		cp.RequestID = riw.requestID
-		err = &cp
-	}
-	writeJSON(w, err.StatusCode, err)
-}
-
-func writeAppErrorWithID(w http.ResponseWriter, err *AppError, requestID string) {
-	if requestID != "" && err.RequestID == "" {
-		cp := *err
-		cp.RequestID = requestID
 		err = &cp
 	}
 	writeJSON(w, err.StatusCode, err)

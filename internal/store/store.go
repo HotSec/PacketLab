@@ -145,8 +145,8 @@ func (s *Store) migrate() error {
 			continue
 		}
 		if _, err := s.db.Exec(m.sql); err != nil {
-			if m.version >= 14 {
-				slog.Warn("migrate alter (ignored, column may exist)", "version", m.version, "error", err)
+			if isDuplicateColumnError(err) {
+				slog.Warn("migrate alter (column exists, skipped)", "version", m.version, "error", err)
 			} else {
 				return fmt.Errorf("migrate v%d: %w", m.version, err)
 			}
@@ -897,6 +897,11 @@ func truncateStr(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s
+}
+
+func isDuplicateColumnError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists")
 }
 
 // ========================================
