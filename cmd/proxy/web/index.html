@@ -155,6 +155,24 @@
 <button class="modal-btn" onclick="closeRulesPanel()">关闭</button>
 </div></div></div>
 
+<!-- Capture Control Panel -->
+<div class="modal-overlay hidden" id="capturePanel">
+<div class="modal-box" style="max-width:460px">
+<div class="modal-title">网卡抓包控制</div>
+<div class="capture-status" id="captureStatus">状态: 未启动</div>
+<div style="margin-bottom:12px">
+<label style="font-size:11px;color:var(--text-secondary);margin-bottom:4px;display:block">网卡</label>
+<select id="captureIface" style="width:100%;padding:6px;border:1px solid var(--border-default);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-primary);font-size:12px"></select>
+</div>
+<div style="margin-bottom:12px">
+<label style="font-size:11px;color:var(--text-secondary);margin-bottom:4px;display:block">BPF 过滤器</label>
+<input type="text" id="captureBpfInput" value="tcp port 80 or tcp port 443" style="width:100%;padding:6px;border:1px solid var(--border-default);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-primary);font-size:12px">
+</div>
+<div class="modal-actions">
+<button class="modal-btn" onclick="closeCapturePanel()">关闭</button>
+<button class="modal-btn primary" id="captureStartBtn" onclick="startCaptureFromPanel()">启动抓包</button>
+</div></div></div>
+
 <script src="app.js"></script>
 </body>
 </html>

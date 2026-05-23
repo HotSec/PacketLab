@@ -398,3 +398,4 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .rule-item-actions button.enabled{background:var(--green-muted);color:var(--green);border-color:var(--green)}
 .rule-item-actions button.disabled{background:var(--text-tertiary-muted);color:var(--text-tertiary)}
 .rule-item-actions button.delete:hover{background:var(--red-muted);color:var(--red);border-color:var(--red)}
+.capture-status{font-size:12px;padding:8px 0;margin-bottom:8px;border-bottom:1px solid var(--border-default)}

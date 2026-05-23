@@ -628,17 +628,38 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	var body struct {
+		Interface string `json:"interface"`
+		BPF       string `json:"bpf"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	if body.Interface == "" {
+		body.Interface = capture.DetectInterface()
+	}
+	if body.BPF == "" {
+		body.BPF = "tcp port 80 or tcp port 443"
+	}
+
+	// 动态创建引擎（如果尚未创建）
 	if s.captureEngine == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "Capture engine not available (启动时需 --capture 参数并使用 sudo)",
+		ce := capture.New(body.Interface, body.BPF, s.store, s)
+		s.SetCaptureEngine(ce)
+	}
+
+	if err := s.captureEngine.Start(); err != nil {
+		slog.Error("capture start failed", "iface", body.Interface, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+			"hint":  "可能需要 sudo 权限运行",
 		})
 		return
 	}
-	if err := s.captureEngine.Start(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "started",
+		"iface":  body.Interface,
+		"bpf":    body.BPF,
+	})
 }
 
 func (s *Server) handleCaptureStop(w http.ResponseWriter, r *http.Request) {

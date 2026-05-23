@@ -230,7 +230,7 @@ function renderRequestList() {
         <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
         <div class="request-info">
           <span class="request-url">${esc(r.url)}</span>
-          <div class="request-meta"><span>${esc(r.host)}</span><span>${ts}</span><span>${r.size}</span></div>
+          <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span>${ts}</span><span>${r.size}</span></div>
         </div>
         ${pendingExtra}
         <span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
@@ -825,52 +825,55 @@ function toggleTreeNode(header) {
   }
 }
 
-// ── Capture Toggle ────────────────────────────
+// ── Capture Panel ────────────────────────────
 let captureRunning = false;
-async function toggleNICCapture() {
+async function toggleNICCapture() { await openCapturePanel(); }
+async function openCapturePanel() {
+  document.getElementById('capturePanel').classList.remove('hidden');
+  // 刷新状态和网卡列表
+  try {
+    const status = await apiGet('/api/capture/status');
+    captureRunning = status.running;
+    updateCaptureUI();
+    const ifaces = await apiGet('/api/capture/interfaces') || [];
+    const sel = document.getElementById('captureIface');
+    sel.innerHTML = ifaces.map(i => `<option value="${i}">${i}</option>`).join('');
+  } catch { /* ignore */ }
+}
+function closeCapturePanel() { document.getElementById('capturePanel').classList.add('hidden'); }
+function updateCaptureUI() {
   const btn = document.getElementById('captureToggleBtn');
+  const status = document.getElementById('captureStatus');
+  const startBtn = document.getElementById('captureStartBtn');
   if (captureRunning) {
-    // 停止抓包
-    try {
-      await apiPost('/api/capture/stop', {});
-      captureRunning = false;
-      if (btn) btn.classList.remove('recording');
-      showToast('success', '网卡抓包已停止');
-    } catch (e) { showToast('error', '停止失败: ' + e.message); }
+    if (btn) btn.classList.add('recording');
+    if (status) status.innerHTML = '状态: <span style="color:var(--green);font-weight:600">● 抓包中</span>';
+    if (startBtn) { startBtn.textContent = '停止抓包'; startBtn.className = 'modal-btn danger'; }
   } else {
-    // 先检查是否可用
-    try {
-      const status = await apiGet('/api/capture/status');
-      if (!status.available) {
-        showToast('warn', '网卡抓包不可用\n启动时需加 --capture 参数并使用 sudo');
-        return;
-      }
-      if (status.running) {
-        captureRunning = true;
-        if (btn) btn.classList.add('recording');
-        showToast('info', '抓包已在运行中');
-        return;
-      }
-    } catch {
-      showToast('error', '无法检查抓包状态');
-      return;
-    }
-    // 启动抓包
-    try {
-      await apiPost('/api/capture/start', {});
-      captureRunning = true;
-      if (btn) btn.classList.add('recording');
-      showToast('success', '网卡抓包已启动');
-    } catch (e) {
-      const msg = e.message || 'unknown';
-      if (msg.includes('permission') || msg.includes('Permission')) {
-        showToast('warn', '权限不足，请用 sudo 启动\nsudo ./packetlab --capture');
-      } else if (msg.includes('not available') || msg.includes('503')) {
-        showToast('warn', '抓包引擎不可用\n启动时需加 --capture 参数');
-      } else {
-        showToast('error', '启动失败: ' + msg);
-      }
-    }
+    if (btn) btn.classList.remove('recording');
+    if (status) status.textContent = '状态: 未启动';
+    if (startBtn) { startBtn.textContent = '启动抓包'; startBtn.className = 'modal-btn primary'; }
+  }
+}
+async function startCaptureFromPanel() {
+  if (captureRunning) {
+    try { await apiPost('/api/capture/stop', {}); captureRunning = false; updateCaptureUI(); showToast('success', '抓包已停止'); }
+    catch (e) { showToast('error', '停止失败: ' + e.message); }
+    return;
+  }
+  const iface = document.getElementById('captureIface').value;
+  const bpf = document.getElementById('captureBpfInput').value;
+  try {
+    await apiPost('/api/capture/start', { interface: iface, bpf });
+    captureRunning = true;
+    updateCaptureUI();
+    showToast('success', `抓包已启动 — ${iface}`);
+  } catch (e) {
+    const msg = e.message || '';
+    if (msg.includes('permission') || msg.includes('Permission'))
+      showToast('warn', '权限不足\n请用 sudo 运行 PacketLab');
+    else
+      showToast('error', '启动失败: ' + msg);
   }
 }
 // ── Init ─────────────────────────────────────

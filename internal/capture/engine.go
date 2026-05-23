@@ -98,6 +98,7 @@ func (e *Engine) Start() error {
 
 	go e.packetLoop()
 	go e.gcLoop()
+	go e.flushLoop()
 	return nil
 }
 
@@ -175,6 +176,21 @@ func (e *Engine) gcLoop() {
 	}
 }
 
+// flushLoop 定期刷新 emit 缓冲区
+func (e *Engine) flushLoop() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for e.running.Load() {
+		select {
+		case <-ticker.C:
+			e.flushEmitBuf()
+		case <-e.stopCh:
+			e.flushEmitBuf() // 最后刷新
+			return
+		}
+	}
+}
+
 // emit 输出 HTTP 请求到存储
 func (e *Engine) emit(req *models.CapturedRequest) {
 	req.CaptureMode = "nic"
@@ -190,7 +206,55 @@ func (e *Engine) emit(req *models.CapturedRequest) {
 	e.stats.HTTPFound.Add(1)
 }
 
-// ResolveProcess 解析进程信息（带缓存）
+// bullkEmit 批量输出（大流量优化）
+func (e *Engine) bulkEmit(reqs []*models.CapturedRequest) {
+	if len(reqs) == 0 {
+		return
+	}
+	for _, req := range reqs {
+		req.CaptureMode = "nic"
+	}
+	if _, err := e.store.SaveBatch(reqs); err != nil {
+		slog.Warn("capture: bulk save failed", "count", len(reqs), "error", err)
+		return
+	}
+	for _, req := range reqs {
+		e.stats.HTTPFound.Add(1)
+		if e.hub != nil && req.ID > 0 {
+			e.hub.BroadcastCapture(req)
+		}
+	}
+}
+
+// emitBatch 缓冲区（非阻塞，防 backpressure）
+var emitBuf struct {
+	mu    sync.Mutex
+	items []*models.CapturedRequest
+}
+
+func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
+	emitBuf.mu.Lock()
+	emitBuf.items = append(emitBuf.items, req)
+	n := len(emitBuf.items)
+	emitBuf.mu.Unlock()
+	if n >= 20 {
+		e.flushEmitBuf()
+	}
+}
+
+func (e *Engine) flushEmitBuf() {
+	emitBuf.mu.Lock()
+	if len(emitBuf.items) == 0 {
+		emitBuf.mu.Unlock()
+		return
+	}
+	batch := emitBuf.items
+	emitBuf.items = nil
+	emitBuf.mu.Unlock()
+	e.bulkEmit(batch)
+}
+
+// ResolveProcess 解析进程信息（批量 lsof 建表 + 缓存）
 func (e *Engine) ResolveProcess(srcIP net.IP, srcPort uint16) *models.ProcessInfo {
 	key := fmt.Sprintf("%s:%d", srcIP.String(), srcPort)
 	e.procCacheMu.RLock()
@@ -200,14 +264,48 @@ func (e *Engine) ResolveProcess(srcIP net.IP, srcPort uint16) *models.ProcessInf
 	}
 	e.procCacheMu.RUnlock()
 
-	p := resolveProcessDarwin(srcIP, srcPort)
-	if p == nil {
+	// 批量获取 lsof 输出，构建端口→进程表
+	table := buildProcTable()
+	if table == nil {
 		return nil
 	}
+
+	// 将整张表放入缓存
 	e.procCacheMu.Lock()
-	e.procCache[key] = p
+	for k, v := range table {
+		e.procCache[k] = v
+	}
 	e.procCacheMu.Unlock()
-	return p
+
+	return table[key]
+}
+
+// buildProcTable 一次 lsof 调用构建端口→进程全表
+func buildProcTable() map[string]*models.ProcessInfo {
+	cmd := exec.Command("lsof", "-i", "tcp", "-n", "-P", "-sTCP:ESTABLISHED")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	table := make(map[string]*models.ProcessInfo)
+	// lsof NAME 格式: "host:port->host:port" 或 "*:port"
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 9 {
+			continue
+		}
+		name := fields[0]
+		pid := 0
+		fmt.Sscanf(fields[1], "%d", &pid)
+		// NAME 字段在索引 8
+		addr := fields[len(fields)-1]
+		// 解析 "localIP:localPort->..."
+		if idx := strings.Index(addr, "->"); idx > 0 {
+			addr = addr[:idx]
+		}
+		table[addr] = &models.ProcessInfo{Name: name, PID: pid}
+	}
+	return table
 }
 
 // resolveProcessDarwin macOS 进程解析
@@ -410,41 +508,62 @@ func (p *TCPStreamPool) New(srcIP net.IP, srcPort layers.TCPPort, dstIP net.IP, 
 	}
 }
 
-// TCPStream 单个 TCP 流（双方向数据合并，线程安全）
+// TCPStream 单个 TCP 流（ring buffer + 线程安全）
 type TCPStream struct {
-	mu        sync.Mutex
-	engine    *Engine
-	srcIP     net.IP
-	srcPort   uint16
-	dstPort   uint16
-	buf       []byte
+	mu         sync.Mutex
+	engine     *Engine
+	srcIP      net.IP
+	srcPort    uint16
+	dstPort    uint16
+	buf        []byte
+	wpos       int // 写指针
 	lastActive time.Time
 	pendingReq *models.CapturedRequest
 }
 
-// Feed 喂入 TCP 数据（持锁保护，与 GC/Stop 互斥）
+const streamBufSize = 256 * 1024 // 256KB ring buffer per stream
+
+// Feed 喂入 TCP 数据（ring buffer 循环写入）
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastActive = time.Now()
-	s.buf = append(s.buf, data...)
-	if len(s.buf) > 2*1024*1024 {
-		s.buf = s.buf[len(s.buf)-2*1024*1024:]
+
+	// 首次分配 ring buffer
+	if s.buf == nil {
+		s.buf = make([]byte, streamBufSize)
+	}
+
+	// 环形写入
+	for len(data) > 0 {
+		n := copy(s.buf[s.wpos:], data)
+		s.wpos = (s.wpos + n) % streamBufSize
+		data = data[n:]
+		if len(data) > 0 && s.wpos == 0 {
+			// 回绕了一遍，覆盖旧数据
+			copy(s.buf, data[:min(len(data), streamBufSize)])
+			break
+		}
 	}
 	s.tryExtractHTTP()
 }
 
-// tryExtractHTTP 尝试从流中提取 HTTP 请求和响应
+// tryExtractHTTP 从 ring buffer 线性读取并提取 HTTP
 func (s *TCPStream) tryExtractHTTP() {
+	// 将 ring buffer 线性化为可读切片
+	linear := make([]byte, streamBufSize)
+	n := copy(linear, s.buf[s.wpos:])
+	n += copy(linear[n:], s.buf[:s.wpos])
+	data := linear[:n]
+
 	for {
-		idx := findHTTPMessageEnd(s.buf)
+		idx := findHTTPMessageEnd(data)
 		if idx < 0 {
 			return
 		}
-		msgData := s.buf[:idx]
-		s.buf = s.buf[idx:]
+		msgData := data[:idx]
+		data = data[idx:]
 
-		// 判断是请求还是响应
 		if isHTTPResponse(msgData) {
 			resp := parseHTTPResponse(msgData)
 			if resp != nil && s.pendingReq != nil {
@@ -453,22 +572,22 @@ func (s *TCPStream) tryExtractHTTP() {
 				s.pendingReq.ResBody = resp.Body
 				s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
 				s.pendingReq.SizeBytes = int64(len(msgData))
-				s.engine.emit(s.pendingReq)
+				s.engine.emitNonBlocking(s.pendingReq)
 				s.pendingReq = nil
 			}
 		} else {
 			req := parseHTTPRequest(msgData, s.srcIP, s.srcPort, s.dstPort, s.engine)
 			if req != nil {
-				// 保存为 pending，等待响应到达后补全再 emit
 				if s.pendingReq != nil {
-					// 前一个请求未收到响应（pipeline），直接 emit
-					s.engine.emit(s.pendingReq)
+					s.engine.emitNonBlocking(s.pendingReq)
 				}
 				s.pendingReq = req
 			}
 		}
 	}
 }
+
+func min(a, b int) int { if a < b { return a }; return b }
 
 // isHTTPResponse 判断是否是 HTTP 响应（以 HTTP/ 开头）
 func isHTTPResponse(data []byte) bool {
