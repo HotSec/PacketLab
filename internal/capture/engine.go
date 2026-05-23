@@ -30,8 +30,11 @@ type Engine struct {
 	stopCh  chan struct{}
 	stats   Stats
 
-	streamPool *TCPStreamPool
-	assembler  *Assembler
+	streamPool  *TCPStreamPool
+	assembler   *Assembler
+	workers     int       // worker 数量
+	workerChs   []chan gopacket.Packet // per-worker packet channels
+	workerSg    sync.WaitGroup
 
 	// 进程缓存
 	procCache   map[string]*models.ProcessInfo
@@ -93,44 +96,49 @@ func (e *Engine) Start() error {
 
 	slog.Info("capture: 开始抓包", "iface", e.iface, "bpf", e.bpf)
 
-	e.running.Store(true)
+	// 多 worker 并行处理
+	e.workers = 4
 	e.streamPool = NewTCPStreamPool(e)
-	e.assembler = NewAssembler(e.streamPool)
+	e.workerChs = make([]chan gopacket.Packet, e.workers)
+	for i := range e.workerChs {
+		e.workerChs[i] = make(chan gopacket.Packet, 256)
+	}
 
+	e.running.Store(true)
+
+	for i := 0; i < e.workers; i++ {
+		e.workerSg.Add(1)
+		go e.workerLoop(i)
+	}
 	go e.packetLoop()
 	go e.gcLoop()
 	go e.flushLoop()
 	return nil
 }
 
-// Stop 停止抓包（幂等，可多次调用）
+// Stop 停止抓包（幂等）
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if !e.running.Swap(false) {
-		return // 已经在停止中或已停止
+		return
 	}
 
-	// 先关闭 handle，让 packetLoop 退出
+	// 先关闭 handle，packetLoop 会退出并 close worker channels
 	if e.handle != nil {
 		e.handle.Close()
 		e.handle = nil
 	}
 
-	// 关闭 stopCh（gcLoop 会退出）
 	select {
 	case <-e.stopCh:
-		// 已关闭
 	default:
 		close(e.stopCh)
 	}
 
-	// 清理流——先 emit 所有 pendingReq
-	if e.assembler != nil {
-		e.assembler.FlushAllWithPending(e)
-		e.assembler = nil
-	}
+	// flush 剩余 emit 数据
+	e.flushEmitBuf()
 
 	slog.Info("capture: 抓包已停止")
 }
@@ -145,21 +153,43 @@ func (e *Engine) GetStats() (int64, int64) {
 	return e.stats.PacketsRecv.Load(), e.stats.HTTPFound.Load()
 }
 
-// packetLoop 循环读取数据包
+// packetLoop 读取数据包并分发到 worker
 func (e *Engine) packetLoop() {
 	packetSource := gopacket.NewPacketSource(e.handle, e.handle.LinkType())
 	lastReport := time.Now()
+	workerIdx := 0
 	for packet := range packetSource.Packets() {
 		if !e.running.Load() {
 			return
 		}
 		e.stats.PacketsRecv.Add(1)
-		e.assembler.Assemble(packet)
-		// 每 5 秒输出统计
+		// 轮询分发到 worker
+		ch := e.workerChs[workerIdx]
+		workerIdx = (workerIdx + 1) % e.workers
+		select {
+		case ch <- packet:
+		default:
+			// worker 满，丢弃
+		}
 		if now := time.Now(); now.Sub(lastReport) >= 5*time.Second {
 			slog.Debug("capture: 数据包统计", "packets", e.stats.PacketsRecv.Load(), "http", e.stats.HTTPFound.Load())
 			lastReport = now
 		}
+	}
+	// 关闭 worker channels
+	for _, ch := range e.workerChs {
+		close(ch)
+	}
+	e.workerSg.Wait()
+}
+
+// workerLoop 独立 goroutine 处理数据包（per-worker Assembler）
+func (e *Engine) workerLoop(id int) {
+	defer e.workerSg.Done()
+	assembler := NewAssembler(e.streamPool)
+	ch := e.workerChs[id]
+	for packet := range ch {
+		assembler.Assemble(packet)
 	}
 }
 
@@ -834,9 +864,11 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine
 	// 进程关联
 	var procPID int
 	var procName string
-	if proc := engine.ResolveProcess(srcIP, srcPort); proc != nil {
-		procPID = proc.PID
-		procName = proc.Name
+	if engine != nil {
+		if proc := engine.ResolveProcess(srcIP, srcPort); proc != nil {
+			procPID = proc.PID
+			procName = proc.Name
+		}
 	}
 
 	return &models.CapturedRequest{
