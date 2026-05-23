@@ -160,6 +160,6 @@ process_name TEXT DEFAULT ''
 | P1 | HTTP 提取 + 数据库存储 | engine 完成 | ✅ |
 | P2 | 进程关联 | engine 完成 | ✅ |
 | P3 | 前端抓包 UI | API 完成 | ✅ |
-| P4 | 拦截规则管理 UI | — | ❌ |
-| P5 | 导出 (curl/HAR) | — | ✅ curl |
+| P4 | 拦截规则管理 UI | — | ✅ |
+| P5 | 导出 (curl/HAR) | — | ✅ curl + HAR |
 | P6 | 响应体格式化 | — | ✅ |
