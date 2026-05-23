@@ -9,36 +9,41 @@ import (
 	"packetlab/internal/store"
 )
 
-// BatchWriter 批量写入器，高流量下聚合写入减少 SQLite 锁竞争
+// BatchWriter 批量写入器，多 worker 高吞吐
 type BatchWriter struct {
-	store    *store.Store
-	ch       chan *models.CapturedRequest
-	onSave   func(req *models.CapturedRequest)
-	wg       sync.WaitGroup
-	stopCh   chan struct{}
+	store     *store.Store
+	ch        chan *models.CapturedRequest
+	onSave    func(req *models.CapturedRequest)
+	wg        sync.WaitGroup
+	stopCh    chan struct{}
 	batchSize int
 	interval  time.Duration
+	workers   int
 }
 
 // NewBatchWriter 创建批量写入器
 func NewBatchWriter(st *store.Store, onSave func(req *models.CapturedRequest), batchSize int, flushInterval time.Duration) *BatchWriter {
 	if batchSize <= 0 {
-		batchSize = 200
+		batchSize = 500
 	}
 	if flushInterval <= 0 {
-		flushInterval = 100 * time.Millisecond
+		flushInterval = 50 * time.Millisecond
 	}
+	workers := 2
 
 	bw := &BatchWriter{
 		store:     st,
-		ch:        make(chan *models.CapturedRequest, 8192),
+		ch:        make(chan *models.CapturedRequest, 16384),
 		onSave:    onSave,
 		stopCh:    make(chan struct{}),
 		batchSize: batchSize,
 		interval:  flushInterval,
+		workers:   workers,
 	}
-	bw.wg.Add(1)
-	go bw.loop()
+	for i := 0; i < workers; i++ {
+		bw.wg.Add(1)
+		go bw.loop()
+	}
 	return bw
 }
 
@@ -47,8 +52,7 @@ func (bw *BatchWriter) Enqueue(req *models.CapturedRequest) {
 	select {
 	case bw.ch <- req:
 	default:
-		// 通道满：降级为同步写入（背压），避免数据丢失
-		slog.Warn("batch channel full, fallback to sync write", "method", req.Method, "url", req.URL)
+		slog.Warn("batch channel full, fallback sync write")
 		if id, err := bw.store.Save(req); err == nil {
 			req.ID = id
 			if bw.onSave != nil {
@@ -62,6 +66,14 @@ func (bw *BatchWriter) Enqueue(req *models.CapturedRequest) {
 func (bw *BatchWriter) Stop() {
 	close(bw.stopCh)
 	bw.wg.Wait()
+	for {
+		select {
+		case req := <-bw.ch:
+			bw.store.Save(req)
+		default:
+			return
+		}
+	}
 }
 
 func (bw *BatchWriter) loop() {
@@ -72,12 +84,13 @@ func (bw *BatchWriter) loop() {
 	defer ticker.Stop()
 
 	flush := func() {
-		if len(batch) == 0 {
+		n := len(batch)
+		if n == 0 {
 			return
 		}
 		ids, err := bw.store.SaveBatch(batch)
 		if err != nil {
-			slog.Error("batch write failed", "error", err)
+			slog.Error("batch write failed", "error", err, "count", n)
 		} else {
 			for i, req := range batch {
 				if i < len(ids) {
@@ -86,9 +99,6 @@ func (bw *BatchWriter) loop() {
 				if bw.onSave != nil {
 					bw.onSave(req)
 				}
-			}
-			if len(ids) > 1 {
-				slog.Debug("batch written", "count", len(ids))
 			}
 		}
 		batch = batch[:0]
@@ -104,7 +114,6 @@ func (bw *BatchWriter) loop() {
 		case <-ticker.C:
 			flush()
 		case <-bw.stopCh:
-			// 排空剩余
 			for {
 				select {
 				case req := <-bw.ch:

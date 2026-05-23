@@ -292,7 +292,7 @@ func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
 	e.emitHead = next
 	count := (e.emitHead - e.emitTail + emitBufSize) % emitBufSize
 	e.emitMu.Unlock()
-	if count >= 500 {
+	if count >= 1000 {
 		e.flushEmitBuf()
 	}
 }

@@ -28,14 +28,15 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	// 主连接用于写操作
-	db.SetMaxOpenConns(3) // 2 write + 1 read
+	db.SetMaxOpenConns(5)
 	db.SetConnMaxLifetime(0)
 	for _, p := range []string{
 		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=NORMAL",
+		"PRAGMA synchronous=OFF",
 		"PRAGMA cache_size=-32000",
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA wal_autocheckpoint=1000",
+		"PRAGMA wal_autocheckpoint=5000",
+		"PRAGMA mmap_size=268435456",
 	} {
 		if _, err := db.Exec(p); err != nil {
 			slog.Warn("PRAGMA failed", "pragma", p, "error", err)
