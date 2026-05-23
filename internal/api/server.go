@@ -877,11 +877,17 @@ func apiError(msg string) map[string]string {
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	body, err := json.Marshal(data)
+	if err != nil {
+		slog.Warn("writeJSON marshal failed", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal error"}`))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		slog.Warn("write JSON response failed", "error", err)
-	}
+	w.Write(body)
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -229,9 +230,11 @@ func readBody(req *http.Request) string {
 	if req.GetBody != nil {
 		if body, err := req.GetBody(); err == nil {
 			defer body.Close()
-			buf := make([]byte, 8192)
-			n, _ := body.Read(buf)
-			return string(buf[:n])
+			raw, err := io.ReadAll(io.LimitReader(body, 64*1024))
+			if err != nil || len(raw) == 0 {
+				return ""
+			}
+			return string(raw)
 		}
 	}
 	return ""

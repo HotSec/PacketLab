@@ -48,9 +48,6 @@ type Stats struct {
 	HTTPFound   atomic.Int64
 }
 
-func (s Stats) Packets() int64  { return s.PacketsRecv.Load() }
-func (s Stats) HTTP() int64     { return s.HTTPFound.Load() }
-
 // New 创建抓包引擎
 func New(iface, bpf string, st *store.Store,
 	hub interface{ BroadcastCapture(req *models.CapturedRequest) }) *Engine {
@@ -267,7 +264,7 @@ func (e *Engine) flushEmitBuf() {
 	e.bulkEmit(batch)
 }
 
-// bullkEmit → bulkEmit 批量输出
+// bulkEmit 批量输出
 
 // ResolveProcess 解析进程信息（批量 lsof 建表 + 缓存）
 func (e *Engine) ResolveProcess(srcIP net.IP, srcPort uint16) *models.ProcessInfo {
@@ -324,29 +321,6 @@ func buildProcTable() map[string]*models.ProcessInfo {
 }
 
 // resolveProcessDarwin macOS 进程解析
-func resolveProcessDarwin(srcIP net.IP, srcPort uint16) *models.ProcessInfo {
-	// lsof -i tcp -n -P -sTCP:ESTABLISHED | grep "localhost:<port>" 或 "<ip>:<port>"
-	cmd := exec.Command("lsof", "-i", "tcp", "-n", "-P", "-sTCP:ESTABLISHED")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	portStr := fmt.Sprintf(":%d->", srcPort)
-	ipStr := srcIP.String()
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, portStr) || strings.Contains(line, ipStr+":") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				name := fields[0]
-				pid := 0
-				fmt.Sscanf(fields[1], "%d", &pid)
-				return &models.ProcessInfo{Name: name, PID: pid}
-			}
-		}
-	}
-	return nil
-}
-
 // ListInterfaces 列出可用网卡
 func ListInterfaces() ([]string, error) {
 	devs, err := pcap.FindAllDevs()
@@ -713,8 +687,7 @@ func parseHTTPResponse(data []byte) *struct {
 		return nil
 	}
 	var statusCode int
-	fmt.Sscanf(parts[1], "%d", &statusCode)
-	if statusCode < 100 || statusCode > 599 {
+	if _, err := fmt.Sscanf(parts[1], "%d", &statusCode); err != nil || statusCode < 100 || statusCode > 599 {
 		return nil
 	}
 

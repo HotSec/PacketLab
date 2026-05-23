@@ -84,14 +84,15 @@ func (s *Server) setupHandlers() {
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		// 1. 先捕获请求信息（无论是否启用拦截）
 		captured := &models.CapturedRequest{
-			Method:     req.Method,
-			URL:        req.URL.String(),
-			Host:       req.URL.Host,
-			Path:       req.URL.Path,
-			Protocol:   req.Proto,
-			IsHTTPS:    req.URL.Scheme == "https",
-			ReqHeaders: api.FlattenHeaders(req.Header),
-			CapturedAt: time.Now(),
+			Method:      req.Method,
+			URL:         req.URL.String(),
+			Host:        req.URL.Host,
+			Path:        req.URL.Path,
+			Protocol:    req.Proto,
+			IsHTTPS:     req.URL.Scheme == "https" || (req.Method == "CONNECT"),
+			ReqHeaders:  api.FlattenHeaders(req.Header),
+			CapturedAt:  time.Now(),
+			CaptureMode: "proxy",
 		}
 		if req.Body != nil {
 			bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, 32*1024+1))

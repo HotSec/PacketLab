@@ -30,6 +30,7 @@ type wsHub struct {
 	broadcastCh chan *models.CapturedRequest
 	register    chan *wsClient
 	unregister  chan *wsClient
+	stopCh      chan struct{}
 }
 
 func newWSHub() *wsHub {
@@ -38,12 +39,18 @@ func newWSHub() *wsHub {
 		broadcastCh: make(chan *models.CapturedRequest, 256),
 		register:    make(chan *wsClient),
 		unregister:  make(chan *wsClient),
+		stopCh:      make(chan struct{}),
 	}
 }
 
 func (h *wsHub) run() {
 	for {
 		select {
+		case <-h.stopCh:
+			for c := range h.clients {
+				close(c.send)
+			}
+			return
 		case client := <-h.register:
 			h.clients[client] = true
 			slog.Info("ws client connected", "total", len(h.clients))
@@ -163,5 +170,13 @@ func (h *wsHub) broadcastIntercept(req *models.PendingRequest) {
 		default:
 			slog.Warn("ws intercept notification dropped, client buffer full")
 		}
+	}
+}
+
+func (h *wsHub) Stop() {
+	select {
+	case <-h.stopCh:
+	default:
+		close(h.stopCh)
 	}
 }
