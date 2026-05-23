@@ -511,23 +511,50 @@ type TCPStream struct {
 
 const streamBufMax = 256 * 1024 // 256KB max per stream
 
-// Feed 喂入 TCP 数据（append + 消费已解析数据）
+// Feed 喂入 TCP 数据
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastActive = time.Now()
 
 	s.buf = append(s.buf, data...)
-	// 超限时丢弃已解析的消息边界之前的数据
-	if len(s.buf) > streamBufMax {
-		// 保留最后 64KB 保证不丢正在解析的消息
-		keep := len(s.buf) - (streamBufMax - 64*1024)
-		if keep < 0 {
-			keep = 0
-		}
-		s.buf = s.buf[keep:]
-	}
+	// 先消费已完成的 HTTP 消息
 	s.tryExtractHTTP()
+	// 再安全截断：沿消息边界截，不切断半截消息
+	if len(s.buf) > streamBufMax {
+		s.safeTruncate()
+	}
+}
+
+// safeTruncate 沿消息边界安全截断，不切半截 HTTP 消息
+func (s *TCPStream) safeTruncate() {
+	// 找到最后一个完整的 \r\n\r\n 边界
+	lastBoundary := -1
+	for i := len(s.buf) - 4; i >= 0; i-- {
+		if s.buf[i] == '\r' && s.buf[i+1] == '\n' && s.buf[i+2] == '\r' && s.buf[i+3] == '\n' {
+			lastBoundary = i + 4
+			break
+		}
+	}
+	// 也找 \n\n
+	if lastBoundary < 0 {
+		for i := len(s.buf) - 2; i >= 0; i-- {
+			if s.buf[i] == '\n' && s.buf[i+1] == '\n' {
+				lastBoundary = i + 2
+				break
+			}
+		}
+	}
+	// 只在完整消息边界之前截断
+	if lastBoundary > 0 {
+		discard := lastBoundary
+		if discard > len(s.buf)-64*1024 {
+			discard = len(s.buf) - 64*1024
+		}
+		if discard > 0 {
+			s.buf = s.buf[discard:]
+		}
+	}
 }
 
 // tryExtractHTTP 从 buf 中提取 HTTP 请求/响应并消费
