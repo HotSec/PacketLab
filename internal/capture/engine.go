@@ -40,10 +40,14 @@ type Engine struct {
 	procCache   map[string]*models.ProcessInfo
 	procCacheMu sync.RWMutex
 
-	// 批量发射 buffer
-	emitMu   sync.Mutex
-	emitBuf  []*models.CapturedRequest
+	// 批量发射 buffer (ring)
+	emitBuf    []*models.CapturedRequest
+	emitHead   int
+	emitTail   int
+	emitMu     sync.Mutex
 }
+
+const emitBufSize = 65536 // 64K entries ring buffer
 
 // Stats 抓包统计
 type Stats struct {
@@ -242,7 +246,7 @@ func (e *Engine) emit(req *models.CapturedRequest) {
 	e.stats.HTTPFound.Add(1)
 }
 
-// bullkEmit 批量输出（大流量优化）
+// bulkEmit 批量输出
 func (e *Engine) bulkEmit(reqs []*models.CapturedRequest) {
 	if len(reqs) == 0 {
 		return
@@ -273,25 +277,50 @@ func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
 		return
 	}
 	e.emitMu.Lock()
-	e.emitBuf = append(e.emitBuf, req)
-	n := len(e.emitBuf)
+	if e.emitBuf == nil {
+		e.emitBuf = make([]*models.CapturedRequest, emitBufSize)
+	}
+	// 环形写入
+	next := (e.emitHead + 1) % emitBufSize
+	if next == e.emitTail {
+		e.emitMu.Unlock()
+		e.flushEmitBuf() // buffer 满，强制刷新
+		e.emitMu.Lock()
+		next = (e.emitHead + 1) % emitBufSize
+	}
+	e.emitBuf[e.emitHead] = req
+	e.emitHead = next
+	count := (e.emitHead - e.emitTail + emitBufSize) % emitBufSize
 	e.emitMu.Unlock()
-	if n >= 100 {
+	if count >= 500 {
 		e.flushEmitBuf()
 	}
 }
 
 func (e *Engine) flushEmitBuf() {
 	e.emitMu.Lock()
-	if len(e.emitBuf) == 0 || !e.running.Load() {
-		e.emitBuf = nil
+	if e.emitBuf == nil || e.emitHead == e.emitTail {
 		e.emitMu.Unlock()
 		return
 	}
-	batch := e.emitBuf
-	e.emitBuf = nil
+	// 提取所有条目
+	var batch []*models.CapturedRequest
+	if e.emitHead > e.emitTail {
+		batch = make([]*models.CapturedRequest, e.emitHead-e.emitTail)
+		copy(batch, e.emitBuf[e.emitTail:e.emitHead])
+	} else {
+		n := emitBufSize - e.emitTail + e.emitHead
+		batch = make([]*models.CapturedRequest, n)
+		copy(batch, e.emitBuf[e.emitTail:])
+		copy(batch[emitBufSize-e.emitTail:], e.emitBuf[:e.emitHead])
+	}
+	e.emitHead = 0
+	e.emitTail = 0
 	e.emitMu.Unlock()
-	e.bulkEmit(batch)
+
+	if len(batch) > 0 {
+		e.bulkEmit(batch)
+	}
 }
 
 // bulkEmit 批量输出
@@ -785,64 +814,79 @@ func parseContentLength(headerData []byte) int {
 
 // parseTransferEncoding 检查是否为 chunked 传输
 func parseTransferEncoding(headerData []byte) string {
-	s := strings.ToLower(string(headerData))
-	lines := strings.Split(s, "\r\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if after, ok := strings.CutPrefix(line, "transfer-encoding:"); ok {
-			return strings.TrimSpace(after)
+	data := headerData
+	for len(data) > 0 {
+		nl := indexByte(data, '\n')
+		if nl < 0 {
+			break
 		}
+		line := trimCR(bytesTrimSpace(data[:nl]))
+		if hasPrefixFold(line, []byte("transfer-encoding:")) {
+			return string(bytesTrimSpace(line[17:]))
+		}
+		data = data[nl+1:]
 	}
 	return ""
 }
 
-// parseHTTPRequest 解析 HTTP 请求（字节级 body 提取）
+// parseHTTPRequest 解析 HTTP 请求（零分配版本）
 func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine *Engine) *models.CapturedRequest {
-	// 查找 \r\n\r\n 分隔符（header 结束）
-	headerEnd := -1
-	for i := 0; i < len(data)-3; i++ {
-		if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
-			headerEnd = i
-			break
-		}
-	}
+	headerEnd := indexDoubleCRLF(data)
 	if headerEnd < 0 {
 		return nil
 	}
 
-	headerData := string(data[:headerEnd])
-	lines := strings.Split(headerData, "\r\n")
-	if len(lines) < 1 {
-		return nil
-	}
-
-	// 请求行: METHOD URL HTTP/1.1
-	parts := strings.SplitN(lines[0], " ", 3)
-	if len(parts) < 2 {
-		return nil
-	}
-	method := parts[0]
-	urlPath := parts[1]
-
-	// 解析 Headers
-	headers := make(map[string]string)
+	headers := make(map[string]string, 16)
 	host := ""
-	for _, line := range lines[1:] {
-		if colonIdx := strings.Index(line, ":"); colonIdx > 0 {
-			key := strings.TrimSpace(line[:colonIdx])
-			val := strings.TrimSpace(line[colonIdx+1:])
+	var method, urlPath string
+
+	rem := data[:headerEnd]
+	// 请求行
+	nl := indexByte(rem, '\n')
+	if nl < 0 {
+		return nil
+	}
+	firstLine := bytesTrimSpace(rem[:nl])
+	sp1 := indexByte(firstLine, ' ')
+	if sp1 < 0 {
+		return nil
+	}
+	method = string(firstLine[:sp1])
+	sp2 := indexByte(firstLine[sp1+1:], ' ')
+	if sp2 >= 0 {
+		urlPath = string(firstLine[sp1+1 : sp1+1+sp2])
+	} else {
+		urlPath = string(firstLine[sp1+1:])
+	}
+	rem = rem[nl+1:]
+
+	// headers
+	for len(rem) > 0 {
+		nl = indexByte(rem, '\n')
+		if nl < 0 {
+			break
+		}
+		line := trimCR(bytesTrimSpace(rem[:nl]))
+		if len(line) == 0 {
+			rem = rem[nl+1:]
+			break
+		}
+		colon := indexByte(line, ':')
+		if colon > 0 {
+			key := string(line[:colon])
+			val := string(bytesTrimSpace(line[colon+1:]))
 			headers[key] = val
 			if strings.EqualFold(key, "Host") {
 				host = val
 			}
 		}
+		rem = rem[nl+1:]
 	}
+	headerEnd += 4 // skip \r\n\r\n
 
 	if host == "" {
 		host = srcIP.String()
 	}
-
-	// 构造 URL：根据目标端口判断 scheme
 	scheme := "http"
 	isHTTPS := false
 	if dstPort == 443 {
@@ -854,14 +898,11 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine
 		url = fmt.Sprintf("%s://%s/%s", scheme, host, urlPath)
 	}
 
-	// 字节级提取 body（避免 lines.Split 误分割二进制内容）
 	body := ""
-	bodyBytes := data[headerEnd+4:]
-	if len(bodyBytes) > 0 {
-		body = string(bodyBytes)
+	if headerEnd < len(data) {
+		body = string(data[headerEnd:])
 	}
 
-	// 进程关联
 	var procPID int
 	var procName string
 	if engine != nil {
@@ -872,17 +913,66 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine
 	}
 
 	return &models.CapturedRequest{
-		Method:      method,
-		URL:         url,
-		Host:        host,
-		Path:        urlPath,
-		Protocol:    "HTTP/1.1",
-		IsHTTPS:     isHTTPS,
-		ReqHeaders:  headers,
-		ReqBody:     body,
-		CapturedAt:  time.Now(),
-		CaptureMode: "nic",
-		ProcessPID:  procPID,
-		ProcessName: procName,
+		Method: method, URL: url, Host: host, Path: urlPath,
+		Protocol: "HTTP/1.1", IsHTTPS: isHTTPS,
+		ReqHeaders: headers, ReqBody: body,
+		CapturedAt: time.Now(), CaptureMode: "nic",
+		ProcessPID: procPID, ProcessName: procName,
 	}
+}
+
+// ---- bytes helpers (零分配) ----
+
+func indexByte(data []byte, c byte) int {
+	for i, b := range data {
+		if b == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexDoubleCRLF(data []byte) int {
+	for i := 0; i < len(data)-3; i++ {
+		if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+func bytesTrimSpace(b []byte) []byte {
+	for len(b) > 0 && b[0] == ' ' {
+		b = b[1:]
+	}
+	for len(b) > 0 && b[len(b)-1] == ' ' {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
+func trimCR(b []byte) []byte {
+	if len(b) > 0 && b[len(b)-1] == '\r' {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
+func hasPrefixFold(b, prefix []byte) bool {
+	if len(b) < len(prefix) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		a, c := b[i], prefix[i]
+		if a >= 'A' && a <= 'Z' {
+			a += 'a' - 'A'
+		}
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if a != c {
+			return false
+		}
+	}
+	return true
 }

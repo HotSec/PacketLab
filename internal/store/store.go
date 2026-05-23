@@ -28,7 +28,7 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	// 主连接用于写操作
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(3) // 2 write + 1 read
 	db.SetConnMaxLifetime(0)
 	for _, p := range []string{
 		"PRAGMA journal_mode=WAL",
@@ -60,7 +60,7 @@ func (s *Store) initReadConn(dbPath string) {
 		slog.Warn("failed to open read-only DB, reads will use write conn", "error", err)
 		return
 	}
-	dbRO.SetMaxOpenConns(1)
+	dbRO.SetMaxOpenConns(2)
 	dbRO.SetConnMaxLifetime(0)
 	s.dbRO = dbRO
 }
