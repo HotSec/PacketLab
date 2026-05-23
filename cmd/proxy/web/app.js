@@ -773,8 +773,9 @@ function copyToClipboard(cid) {
   navigator.clipboard.writeText(pre.textContent).then(() => showToast('success', t('copied'))).catch(() => showToast('error', 'Copy failed'));
 }
 function copyAsCurl() {
-  const req = requestDetailCache;
-  if (!req) return;
+  if (!selectedRequestId) { showToast('error', '请先选择一个请求'); return; }
+  const req = requestDetailCache[selectedRequestId];
+  if (!req) { showToast('error', '请求详情未加载'); return; }
   let curl = `curl -X ${req.method} '${req.url}'`;
   if (req.req_headers) Object.entries(req.req_headers).forEach(([k, v]) => {
     curl += ` -H '${k}: ${v}'`;
