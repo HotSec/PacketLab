@@ -641,11 +641,13 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		body.BPF = "tcp port 80 or tcp port 443"
 	}
 
-	// 动态创建引擎（如果尚未创建）
-	if s.captureEngine == nil {
-		ce := capture.New(body.Interface, body.BPF, s.store, s)
-		s.SetCaptureEngine(ce)
+	// 如果引擎已存在但参数不同，先停止旧的
+	if s.captureEngine != nil && s.captureEngine.IsRunning() {
+		s.captureEngine.Stop()
 	}
+	// 每次重新创建引擎以应用用户选择的网卡和 BPF
+	ce := capture.New(body.Interface, body.BPF, s.store, s)
+	s.SetCaptureEngine(ce)
 
 	if err := s.captureEngine.Start(); err != nil {
 		slog.Error("capture start failed", "iface", body.Interface, "error", err)
