@@ -67,6 +67,27 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .icon-btn:hover{background:var(--bg-hover);color:var(--text-primary)}
 .icon-btn:active{transform:scale(.95)}
 .icon-btn.active{color:var(--accent)}
+/* Tooltip — 使用 data-tooltip 属性 */
+.icon-btn[data-tooltip]:hover::after,.mini-btn[data-tooltip]:hover::after{
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  animation: tooltipIn .18s ease;
+}
+@keyframes tooltipIn{from{opacity:0;transform:translateX(-50%) translateY(3px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 /* Main */
 .main-content{display:flex;flex:1;overflow:hidden;position:relative}
 .request-panel{width:390px;min-width:260px;display:flex;flex-direction:column;background:var(--bg-surface);border-right:1px solid var(--border-subtle);flex-shrink:0;transition:width .25s}

@@ -18,27 +18,27 @@
 <input type="text" class="search-input" data-i18n-placeholder="filter_placeholder" placeholder="过滤 URL / 状态码 / 方法..." id="searchInput" oninput="filterRequests()">
 </div>
 <div class="topbar-actions">
-<button class="icon-btn" data-i18n-title="theme_toggle" title="切换主题" onclick="toggleTheme()" id="themeBtn">
+<button class="icon-btn" data-i18n-title="theme_toggle" data-tooltip="切换主题" title="切换主题" onclick="toggleTheme()" id="themeBtn">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
 </button>
-<button class="icon-btn" data-i18n-title="lang_toggle" title="English" onclick="toggleLang()" id="langBtn">EN</button>
-<button class="icon-btn" data-i18n-title="error_filter" title="仅显示错误" onclick="toggleErrorFilter()" id="errorFilterBtn">
+<button class="icon-btn" data-i18n-title="lang_toggle" data-tooltip="English" title="English" onclick="toggleLang()" id="langBtn">EN</button>
+<button class="icon-btn" data-i18n-title="error_filter" data-tooltip="仅显示错误" title="仅显示错误" onclick="toggleErrorFilter()" id="errorFilterBtn">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
 </button>
-<button class="icon-btn" data-i18n-title="clear_history" title="清空记录" onclick="clearHistory()">
+<button class="icon-btn" data-i18n-title="clear_history" data-tooltip="清空记录" title="清空记录" onclick="clearHistory()">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
 </button>
-<button class="icon-btn" data-i18n-title="export_har" title="导出 HAR" onclick="exportHAR()">
+<button class="icon-btn" data-i18n-title="export_har" data-tooltip="导出 HAR" title="导出 HAR" onclick="exportHAR()">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
 </button>
-<button class="icon-btn" onclick="toggleInterceptMode()" id="interceptModeBtn" data-i18n-title="intercept_mode" title="拦截模式: 自动">
+<button class="icon-btn" onclick="toggleInterceptMode()" id="interceptModeBtn" data-i18n-title="intercept_mode" data-tooltip="拦截模式: 自动" title="拦截模式: 自动">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
 </button>
-<button class="icon-btn" data-i18n-title="capture_toggle" title="网卡抓包" onclick="toggleNICCapture()" id="captureToggleBtn">
+<button class="icon-btn" data-i18n-title="capture_toggle" data-tooltip="网卡抓包" title="网卡抓包" onclick="toggleNICCapture()" id="captureToggleBtn">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
 </button>
 <span class="mode-indicator mode-auto" id="modeIndicator">AUTO</span>
-<button class="mini-btn" onclick="openRulesPanel()" style="margin-left:4px" data-i18n-title="rules_manage" title="规则管理">⚙</button>
+<button class="mini-btn" onclick="openRulesPanel()" style="margin-left:4px" data-i18n-title="rules_manage" data-tooltip="规则管理" title="规则管理">⚙</button>
 </div>
 </header>
 <div class="main-content">
@@ -79,7 +79,7 @@
 <div class="kv-row"><span class="kv-key">Method</span><span class="kv-value" id="req-method"></span></div>
 <div class="kv-row"><span class="kv-key">Host</span><span class="kv-value" id="req-host"></span></div>
 <div class="kv-row"><span class="kv-key">Protocol</span><span class="kv-value" id="req-protocol"></span></div>
-<button class="mini-btn" onclick="copyAsCurl()" style="margin-top:8px">📋 copy as curl</button></div>
+<button class="mini-btn" onclick="copyAsCurl()" style="margin-top:8px" data-tooltip="复制为 curl 命令" title="复制为 curl 命令">📋 copy as curl</button></div>
 <div class="detail-section"><div class="section-label" data-i18n="req_headers">请求头</div>
 <div id="req-headers" class="code-block"><div class="code-block-header"><span class="code-block-lang">Headers</span><button class="mini-btn" onclick="copyToClipboard('req-headers')" data-i18n="copy">复制</button></div><pre id="req-headers-content"></pre></div></div>
 <div class="detail-section"><div class="section-label" data-i18n="req_body">请求体</div>
@@ -100,7 +100,7 @@
 <div class="resend-url-row">
 <select class="method-select" id="resendMethod"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option><option>CONNECT</option><option>TRACE</option></select>
 <input type="text" class="url-input" id="resendUrl" placeholder="https://api.example.com/endpoint">
-<button class="mini-btn primary" onclick="sendResend()" id="resendBtn">
+<button class="mini-btn primary" onclick="sendResend()" data-tooltip="发送请求" title="发送请求" id="resendBtn">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
 <span data-i18n="send">发送</span></button></div>
 <div class="section-label" data-i18n="req_headers_mini">请求头</div>
