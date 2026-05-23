@@ -493,7 +493,6 @@ async function sendResend() {
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>...';
   try {
     const result = await apiPost('/api/resend', { method, url, headers, body });
-    requestDetailCache = {};
     await loadRequests();
     if (result && result.id) selectRequest(result.id);
     showToast('success', `${t('sent')} — ${result.status_code} (${result.duration_ms}ms)`);
@@ -825,14 +824,26 @@ function formatJSONBody(el, text) {
   try { const obj = JSON.parse(text); return JSON.stringify(obj, null, 2); }
   catch { return text; }
 }
-function exportHAR() {
-  const a = document.createElement('a');
-  a.href = '/api/export/har?limit=500';
-  a.download = 'packetlab.har';
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => document.body.removeChild(a), 100);
-  showToast('success', 'HAR 文件下载中...');
+async function exportHAR() {
+  try {
+    const r = await fetch('/api/export/har?limit=500');
+    if (!r.ok) {
+      let body = null;
+      try { body = await r.json(); } catch {}
+      showToast('error', getErrorMessage(body, r.status));
+      return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'packetlab.har';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 100);
+    showToast('success', 'HAR 文件下载中...');
+  } catch (e) {
+    showToast('error', '导出失败: ' + (e.message || '网络错误'));
+  }
 }
 function showToast(type, msg) {
   const c = document.getElementById('toastContainer');

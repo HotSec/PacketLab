@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -219,27 +218,22 @@ func portToAddr(port int) string { return ":" + strconv.Itoa(port) }
 // 跳过已知的非 HTTP 协议主机（WNS、遥测、自定义 TCP 等）
 func shouldMITM(host string) bool {
 	skipSuffixes := []string{
-		".wns.windows.com",        // Windows Push Notification
-		".notify.windows.com",     // Windows Notification
-		".push.apple.com",         // Apple Push Notification
-		".talk.google.com",        // Google Hangouts
-		".events.data.msn.cn",     // Microsoft Telemetry
-		".events.data.msn.com",    // Microsoft Telemetry
-		".events.data.microsoft.com", // Microsoft Telemetry
-		"ntp.msn.cn",              // MSN Time Sync (non-HTTP)
-		"ntp.msn.com",             // MSN Time Sync
-		".telemetry.microsoft.com", // Microsoft Telemetry
-		".vortex.data.microsoft.com", // Microsoft Telemetry
-		".settings.data.microsoft.com", // Microsoft Settings Sync
+		".wns.windows.com",
+		".notify.windows.com",
+		".push.apple.com",
+		".talk.google.com",
+		".events.data.msn.cn",
+		".events.data.msn.com",
+		".events.data.microsoft.com",
+		"ntp.msn.cn",
+		"ntp.msn.com",
+		".telemetry.microsoft.com",
+		".vortex.data.microsoft.com",
+		".settings.data.microsoft.com",
+		".settings-win.data.microsoft.com",
 	}
 	for _, s := range skipSuffixes {
 		if len(host) >= len(s) && host[len(host)-len(s):] == s {
-			return false
-		}
-	}
-	// 精确匹配或包含
-	for _, kw := range []string{"telemetry", "vortex.data", "settings-win.data"} {
-		if strings.Contains(host, kw) {
 			return false
 		}
 	}

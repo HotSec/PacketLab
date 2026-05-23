@@ -314,11 +314,12 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 	var reqHeadersJSON, resHeadersJSON, capturedAt string
 
 	err := s.db.QueryRow(
-		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at
+		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name
 		 FROM requests WHERE id = ?`, id,
 	).Scan(&req.ID, &req.Method, &req.URL, &req.Host, &req.Path, &req.Protocol, &req.IsHTTPS,
 		&reqHeadersJSON, &req.ReqBody, &req.StatusCode, &resHeadersJSON, &req.ResBody,
-		&req.DurationMs, &req.SizeBytes, &capturedAt)
+		&req.DurationMs, &req.SizeBytes, &capturedAt,
+		&req.CaptureMode, &req.ProcessPID, &req.ProcessName)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("request not found: %d", id)
@@ -554,9 +555,15 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 		defer noteRows.Close()
 		for noteRows.Next() {
 			var n models.APINote
-			noteRows.Scan(&n.Path, &n.Method, &n.Note, &n.ID)
+			if err := noteRows.Scan(&n.Path, &n.Method, &n.Note, &n.ID); err != nil {
+				slog.Warn("scan note row failed", "error", err)
+				continue
+			}
 			key := n.Path + "|" + n.Method
 			notesMap[key] = n
+		}
+		if err := noteRows.Err(); err != nil {
+			slog.Warn("note rows iteration error", "error", err)
 		}
 	}
 
@@ -652,12 +659,22 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		args = append(args, "%"+search+"%")
 	}
 
-	// 总数
+	// 总数 — 先查所有 host 再在内存中去端口去重计数
 	var total int
-	countSQL := fmt.Sprintf("SELECT COUNT(DISTINCT host) FROM requests %s", where)
-	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
+	totalRows, err := s.db.Query(fmt.Sprintf("SELECT host FROM requests %s", where), args...)
+	if err != nil {
 		return nil, 0, err
 	}
+	totalSet := make(map[string]struct{})
+	for totalRows.Next() {
+		var h string
+		if err := totalRows.Scan(&h); err != nil {
+			continue
+		}
+		totalSet[stripPort(h)] = struct{}{}
+	}
+	totalRows.Close()
+	total = len(totalSet)
 
 	// 分页 — 按请求数降序
 	args = append(args, limit, offset)
@@ -794,13 +811,12 @@ func (s *Store) SaveInterceptLog(log *models.InterceptLog) error {
 		return fmt.Errorf("insert intercept log: %w", err)
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("get last insert id: %w", err)
+	}
 	log.ID = id
-
-	// 读取刚插入的时间
-	var createdAt string
-	s.db.QueryRow("SELECT created_at FROM intercept_logs WHERE id = ?", id).Scan(&createdAt)
-	log.CreatedAt = createdAt
+	log.CreatedAt = time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	return nil
 }
