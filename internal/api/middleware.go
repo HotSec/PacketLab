@@ -147,6 +147,10 @@ func (rl *rateLimiter) stop() {
 func rateLimitMiddleware(limiter *rateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/ws" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			key := r.RemoteAddr
 			if !limiter.allow(key) {
 				writeAppError(w, ErrRateLimited())
