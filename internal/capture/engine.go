@@ -227,30 +227,15 @@ func (e *Engine) workerLoop(id int) {
 	flushDeadline := time.Now().Add(2 * time.Minute)
 	for {
 		select {
-		case packet := <-ch:
+		case packet, ok := <-ch:
+			if !ok {
+				assembler.FlushAllWithPending(e)
+				return
+			}
 			assembler.Assemble(packet)
 		case <-gcTicker.C:
 			assembler.FlushOlderThan(flushDeadline, e)
 			flushDeadline = time.Now().Add(2 * time.Minute)
-		}
-	}
-}
-
-// gcLoop 定期清理过期流
-func (e *Engine) gcLoop() {
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-	for e.running.Load() {
-		select {
-		case <-ticker.C:
-			e.mu.Lock()
-			a := e.assembler
-			e.mu.Unlock()
-			if a != nil {
-				a.FlushOlderThan(time.Now().Add(-2*time.Minute), e)
-			}
-		case <-e.stopCh:
-			return
 		}
 	}
 }
@@ -501,8 +486,11 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	if ipLayer == nil || tcpLayer == nil {
 		return
 	}
-	ip, _ := ipLayer.(*layers.IPv4)
-	tcp, _ := tcpLayer.(*layers.TCP)
+	ip, ok1 := ipLayer.(*layers.IPv4)
+	tcp, ok2 := tcpLayer.(*layers.TCP)
+	if !ok1 || !ok2 {
+		return
+	}
 
 	isFIN := tcp.FIN
 	isRST := tcp.RST
@@ -656,7 +644,11 @@ func (s *TCPStream) HandleClose(a *Assembler) {
 // tryExtractHTTP 从双缓冲区中提取 HTTP 请求/响应并消费
 func (s *TCPStream) tryExtractHTTP() {
 	for {
+		// 1. 如果没有 pending 请求，尝试从 clientBuf 提取
 		if s.pendingReq == nil {
+			if len(s.clientBuf) == 0 {
+				return
+			}
 			idx := findHTTPMessageEnd(s.clientBuf)
 			if idx < 0 {
 				return
@@ -669,37 +661,32 @@ func (s *TCPStream) tryExtractHTTP() {
 					s.pendingReq = req
 				}
 			}
-		}
-
-		if s.pendingReq != nil {
-			idx := findHTTPMessageEnd(s.serverBuf)
-			if idx < 0 {
+			if s.pendingReq == nil {
 				return
 			}
-			msgData := s.serverBuf[:idx]
-			s.serverBuf = s.serverBuf[idx:]
-			if isHTTPResponse(msgData) {
-				resp := parseHTTPResponse(msgData)
-				if resp != nil {
-					s.pendingReq.StatusCode = resp.StatusCode
-					s.pendingReq.ResHeaders = resp.Headers
-					s.pendingReq.ResBody = resp.Body
-					s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
-					s.pendingReq.SizeBytes = int64(len(msgData))
-					s.engine.emitNonBlocking(s.pendingReq)
-					s.pendingReq = nil
-				}
-			}
 		}
 
-		if len(s.clientBuf) == 0 && len(s.serverBuf) == 0 {
+		// 2. 有 pending 请求，尝试从 serverBuf 提取响应
+		if len(s.serverBuf) == 0 {
 			return
 		}
-		if s.pendingReq != nil && len(s.serverBuf) == 0 {
+		idx := findHTTPMessageEnd(s.serverBuf)
+		if idx < 0 {
 			return
 		}
-		if s.pendingReq == nil && len(s.clientBuf) == 0 {
-			return
+		msgData := s.serverBuf[:idx]
+		s.serverBuf = s.serverBuf[idx:]
+		if isHTTPResponse(msgData) {
+			resp := parseHTTPResponse(msgData)
+			if resp != nil {
+				s.pendingReq.StatusCode = resp.StatusCode
+				s.pendingReq.ResHeaders = resp.Headers
+				s.pendingReq.ResBody = resp.Body
+				s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
+				s.pendingReq.SizeBytes = int64(len(msgData))
+				s.engine.emitNonBlocking(s.pendingReq)
+				s.pendingReq = nil
+			}
 		}
 	}
 }
