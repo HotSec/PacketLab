@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -188,6 +190,13 @@ type requestIDWriter struct {
 
 func (w *requestIDWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+func (w *requestIDWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 func requestIDInjectorMiddleware(next http.Handler) http.Handler {
