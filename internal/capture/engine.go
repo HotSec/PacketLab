@@ -65,7 +65,7 @@ func New(iface, bpf string, st *store.Store,
 	hub interface{ BroadcastCapture(req *models.CapturedRequest) }) *Engine {
 
 	if bpf == "" {
-		bpf = "tcp port 80 or tcp port 443"
+		bpf = "tcp"
 	}
 
 	e := &Engine{
@@ -504,12 +504,9 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	ip, _ := ipLayer.(*layers.IPv4)
 	tcp, _ := tcpLayer.(*layers.TCP)
 
-	if len(tcp.Payload) == 0 {
-		return
-	}
+	isFIN := tcp.FIN
+	isRST := tcp.RST
 
-	// 归一化 4 元组流键：同一 TCP 连接的双方向映射到同一流
-	// key = "min(src,dst):min(sport,dport):max(src,dst):max(sport,dport)"
 	srcIPStr := ip.SrcIP.String()
 	dstIPStr := ip.DstIP.String()
 	srcPort := uint16(tcp.SrcPort)
@@ -541,9 +538,14 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	}
 	a.mu.Unlock()
 
-	// 判断方向：src 是否等于流记录的 A 端
-	isClientToServer := srcIPStr == keyA && srcPort == portA
-	stream.Feed(tcp.Payload, isClientToServer)
+	if len(tcp.Payload) > 0 {
+		isClientToServer := srcIPStr == keyA && srcPort == portA
+		stream.Feed(tcp.Payload, isClientToServer)
+	}
+
+	if isFIN || isRST {
+		stream.HandleClose(a)
+	}
 }
 
 // FlushOlderThan 清理过期流（持流锁保护，先 emit pendingReq）
@@ -624,11 +626,20 @@ func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.lastActive = time.Now()
 
 	s.buf = append(s.buf, data...)
-	// 先消费已完成的 HTTP 消息
 	s.tryExtractHTTP()
-	// 再安全截断：沿消息边界截，不切断半截消息
 	if len(s.buf) > streamBufMax {
 		s.safeTruncate()
+	}
+}
+
+// HandleClose 处理 TCP 连接关闭（FIN/RST），立即 emit 未完成的请求
+func (s *TCPStream) HandleClose(a *Assembler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.pendingReq != nil {
+		s.engine.emitNonBlocking(s.pendingReq)
+		s.pendingReq = nil
 	}
 }
 

@@ -35,7 +35,7 @@ func main() {
 
 	captureFlag   := flag.Bool("capture", false, "启用网卡抓包")
 	captureIFace  := flag.String("capture-iface", "", "指定抓包网卡（默认自动检测）")
-	captureBPF    := flag.String("capture-bpf", "tcp port 80 or tcp port 443", "BPF 过滤器")
+	captureBPF    := flag.String("capture-bpf", "tcp", "BPF 过滤器 (默认捕获所有 TCP)")
 	captureNoProc := flag.Bool("capture-no-proc", false, "禁用进程关联")
 	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
 	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")

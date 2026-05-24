@@ -51,7 +51,7 @@ func New(st *store.Store, frontendHandler http.Handler, insecure bool) *Server {
 		frontend:    frontendHandler,
 		resendSvc:   NewResendService(st, hub, insecure),
 		harSvc:      NewHARService(st),
-		rateLimiter: newRateLimiter(30, time.Minute),
+		rateLimiter: newRateLimiter(120, time.Minute),
 	}
 
 	s.setupRoutes()
