@@ -11,8 +11,6 @@ import (
 
 	"packetlab/internal/models"
 	"packetlab/internal/store"
-
-	"github.com/google/gopacket/layers"
 )
 
 // TestPipelineThroughput 模拟实际抓包管道吞吐
@@ -41,8 +39,7 @@ func TestPipelineThroughput(t *testing.T) {
 		pool := NewTCPStreamPool(e)
 		streams[i] = pool.New(
 			net.ParseIP(fmt.Sprintf("10.0.%d.%d", i/256, i%256)),
-			30000+layers.TCPPort(i),
-			net.ParseIP("192.168.1.1"),
+			uint16(30000+i),
 			80,
 		)
 	}

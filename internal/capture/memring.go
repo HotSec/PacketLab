@@ -51,7 +51,10 @@ func (r *MemRingBuffer) Push(req *models.CapturedRequest) {
 
 	if next == tail {
 		r.tail.Store((tail + 1) & r.mask)
-		r.dropped.Add(1)
+		d := r.dropped.Add(1)
+		if d%100 == 1 {
+			slog.Warn("ring buffer overflow, oldest record dropped", "total_dropped", d, "url", req.URL)
+		}
 	}
 	if req != nil {
 		r.buf[head] = Record{Req: *req, Timestamp: time.Now()}
@@ -105,6 +108,7 @@ func (r *MemRingBuffer) Dropped() uint64 {
 type AsyncWriterPool struct {
 	store    *store.Store
 	buf      *MemRingBuffer
+	engine   *Engine
 	workers  int
 	interval time.Duration
 	stopCh   chan struct{}
@@ -178,9 +182,14 @@ func (p *AsyncWriterPool) flushAll() {
 		saved := false
 		chunk := reqs[i:end]
 		for attempt := 1; attempt <= 3; attempt++ {
-			n, err := p.store.SaveBatch(chunk)
+			ids, err := p.store.SaveBatch(chunk)
 			if err == nil {
-				p.written.Add(uint64(len(n)))
+				for j, id := range ids {
+					if j < len(chunk) {
+						chunk[j].ID = id
+					}
+				}
+				p.written.Add(uint64(len(ids)))
 				saved = true
 				break
 			}
@@ -192,6 +201,14 @@ func (p *AsyncWriterPool) flushAll() {
 				if id, err := p.store.Save(req); err == nil {
 					req.ID = id
 					p.written.Add(1)
+				}
+			}
+		}
+		for _, req := range chunk {
+			if req.ID > 0 {
+				p.engine.stats.HTTPFound.Add(1)
+				if p.engine.hub != nil {
+					p.engine.hub.BroadcastCapture(req)
 				}
 			}
 		}

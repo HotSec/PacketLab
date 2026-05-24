@@ -48,7 +48,7 @@ func BenchmarkStreamFeed(b *testing.B) {
 	}
 	e.running.Store(true)
 	pool := NewTCPStreamPool(e)
-	stream := pool.New(net.ParseIP("10.0.0.1"), 12345, net.ParseIP("10.0.0.2"), 80)
+	stream := pool.New(net.ParseIP("10.0.0.1"), 12345, 80)
 
 	b.ResetTimer()
 	b.SetBytes(int64(len(httpReq) + len(httpResp)))

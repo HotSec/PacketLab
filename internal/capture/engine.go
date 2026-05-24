@@ -56,8 +56,10 @@ const emitBufSize = 65536 // 64K entries ring buffer
 
 // Stats 抓包统计
 type Stats struct {
-	PacketsRecv atomic.Int64
-	HTTPFound   atomic.Int64
+	PacketsRecv  atomic.Int64
+	HTTPFound    atomic.Int64
+	PacketsDrop  atomic.Int64
+	StreamsDrop  atomic.Int64
 }
 
 // New 创建抓包引擎
@@ -118,6 +120,7 @@ func (e *Engine) Start() error {
 	// 2.5Gbps: 初始化内存环形缓冲区 + 异步写入池
 	e.ringBuf = NewMemRingBuffer(262144) // 262K entries
 	e.writer = NewAsyncWriterPool(e.store, e.ringBuf, 4, 30*time.Millisecond)
+	e.writer.engine = e
 	e.writer.Start()
 
 	for i := 0; i < e.workers; i++ {
@@ -187,34 +190,55 @@ func (e *Engine) GetMetrics() map[string]interface{} {
 	return m
 }
 
-// packetLoop 读取数据包并分发到 worker
+// packetLoop 读取数据包并按流哈希分发到 worker
 func (e *Engine) packetLoop() {
 	packetSource := gopacket.NewPacketSource(e.handle, e.handle.LinkType())
 	lastReport := time.Now()
-	workerIdx := 0
 	for packet := range packetSource.Packets() {
 		if !e.running.Load() {
 			return
 		}
 		e.stats.PacketsRecv.Add(1)
-		// 轮询分发到 worker
+		workerIdx := e.flowHash(packet)
 		ch := e.workerChs[workerIdx]
-		workerIdx = (workerIdx + 1) % e.workers
 		select {
 		case ch <- packet:
 		default:
-			// worker 满，丢弃
+			e.stats.PacketsDrop.Add(1)
 		}
 		if now := time.Now(); now.Sub(lastReport) >= 5*time.Second {
-			slog.Debug("capture: 数据包统计", "packets", e.stats.PacketsRecv.Load(), "http", e.stats.HTTPFound.Load())
+			slog.Debug("capture: 数据包统计", "packets", e.stats.PacketsRecv.Load(), "http", e.stats.HTTPFound.Load(), "pkt_drop", e.stats.PacketsDrop.Load(), "stream_drop", e.stats.StreamsDrop.Load())
 			lastReport = now
 		}
 	}
-	// 关闭 worker channels
 	for _, ch := range e.workerChs {
 		close(ch)
 	}
 	e.workerSg.Wait()
+}
+
+// flowHash 基于五元组计算 worker 索引，确保同一流的数据包到同一 worker
+func (e *Engine) flowHash(packet gopacket.Packet) int {
+	ipLayer := packet.Layer(layers.LayerTypeIPv4)
+	tcpLayer := packet.Layer(layers.LayerTypeTCP)
+	if ipLayer == nil || tcpLayer == nil {
+		return 0
+	}
+	ip, ok1 := ipLayer.(*layers.IPv4)
+	tcp, ok2 := tcpLayer.(*layers.TCP)
+	if !ok1 || !ok2 {
+		return 0
+	}
+	var sIP, dIP uint32
+	for _, b := range ip.SrcIP.To4() {
+		sIP = sIP<<8 | uint32(b)
+	}
+	for _, b := range ip.DstIP.To4() {
+		dIP = dIP<<8 | uint32(b)
+	}
+	h := sIP ^ dIP ^ uint32(tcp.SrcPort) ^ uint32(tcp.DstPort)
+	h = (h >> 16) ^ h
+	return int(h) % e.workers
 }
 
 // workerLoop 独立 goroutine 处理数据包（per-worker Assembler + 流超时清理）
@@ -278,9 +302,15 @@ func (e *Engine) bulkEmit(reqs []*models.CapturedRequest) {
 	for _, req := range reqs {
 		req.CaptureMode = "nic"
 	}
-	if _, err := e.store.SaveBatch(reqs); err != nil {
+	ids, err := e.store.SaveBatch(reqs)
+	if err != nil {
 		slog.Warn("capture: bulk save failed", "count", len(reqs), "error", err)
 		return
+	}
+	for i, id := range ids {
+		if i < len(reqs) {
+			reqs[i].ID = id
+		}
 	}
 	for _, req := range reqs {
 		e.stats.HTTPFound.Add(1)
@@ -297,15 +327,12 @@ var emitBuf struct {
 }
 
 func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
-	if !e.running.Load() {
-		return
-	}
-	// 2.5Gbps: 直接写入内存环形缓冲区（零阻塞）
+	req.CaptureMode = "nic"
+
 	if e.ringBuf != nil {
 		e.ringBuf.Push(req)
 		return
 	}
-	// 回退到旧 emit 管道
 	e.emitMu.Lock()
 	if e.emitBuf == nil {
 		e.emitBuf = make([]*models.CapturedRequest, emitBufSize)
@@ -500,34 +527,45 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	srcPort := uint16(tcp.SrcPort)
 	dstPort := uint16(tcp.DstPort)
 
+	isClientToServer := determineDirection(srcPort, dstPort)
+
+	var clientIP net.IP
+	var clientPort, serverPort uint16
+	if isClientToServer {
+		clientIP = ip.SrcIP
+		clientPort = srcPort
+		serverPort = dstPort
+	} else {
+		clientIP = ip.DstIP
+		clientPort = dstPort
+		serverPort = srcPort
+	}
+
 	var keyA, keyB string
 	var portA, portB uint16
-	var ipA, ipB net.IP
 	if srcIPStr < dstIPStr || (srcIPStr == dstIPStr && srcPort < dstPort) {
 		keyA, keyB = srcIPStr, dstIPStr
 		portA, portB = srcPort, dstPort
-		ipA, ipB = ip.SrcIP, ip.DstIP
 	} else {
 		keyA, keyB = dstIPStr, srcIPStr
 		portA, portB = dstPort, srcPort
-		ipA, ipB = ip.DstIP, ip.SrcIP
 	}
 	streamKey := fmt.Sprintf("%s:%d-%s:%d", keyA, portA, keyB, portB)
 
 	a.mu.Lock()
 	stream, ok := a.streams[streamKey]
 	if !ok {
-		if len(a.streams) >= 2000 {
+		if len(a.streams) >= 10000 {
 			a.mu.Unlock()
+			a.pool.engine.stats.StreamsDrop.Add(1)
 			return
 		}
-		stream = a.pool.New(ipA, layers.TCPPort(portA), ipB, layers.TCPPort(portB))
+		stream = a.pool.New(clientIP, clientPort, serverPort)
 		a.streams[streamKey] = stream
 	}
 	a.mu.Unlock()
 
 	if len(tcp.Payload) > 0 {
-		isClientToServer := srcIPStr == keyA && srcPort == portA
 		stream.Feed(tcp.Payload, isClientToServer)
 	}
 
@@ -536,16 +574,41 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	}
 }
 
-// FlushOlderThan 清理过期流（持流锁保护，先 emit pendingReq）
+// determineDirection 基于端口号判断数据方向（目标为服务端口则源为客户端）
+func determineDirection(srcPort, dstPort uint16) bool {
+	if isLikelyServerPort(dstPort) {
+		return true
+	}
+	if isLikelyServerPort(srcPort) {
+		return false
+	}
+	return srcPort > dstPort
+}
+
+// isLikelyServerPort 判断是否为常见服务端口
+func isLikelyServerPort(port uint16) bool {
+	switch port {
+	case 80, 443, 8080, 8443, 3000, 5000, 8000, 8888, 9000, 9090,
+		2080, 2083, 2086, 2087, 4443, 7443, 11180:
+		return true
+	default:
+		return port < 1024
+	}
+}
+
+// FlushOlderThan 清理过期流（持流锁保护，先 tryExtractHTTP 再 emit pendingReq）
 func (a *Assembler) FlushOlderThan(t time.Time, engine *Engine) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for key, s := range a.streams {
 		s.mu.Lock()
+		if s.nonHTTP {
+			s.mu.Unlock()
+			delete(a.streams, key)
+			continue
+		}
 		if s.lastActive.Before(t) {
-			if s.pendingReq != nil {
-				engine.emit(s.pendingReq)
-			}
+			s.tryExtractHTTPOnClose()
 			s.mu.Unlock()
 			delete(a.streams, key)
 		} else {
@@ -560,8 +623,8 @@ func (a *Assembler) FlushAllWithPending(engine *Engine) {
 	defer a.mu.Unlock()
 	for _, s := range a.streams {
 		s.mu.Lock()
-		if s.pendingReq != nil {
-			engine.emit(s.pendingReq)
+		if !s.nonHTTP {
+			s.tryExtractHTTPOnClose()
 		}
 		s.mu.Unlock()
 	}
@@ -583,12 +646,12 @@ func NewTCPStreamPool(e *Engine) *TCPStreamPool {
 }
 
 // New 创建新 TCP 流
-func (p *TCPStreamPool) New(srcIP net.IP, srcPort layers.TCPPort, dstIP net.IP, dstPort layers.TCPPort) *TCPStream {
+func (p *TCPStreamPool) New(clientIP net.IP, clientPort, serverPort uint16) *TCPStream {
 	return &TCPStream{
 		engine:     p.engine,
-		srcIP:      srcIP,
-		srcPort:    uint16(srcPort),
-		dstPort:    uint16(dstPort),
+		srcIP:      clientIP,
+		srcPort:    clientPort,
+		dstPort:    serverPort,
 		lastActive: time.Now(),
 	}
 }
@@ -604,6 +667,9 @@ type TCPStream struct {
 	serverBuf  []byte // 服务端→客户端 数据
 	lastActive time.Time
 	pendingReq *models.CapturedRequest
+	nonHTTP    bool   // 标记为非HTTP流，跳过后续处理
+	firstData  bool   // 是否已收到首批数据（用于非HTTP检测）
+	sniEmitted bool   // 是否已emit TLS SNI记录
 }
 
 const streamBufMax = 2 * 1024 * 1024 // 2MB max per stream
@@ -614,37 +680,113 @@ func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	defer s.mu.Unlock()
 	s.lastActive = time.Now()
 
+	if s.nonHTTP {
+		return
+	}
+
 	if clientToServer {
 		s.clientBuf = append(s.clientBuf, data...)
 	} else {
 		s.serverBuf = append(s.serverBuf, data...)
 	}
+
+	if !s.firstData {
+		s.firstData = true
+		var first []byte
+		if len(s.clientBuf) > 0 {
+			first = s.clientBuf
+		} else {
+			first = s.serverBuf
+		}
+		if len(first) > 0 && !looksLikeHTTP(first) {
+			if isTLSClientHello(first) && !s.sniEmitted {
+				sni := extractSNI(first)
+				if sni != "" {
+					s.emitTLSRecord(sni)
+					s.sniEmitted = true
+				}
+			}
+			s.nonHTTP = true
+			s.clientBuf = nil
+			s.serverBuf = nil
+			return
+		}
+	}
+
 	s.tryExtractHTTP()
+
 	if len(s.clientBuf) > streamBufMax {
-		s.clientBuf = s.clientBuf[len(s.clientBuf)-256*1024:]
+		s.clientBuf = truncateBuffer(s.clientBuf, 256*1024)
 	}
 	if len(s.serverBuf) > streamBufMax {
-		s.serverBuf = s.serverBuf[len(s.serverBuf)-256*1024:]
+		s.serverBuf = truncateBuffer(s.serverBuf, 256*1024)
 	}
 }
+
+// truncateBuffer 截断缓冲区，尽量在 HTTP 消息边界处截断
+func truncateBuffer(buf []byte, keepSize int) []byte {
+	if len(buf) <= keepSize {
+		return buf
+	}
+	cut := len(buf) - keepSize
+	trimmed := buf[cut:]
+	nl := indexDoubleCRLF(trimmed)
+	if nl >= 0 && nl < 4096 {
+		trimmed = trimmed[nl+4:]
+	}
+	return trimmed
+}
+
+// looksLikeHTTP 检测数据是否看起来像 HTTP
+func looksLikeHTTP(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	for _, prefix := range httpMethodPrefixes {
+		if len(data) >= len(prefix) && string(data[:len(prefix)]) == prefix {
+			return true
+		}
+	}
+	if len(data) >= 4 && string(data[:4]) == "HTTP" {
+		return true
+	}
+	return false
+}
+
+var httpMethodPrefixes = []string{"GET ", "POST", "PUT ", "DELE", "PATC", "HEAD", "OPTI", "CONN", "TRAC"}
 
 // HandleClose 处理 TCP 连接关闭（FIN/RST），先尝试提取残留数据再 emit
 func (s *TCPStream) HandleClose(a *Assembler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.tryExtractHTTP()
-
-	if s.pendingReq != nil {
-		s.engine.emitNonBlocking(s.pendingReq)
-		s.pendingReq = nil
+	if s.nonHTTP {
+		a.mu.Lock()
+		for key, stream := range a.streams {
+			if stream == s {
+				delete(a.streams, key)
+				break
+			}
+		}
+		a.mu.Unlock()
+		return
 	}
+
+	s.tryExtractHTTPOnClose()
+
+	a.mu.Lock()
+	for key, stream := range a.streams {
+		if stream == s {
+			delete(a.streams, key)
+			break
+		}
+	}
+	a.mu.Unlock()
 }
 
 // tryExtractHTTP 从双缓冲区中提取 HTTP 请求/响应并消费
 func (s *TCPStream) tryExtractHTTP() {
 	for {
-		// 1. 如果没有 pending 请求，尝试从 clientBuf 提取
 		if s.pendingReq == nil {
 			if len(s.clientBuf) == 0 {
 				return
@@ -666,28 +808,154 @@ func (s *TCPStream) tryExtractHTTP() {
 			}
 		}
 
-		// 2. 有 pending 请求，尝试从 serverBuf 提取响应
 		if len(s.serverBuf) == 0 {
 			return
 		}
+
+		if !isHTTPResponse(s.serverBuf) {
+			return
+		}
+
 		idx := findHTTPMessageEnd(s.serverBuf)
 		if idx < 0 {
 			return
 		}
-		msgData := s.serverBuf[:idx]
-		s.serverBuf = s.serverBuf[idx:]
-		if isHTTPResponse(msgData) {
-			resp := parseHTTPResponse(msgData)
-			if resp != nil {
-				s.pendingReq.StatusCode = resp.StatusCode
-				s.pendingReq.ResHeaders = resp.Headers
-				s.pendingReq.ResBody = resp.Body
-				s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
-				s.pendingReq.SizeBytes = int64(len(msgData))
-				s.engine.emitNonBlocking(s.pendingReq)
-				s.pendingReq = nil
+
+		headerData := s.serverBuf[:idx]
+		hasCL := parseContentLength(headerData) >= 0
+		hasChunked := strings.Contains(parseTransferEncoding(headerData), "chunked")
+
+		if !hasCL && !hasChunked {
+			statusCode := parseStatusCodeFromHeader(headerData)
+			if statusCode > 0 && !responseCanHaveNoBody(statusCode) {
+				return
 			}
 		}
+
+		msgData := s.serverBuf[:idx]
+		s.serverBuf = s.serverBuf[idx:]
+
+		resp := parseHTTPResponse(msgData)
+		if resp == nil {
+			continue
+		}
+
+		if resp.StatusCode >= 100 && resp.StatusCode < 200 {
+			continue
+		}
+
+		s.pendingReq.StatusCode = resp.StatusCode
+		s.pendingReq.ResHeaders = resp.Headers
+		s.pendingReq.ResBody = resp.Body
+		s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
+		s.pendingReq.SizeBytes = int64(len(msgData))
+		s.engine.emitNonBlocking(s.pendingReq)
+		s.pendingReq = nil
+	}
+}
+
+// responseCanHaveNoBody 判断响应是否可以没有 body（无需等待连接关闭）
+func responseCanHaveNoBody(statusCode int) bool {
+	return (statusCode >= 100 && statusCode < 200) || statusCode == 204 || statusCode == 304
+}
+
+// parseStatusCodeFromHeader 从 HTTP 头部字节中快速解析状态码
+func parseStatusCodeFromHeader(headerData []byte) int {
+	nl := indexByte(headerData, '\n')
+	if nl < 0 {
+		return 0
+	}
+	firstLine := bytesTrimSpace(headerData[:nl])
+	sp1 := indexByte(firstLine, ' ')
+	if sp1 < 0 {
+		return 0
+	}
+	rest := firstLine[sp1+1:]
+	sp2 := indexByte(rest, ' ')
+	var codeStr []byte
+	if sp2 >= 0 {
+		codeStr = rest[:sp2]
+	} else {
+		codeStr = rest
+	}
+	var code int
+	fmt.Sscanf(string(codeStr), "%d", &code)
+	return code
+}
+
+// tryExtractHTTPOnClose 连接关闭时提取残留数据，处理无Content-Length的响应body
+func (s *TCPStream) tryExtractHTTPOnClose() {
+	for {
+		s.tryExtractHTTP()
+
+		if s.pendingReq == nil && len(s.clientBuf) == 0 {
+			return
+		}
+
+		if s.pendingReq == nil && len(s.clientBuf) > 0 {
+			idx := findHTTPMessageEnd(s.clientBuf)
+			if idx >= 0 {
+				msgData := s.clientBuf[:idx]
+				s.clientBuf = s.clientBuf[idx:]
+				if !isHTTPResponse(msgData) {
+					req := parseHTTPRequest(msgData, s.srcIP, s.srcPort, s.dstPort, s.engine)
+					if req != nil {
+						s.pendingReq = req
+					}
+				}
+			}
+			if s.pendingReq == nil {
+				s.clientBuf = nil
+				s.serverBuf = nil
+				return
+			}
+		}
+
+		if s.pendingReq == nil {
+			return
+		}
+
+		if len(s.serverBuf) > 0 {
+			headerEnd := indexDoubleCRLF(s.serverBuf)
+			if headerEnd >= 0 {
+				headerData := s.serverBuf[:headerEnd]
+				bodyStart := headerEnd + 4
+				var body string
+				if len(s.serverBuf) > bodyStart {
+					body = string(s.serverBuf[bodyStart:])
+				}
+				resp := parseHTTPResponseFromHeader(headerData, body)
+				if resp != nil {
+					if resp.StatusCode >= 100 && resp.StatusCode < 200 {
+						s.pendingReq = nil
+						s.serverBuf = nil
+						s.clientBuf = nil
+						return
+					}
+					s.pendingReq.StatusCode = resp.StatusCode
+					s.pendingReq.ResHeaders = resp.Headers
+					s.pendingReq.ResBody = resp.Body
+					s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
+					s.pendingReq.SizeBytes = int64(len(s.serverBuf))
+				}
+			} else if isHTTPResponse(s.serverBuf) {
+				resp := parseHTTPResponse(s.serverBuf)
+				if resp != nil && resp.StatusCode >= 200 {
+					s.pendingReq.StatusCode = resp.StatusCode
+					s.pendingReq.ResHeaders = resp.Headers
+					s.pendingReq.ResBody = resp.Body
+					s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
+					s.pendingReq.SizeBytes = int64(len(s.serverBuf))
+				}
+			}
+		}
+
+		if s.pendingReq != nil {
+			s.engine.emitNonBlocking(s.pendingReq)
+			s.pendingReq = nil
+		}
+		s.serverBuf = nil
+		s.clientBuf = nil
 	}
 }
 
@@ -723,7 +991,7 @@ func findHTTPMessageEnd(data []byte) int {
 
 	// Content-Length
 	cl := parseContentLength(headerData)
-	if cl > 0 {
+	if cl >= 0 {
 		bodyEnd := idx + cl
 		if bodyEnd <= len(data) {
 			return bodyEnd
@@ -792,24 +1060,26 @@ func parseHTTPResponse(data []byte) *struct {
 	Headers    map[string]string
 	Body       string
 } {
-	headerEnd := -1
-	for i := 0; i < len(data)-3; i++ {
-		if data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n' {
-			headerEnd = i
-			break
-		}
-	}
+	headerEnd := indexDoubleCRLF(data)
 	if headerEnd < 0 {
 		return nil
 	}
 
-	headerData := string(data[:headerEnd])
-	lines := strings.Split(headerData, "\r\n")
+	return parseHTTPResponseFromHeader(data[:headerEnd], string(data[headerEnd+4:]))
+}
+
+// parseHTTPResponseFromHeader 从 header 字节和 body 字符串解析响应
+func parseHTTPResponseFromHeader(headerData []byte, body string) *struct {
+	StatusCode int
+	Headers    map[string]string
+	Body       string
+} {
+	headerStr := string(headerData)
+	lines := strings.Split(headerStr, "\r\n")
 	if len(lines) < 1 {
 		return nil
 	}
 
-	// 状态行: HTTP/1.1 200 OK
 	parts := strings.SplitN(lines[0], " ", 3)
 	if len(parts) < 2 {
 		return nil
@@ -824,12 +1094,6 @@ func parseHTTPResponse(data []byte) *struct {
 		if ci := strings.Index(line, ":"); ci > 0 {
 			headers[strings.TrimSpace(line[:ci])] = strings.TrimSpace(line[ci+1:])
 		}
-	}
-
-	body := ""
-	bodyBytes := data[headerEnd+4:]
-	if len(bodyBytes) > 0 {
-		body = string(bodyBytes)
 	}
 
 	return &struct {
@@ -1017,4 +1281,127 @@ func hasPrefixFold(b, prefix []byte) bool {
 		}
 	}
 	return true
+}
+
+// emitTLSRecord 发送一条 TLS 连接记录（仅含 SNI 域名，无请求/响应内容）
+func (s *TCPStream) emitTLSRecord(sni string) {
+	req := &models.CapturedRequest{
+		Method:      "TLS",
+		URL:         "https://" + sni + "/",
+		Host:        sni,
+		Path:        "/",
+		Protocol:    "HTTPS/TLS",
+		IsHTTPS:     true,
+		StatusCode:  0,
+		ReqHeaders:  map[string]string{"TLS-SNI": sni, "Dst-Port": fmt.Sprintf("%d", s.dstPort)},
+		ResHeaders:  map[string]string{},
+		ReqBody:     "",
+		ResBody:     "[TLS encrypted - content not available]",
+		DurationMs:  0,
+		SizeBytes:   0,
+		CapturedAt:  time.Now(),
+		CaptureMode: "nic",
+	}
+	if s.srcIP != nil {
+		req.ReqHeaders["Src-IP"] = s.srcIP.String()
+		req.ReqHeaders["Src-Port"] = fmt.Sprintf("%d", s.srcPort)
+	}
+	s.engine.emitNonBlocking(req)
+}
+
+// isTLSClientHello 检测数据是否为 TLS ClientHello
+func isTLSClientHello(data []byte) bool {
+	if len(data) < 6 {
+		return false
+	}
+	return data[0] == 0x16 && data[1] == 0x03 && (data[2] >= 0x01 && data[2] <= 0x03)
+}
+
+// extractSNI 从 TLS ClientHello 中提取 SNI（Server Name Indication）
+func extractSNI(data []byte) string {
+	if len(data) < 44 {
+		return ""
+	}
+	offset := 5 // TLS record header
+
+	if offset+4 > len(data) {
+		return ""
+	}
+	handshakeType := data[offset]
+	if handshakeType != 0x01 {
+		return ""
+	}
+	offset += 4
+
+	if offset+2 > len(data) {
+		return ""
+	}
+	offset += 2 // client version
+
+	if offset+32 > len(data) {
+		return ""
+	}
+	offset += 32 // random
+
+	if offset >= len(data) {
+		return ""
+	}
+	sessionIDLen := int(data[offset])
+	offset += 1 + sessionIDLen
+
+	if offset+2 > len(data) {
+		return ""
+	}
+	cipherSuitesLen := int(data[offset])<<8 | int(data[offset+1])
+	offset += 2 + cipherSuitesLen
+
+	if offset >= len(data) {
+		return ""
+	}
+	compressionMethodsLen := int(data[offset])
+	offset += 1 + compressionMethodsLen
+
+	if offset+2 > len(data) {
+		return ""
+	}
+	extensionsLen := int(data[offset])<<8 | int(data[offset+1])
+	offset += 2
+
+	extensionsEnd := offset + extensionsLen
+	if extensionsEnd > len(data) {
+		extensionsEnd = len(data)
+	}
+
+	for offset+4 <= extensionsEnd {
+		extType := int(data[offset])<<8 | int(data[offset+1])
+		extLen := int(data[offset+2])<<8 | int(data[offset+3])
+		offset += 4
+
+		if extType == 0x0000 { // SNI extension
+			if offset+2 > extensionsEnd {
+				return ""
+			}
+			listLen := int(data[offset])<<8 | int(data[offset+1])
+			offset += 2
+
+			listEnd := offset + listLen
+			if listEnd > extensionsEnd {
+				listEnd = extensionsEnd
+			}
+
+			for offset+3 <= listEnd {
+				nameType := data[offset]
+				nameLen := int(data[offset+1])<<8 | int(data[offset+2])
+				offset += 3
+
+				if nameType == 0x00 && offset+nameLen <= listEnd {
+					return string(data[offset : offset+nameLen])
+				}
+				offset += nameLen
+			}
+			return ""
+		}
+		offset += extLen
+	}
+	return ""
 }
