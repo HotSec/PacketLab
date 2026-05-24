@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
+	"net/url"
 	"sync"
 	"time"
 
@@ -61,15 +61,27 @@ func isAllowedOrigin(origin string) bool {
 	if origin == "" {
 		return true
 	}
-	allowed := []string{
-		"http://localhost",
-		"http://127.0.0.1",
-		"http://[::1]",
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
 	}
-	for _, a := range allowed {
-		if origin == a || strings.HasPrefix(origin, a+":") {
-			return true
-		}
+	if u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	port := u.Port()
+
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	case "localhost.localdomain":
+		return true
+	}
+	if host == "" {
+		return false
+	}
+	if port != "" {
+		return false
 	}
 	return false
 }

@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,7 +21,7 @@ type MemRingBuffer struct {
 }
 
 type Record struct {
-	Req       *models.CapturedRequest
+	Req       models.CapturedRequest
 	Timestamp time.Time
 }
 
@@ -48,12 +49,15 @@ func (r *MemRingBuffer) Push(req *models.CapturedRequest) {
 	next := (head + 1) & r.mask
 	tail := r.tail.Load()
 
-	// buffer 满？覆盖最旧条目
 	if next == tail {
 		r.tail.Store((tail + 1) & r.mask)
 		r.dropped.Add(1)
 	}
-	r.buf[head] = Record{Req: req, Timestamp: time.Now()}
+	if req != nil {
+		r.buf[head] = Record{Req: *req, Timestamp: time.Now()}
+	} else {
+		r.buf[head] = Record{Timestamp: time.Now()}
+	}
 	r.head.Store(next)
 }
 
@@ -163,16 +167,33 @@ func (p *AsyncWriterPool) flushAll() {
 	}
 	reqs := make([]*models.CapturedRequest, len(batch))
 	for i, r := range batch {
-		reqs[i] = r.Req
+		copied := r.Req
+		reqs[i] = &copied
 	}
-	// 分批写入（每批 500 条）
 	for i := 0; i < len(reqs); i += 500 {
 		end := i + 500
 		if end > len(reqs) {
 			end = len(reqs)
 		}
-		if _, err := p.store.SaveBatch(reqs[i:end]); err == nil {
-			p.written.Add(uint64(end - i))
+		saved := false
+		chunk := reqs[i:end]
+		for attempt := 1; attempt <= 3; attempt++ {
+			n, err := p.store.SaveBatch(chunk)
+			if err == nil {
+				p.written.Add(uint64(len(n)))
+				saved = true
+				break
+			}
+			slog.Warn("async writer batch failed, retrying", "attempt", attempt, "error", err, "count", len(chunk))
+		}
+		if !saved {
+			slog.Error("async writer batch failed after 3 retries, falling back to sync", "count", len(chunk))
+			for _, req := range chunk {
+				if id, err := p.store.Save(req); err == nil {
+					req.ID = id
+					p.written.Add(1)
+				}
+			}
 		}
 	}
 }

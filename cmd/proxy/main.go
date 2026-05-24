@@ -37,6 +37,8 @@ func main() {
 	captureIFace  := flag.String("capture-iface", "", "指定抓包网卡（默认自动检测）")
 	captureBPF    := flag.String("capture-bpf", "tcp port 80 or tcp port 443", "BPF 过滤器")
 	captureNoProc := flag.Bool("capture-no-proc", false, "禁用进程关联")
+	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
+	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")
 	flag.Parse()
 
 	// 结构化日志
@@ -45,13 +47,14 @@ func main() {
 
 	// 集中化配置 fail-fast 校验
 	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure,
-		*captureFlag, *captureIFace, *captureBPF, *captureNoProc)
+		*captureFlag, *captureIFace, *captureBPF, *captureNoProc, *maxReqBodyKB, *maxResBodyKB)
 	if err != nil {
 		slog.Error("配置加载失败", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("配置已加载", "proxy_port", cfg.ProxyPort, "api_port", cfg.APIPort,
-		"db", cfg.DBPath, "no_proxy", cfg.NoProxy, "no_mitm", cfg.NoMitm, "insecure", cfg.Insecure)
+		"db", cfg.DBPath, "no_proxy", cfg.NoProxy, "no_mitm", cfg.NoMitm, "insecure", cfg.Insecure,
+		"max_req_body_kb", cfg.MaxReqBodyKB, "max_res_body_kb", cfg.MaxResBodyKB)
 
 	// 初始化存储
 	st, err := store.New(cfg.DBPath)
@@ -122,7 +125,7 @@ func main() {
 	// 启动代理
 	var proxySrv *proxy.Server
 	if !cfg.NoProxy {
-		proxySrv = proxy.New(cfg.ProxyPort, st, caCert, caKey, onCapture, interceptor)
+		proxySrv = proxy.New(cfg.ProxyPort, st, caCert, caKey, onCapture, interceptor, cfg.MaxReqBodyKB, cfg.MaxResBodyKB)
 		go func() {
 			slog.Info("代理服务器启动", "port", cfg.ProxyPort)
 			if err := proxySrv.Start(); err != nil {
@@ -184,6 +187,9 @@ func main() {
 	if proxySrv != nil {
 		proxySrv.Stop()
 	}
+
+	// 关闭 API 服务器资源（rateLimiter goroutine、wsHub）
+	apiSrv.Stop()
 
 	// 关闭数据库
 	if err := st.Close(); err != nil {

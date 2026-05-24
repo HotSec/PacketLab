@@ -659,8 +659,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		args = append(args, "%"+search+"%")
 	}
 
-	// 总数 — 先查所有 host 再在内存中去端口去重计数
-	var total int
+	// 先查所有 host 去端口后去重，得到总数（distinctTotal）
 	totalRows, err := s.db.Query(fmt.Sprintf("SELECT host FROM requests %s", where), args...)
 	if err != nil {
 		return nil, 0, err
@@ -674,7 +673,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		totalSet[stripPort(h)] = struct{}{}
 	}
 	totalRows.Close()
-	total = len(totalSet)
+	distinctTotal := len(totalSet)
 
 	// 分页 — 按请求数降序
 	args = append(args, limit, offset)
@@ -690,7 +689,6 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	// 去端口后合并: httpbin.org + httpbin.org:443 → httpbin.org (7)
 	hostCounts := make(map[string]int)
 	var hostOrder []string
-	distinctTotal := 0
 	for rows.Next() {
 		var h string
 		var cnt int
@@ -700,7 +698,6 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		baseHost := stripPort(h)
 		if _, exists := hostCounts[baseHost]; !exists {
 			hostOrder = append(hostOrder, baseHost)
-			distinctTotal++
 		}
 		hostCounts[baseHost] += cnt
 	}
@@ -709,7 +706,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	for _, h := range hostOrder {
 		hosts = append(hosts, fmt.Sprintf("%s (%d)", h, hostCounts[h]))
 	}
-	return hosts, total, nil
+	return hosts, distinctTotal, nil
 }
 
 func insertPath(node *APIMapNode, parts []string, fullPath string, methods map[string]*methodInfo, notesMap map[string]models.APINote) {
@@ -816,7 +813,15 @@ func (s *Store) SaveInterceptLog(log *models.InterceptLog) error {
 		return fmt.Errorf("get last insert id: %w", err)
 	}
 	log.ID = id
-	log.CreatedAt = time.Now().UTC().Format("2006-01-02 15:04:05")
+
+	// 从数据库读回真实的 UTC 时间戳
+	err = s.db.QueryRow(
+		`SELECT created_at FROM intercept_logs WHERE id = ?`, id,
+	).Scan(&log.CreatedAt)
+	if err != nil {
+		// 如果查询失败但插入已经成功，忽略读回，日志已保存到数据库
+		slog.Warn("failed to get created_at from db after insert", "error", err)
+	}
 
 	return nil
 }

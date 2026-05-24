@@ -125,7 +125,6 @@ func (e *Engine) Start() error {
 		go e.workerLoop(i)
 	}
 	go e.packetLoop()
-	go e.gcLoop()
 	go e.flushLoop()
 	return nil
 }
@@ -218,13 +217,22 @@ func (e *Engine) packetLoop() {
 	e.workerSg.Wait()
 }
 
-// workerLoop 独立 goroutine 处理数据包（per-worker Assembler）
+// workerLoop 独立 goroutine 处理数据包（per-worker Assembler + 流超时清理）
 func (e *Engine) workerLoop(id int) {
 	defer e.workerSg.Done()
 	assembler := NewAssembler(e.streamPool)
 	ch := e.workerChs[id]
-	for packet := range ch {
-		assembler.Assemble(packet)
+	gcTicker := time.NewTicker(15 * time.Second)
+	defer gcTicker.Stop()
+	flushDeadline := time.Now().Add(2 * time.Minute)
+	for {
+		select {
+		case packet := <-ch:
+			assembler.Assemble(packet)
+		case <-gcTicker.C:
+			assembler.FlushOlderThan(flushDeadline, e)
+			flushDeadline = time.Now().Add(2 * time.Minute)
+		}
 	}
 }
 

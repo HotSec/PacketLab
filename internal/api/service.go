@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -56,7 +57,6 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 	}
 
 	isHTTPS := parsedURL.Scheme == "https"
-	startTime := time.Now()
 
 	var bodyReader io.Reader
 	if req.Body != "" {
@@ -75,11 +75,32 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 		httpReq.Header.Set("User-Agent", "PacketLab/2.0")
 	}
 
-	resp, err := s.client.Do(httpReq)
-	if err != nil {
-		return nil, ErrBadGateway(fmt.Sprintf("send request: %s", err.Error()))
+	var resp *http.Response
+	var lastErr error
+	startTime := time.Now()
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, lastErr = s.client.Do(httpReq)
+		if lastErr == nil {
+			break
+		}
+		slog.Warn("resend request failed, retrying", "attempt", attempt, "error", lastErr, "url", req.URL)
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+		}
+	}
+	if lastErr != nil {
+		return nil, ErrBadGateway(fmt.Sprintf("send request after 3 retries: %s", lastErr.Error()))
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+		time.Sleep(200 * time.Millisecond)
+		resp2, err := s.client.Do(httpReq)
+		if err == nil {
+			resp.Body.Close()
+			resp = resp2
+		}
+	}
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
 
@@ -130,8 +151,8 @@ func NewHARService(st *store.Store) *HARService {
 }
 
 func (s *HARService) Export(limit int) (map[string]interface{}, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 500
+	if limit <= 0 || limit > 5000 {
+		limit = 1000
 	}
 
 	items, err := s.store.ListFull("", "", "", false, limit, 0)

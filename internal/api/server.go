@@ -134,6 +134,11 @@ func (s *Server) BroadcastCapture(req *models.CapturedRequest) {
 	s.hub.broadcast(req)
 }
 
+func (s *Server) Stop() {
+	s.rateLimiter.stop()
+	s.hub.Stop()
+}
+
 // ========================================
 // Health Checks
 // ========================================
@@ -148,7 +153,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		checks["database"] = "error"
 		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
-			"status": "degraded",
+			"status": "error",
 			"checks": checks,
 		})
 		return
@@ -294,6 +299,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		slog.Error("stats failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeAppError(w, ErrInternal("Failed to get stats"))
 		return
+	}
+	if errs > 0 {
+		slog.Warn("stats completed with errors", "errors", errs, "request_id", RequestIDFromContext(r.Context()))
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"total":      total,
@@ -640,7 +648,7 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		body.BPF = "tcp port 80 or tcp port 443"
 	}
 
-	if s.captureEngine != nil && s.captureEngine.IsRunning() {
+	if s.captureEngine != nil {
 		s.captureEngine.Stop()
 	}
 	ce := capture.New(body.Interface, body.BPF, s.store, s)
@@ -735,6 +743,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Warn("ws upgrade failed", "error", err)
+		http.Error(w, "WebSocket upgrade failed", http.StatusBadRequest)
 		return
 	}
 

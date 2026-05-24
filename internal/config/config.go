@@ -8,31 +8,36 @@ import (
 
 // Config 集中化应用配置 (fail-fast on invalid values)
 type Config struct {
-	ProxyPort     int
-	APIPort       int
-	DBPath        string
-	NoProxy       bool
-	NoMitm        bool
-	Insecure      bool // 是否跳过 TLS 证书校验（仅开发环境）
-	BaseDir       string
-	CertDir       string
-	Capture       bool
-	CaptureIface  string
-	CaptureBPF    string
-	CaptureNoProc bool
+	ProxyPort      int
+	APIPort        int
+	DBPath         string
+	NoProxy        bool
+	NoMitm         bool
+	Insecure       bool // 是否跳过 TLS 证书校验（仅开发环境）
+	BaseDir        string
+	CertDir        string
+	Capture        bool
+	CaptureIface   string
+	CaptureBPF     string
+	CaptureNoProc  bool
+	MaxReqBodyKB   int // 请求体最大 KB，0=使用默认值
+	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
 }
 
 // Default validated default values
 const (
-	DefaultProxyPort  = 8080
-	DefaultAPIPort    = 9090
-	DefaultTimeoutSec = 30
-	defaultOrg        = "PacketLab"
+	DefaultProxyPort    = 8080
+	DefaultAPIPort      = 9090
+	DefaultTimeoutSec   = 30
+	DefaultMaxReqBodyKB = 32
+	DefaultMaxResBodyKB = 64
+	defaultOrg          = "PacketLab"
 )
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
 func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
-	capture bool, captureIface, captureBPF string, captureNoProc bool) (*Config, error) {
+	capture bool, captureIface, captureBPF string, captureNoProc bool,
+	maxReqBodyKB, maxResBodyKB int) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -57,6 +62,19 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		return nil, fmt.Errorf("config: cannot create DB directory %s: %w", filepath.Dir(dbPath), err)
 	}
 
+	if maxReqBodyKB < 0 {
+		return nil, fmt.Errorf("config: max-req-body-kb must be >= 0, got %d", maxReqBodyKB)
+	}
+	if maxResBodyKB < 0 {
+		return nil, fmt.Errorf("config: max-res-body-kb must be >= 0, got %d", maxResBodyKB)
+	}
+	if maxReqBodyKB == 0 {
+		maxReqBodyKB = DefaultMaxReqBodyKB
+	}
+	if maxResBodyKB == 0 {
+		maxResBodyKB = DefaultMaxResBodyKB
+	}
+
 	cfg := &Config{
 		ProxyPort:     proxyPort,
 		APIPort:       apiPort,
@@ -70,6 +88,8 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		CaptureIface:  captureIface,
 		CaptureBPF:    captureBPF,
 		CaptureNoProc: captureNoProc,
+		MaxReqBodyKB:  maxReqBodyKB,
+		MaxResBodyKB:  maxResBodyKB,
 	}
 	return cfg, nil
 }

@@ -24,32 +24,36 @@ type OnCapture func(req *models.CapturedRequest)
 
 // Server 代理服务器
 type Server struct {
-	proxy       *goproxy.ProxyHttpServer
-	httpServer  *http.Server
-	store       *store.Store
-	batchWriter *BatchWriter
-	interceptor *Interceptor
-	onCapture   OnCapture
-	mu          sync.RWMutex
-	running     bool
-	port        int
-	mitmEnabled bool
+	proxy        *goproxy.ProxyHttpServer
+	httpServer   *http.Server
+	store        *store.Store
+	batchWriter  *BatchWriter
+	interceptor  *Interceptor
+	onCapture    OnCapture
+	mu           sync.RWMutex
+	running      bool
+	port         int
+	mitmEnabled  bool
+	maxReqBodyKB int
+	maxResBodyKB int
 }
 
 // New 创建代理服务器
-func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture, interceptor *Interceptor) *Server {
+func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture, interceptor *Interceptor, maxReqBodyKB, maxResBodyKB int) *Server {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
 
 	bw := NewBatchWriter(st, onCapture, 50, 200*time.Millisecond)
 
 	s := &Server{
-		proxy:       proxy,
-		store:       st,
-		batchWriter: bw,
-		interceptor: interceptor,
-		onCapture:   onCapture,
-		port:        port,
+		proxy:        proxy,
+		store:        st,
+		batchWriter:  bw,
+		interceptor:  interceptor,
+		onCapture:    onCapture,
+		port:         port,
+		maxReqBodyKB: maxReqBodyKB,
+		maxResBodyKB: maxResBodyKB,
 	}
 
 	// 配置 HTTPS MITM
@@ -83,21 +87,22 @@ func (s *Server) setupHandlers() {
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		// 1. 先捕获请求信息（无论是否启用拦截）
 		captured := &models.CapturedRequest{
-			Method:      req.Method,
-			URL:         req.URL.String(),
-			Host:        req.URL.Host,
-			Path:        req.URL.Path,
-			Protocol:    req.Proto,
-			IsHTTPS:     req.URL.Scheme == "https" || (req.Method == "CONNECT"),
-			ReqHeaders:  api.FlattenHeaders(req.Header),
-			CapturedAt:  time.Now(),
-			CaptureMode: "proxy",
+			Method:       req.Method,
+			URL:          req.URL.String(),
+			Host:         req.URL.Host,
+			Path:         req.URL.Path,
+			Protocol:     req.Proto,
+			IsHTTPS:      req.URL.Scheme == "https" || (req.Method == "CONNECT"),
+			ReqHeaders:   api.FlattenHeaders(req.Header),
+			CapturedAt:   time.Now(),
+			CaptureMode:  "proxy",
 		}
+		maxReqBytes := int64(s.maxReqBodyKB) * 1024
 		if req.Body != nil {
-			bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, 32*1024+1))
+			bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxReqBytes+1))
 			if err == nil && len(bodyBytes) > 0 {
-				if len(bodyBytes) > 32*1024 {
-					captured.ReqBody = string(bodyBytes[:32*1024])
+				if len(bodyBytes) > int(maxReqBytes) {
+					captured.ReqBody = string(bodyBytes[:maxReqBytes])
 				} else {
 					captured.ReqBody = string(bodyBytes)
 				}
@@ -131,16 +136,17 @@ func (s *Server) setupHandlers() {
 		captured.ResHeaders = api.FlattenHeaders(resp.Header)
 		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
 
-		// 读取响应体（完整转发，捕获最多 64KB）
+		// 读取响应体（完整转发，捕获最多 maxResBodyKB）
+		maxResBytes := int64(s.maxResBodyKB) * 1024
 		if resp.Body != nil {
-			bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
+			bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResBytes+1))
 			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // 始终恢复 body
 			if err != nil {
 				slog.Warn("proxy: read response body failed", "url", captured.URL, "error", err)
 			} else if len(bodyBytes) > 0 {
 				captured.SizeBytes = int64(len(bodyBytes))
-				if len(bodyBytes) > 64*1024 {
-					captured.ResBody = string(bodyBytes[:64*1024])
+				if len(bodyBytes) > int(maxResBytes) {
+					captured.ResBody = string(bodyBytes[:maxResBytes])
 				} else {
 					captured.ResBody = string(bodyBytes)
 				}
