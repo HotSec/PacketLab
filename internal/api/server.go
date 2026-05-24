@@ -645,7 +645,7 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		body.Interface = capture.DetectInterface()
 	}
 	if body.BPF == "" {
-		body.BPF = "tcp port 80 or tcp port 443"
+		body.BPF = "tcp"
 	}
 
 	if s.captureEngine != nil {
