@@ -605,37 +605,47 @@ func (p *TCPStreamPool) New(srcIP net.IP, srcPort layers.TCPPort, dstIP net.IP, 
 	}
 }
 
-// TCPStream 单个 TCP 流（append buffer + 线程安全）
+// TCPStream 单个 TCP 流（双方向缓冲区 + 线程安全）
 type TCPStream struct {
 	mu         sync.Mutex
 	engine     *Engine
 	srcIP      net.IP
 	srcPort    uint16
 	dstPort    uint16
-	buf        []byte
+	clientBuf  []byte // 客户端→服务端 数据
+	serverBuf  []byte // 服务端→客户端 数据
 	lastActive time.Time
 	pendingReq *models.CapturedRequest
 }
 
 const streamBufMax = 2 * 1024 * 1024 // 2MB max per stream
 
-// Feed 喂入 TCP 数据
+// Feed 喂入 TCP 数据（按方向分离缓冲区）
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastActive = time.Now()
 
-	s.buf = append(s.buf, data...)
+	if clientToServer {
+		s.clientBuf = append(s.clientBuf, data...)
+	} else {
+		s.serverBuf = append(s.serverBuf, data...)
+	}
 	s.tryExtractHTTP()
-	if len(s.buf) > streamBufMax {
-		s.safeTruncate()
+	if len(s.clientBuf) > streamBufMax {
+		s.clientBuf = s.clientBuf[len(s.clientBuf)-256*1024:]
+	}
+	if len(s.serverBuf) > streamBufMax {
+		s.serverBuf = s.serverBuf[len(s.serverBuf)-256*1024:]
 	}
 }
 
-// HandleClose 处理 TCP 连接关闭（FIN/RST），立即 emit 未完成的请求
+// HandleClose 处理 TCP 连接关闭（FIN/RST），先尝试提取残留数据再 emit
 func (s *TCPStream) HandleClose(a *Assembler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.tryExtractHTTP()
 
 	if s.pendingReq != nil {
 		s.engine.emitNonBlocking(s.pendingReq)
@@ -643,66 +653,53 @@ func (s *TCPStream) HandleClose(a *Assembler) {
 	}
 }
 
-// safeTruncate 沿消息边界安全截断，不切半截 HTTP 消息
-func (s *TCPStream) safeTruncate() {
-	// 找到最后一个完整的 \r\n\r\n 边界
-	lastBoundary := -1
-	for i := len(s.buf) - 4; i >= 0; i-- {
-		if s.buf[i] == '\r' && s.buf[i+1] == '\n' && s.buf[i+2] == '\r' && s.buf[i+3] == '\n' {
-			lastBoundary = i + 4
-			break
-		}
-	}
-	// 也找 \n\n
-	if lastBoundary < 0 {
-		for i := len(s.buf) - 2; i >= 0; i-- {
-			if s.buf[i] == '\n' && s.buf[i+1] == '\n' {
-				lastBoundary = i + 2
-				break
-			}
-		}
-	}
-	// 只在完整消息边界之前截断
-	if lastBoundary > 0 {
-		discard := lastBoundary
-		if discard > len(s.buf)-256*1024 {
-			discard = len(s.buf) - 256*1024
-		}
-		if discard > 0 {
-			s.buf = s.buf[discard:]
-		}
-	}
-}
-
-// tryExtractHTTP 从 buf 中提取 HTTP 请求/响应并消费
+// tryExtractHTTP 从双缓冲区中提取 HTTP 请求/响应并消费
 func (s *TCPStream) tryExtractHTTP() {
 	for {
-		idx := findHTTPMessageEnd(s.buf)
-		if idx < 0 {
+		if s.pendingReq == nil {
+			idx := findHTTPMessageEnd(s.clientBuf)
+			if idx < 0 {
+				return
+			}
+			msgData := s.clientBuf[:idx]
+			s.clientBuf = s.clientBuf[idx:]
+			if !isHTTPResponse(msgData) {
+				req := parseHTTPRequest(msgData, s.srcIP, s.srcPort, s.dstPort, s.engine)
+				if req != nil {
+					s.pendingReq = req
+				}
+			}
+		}
+
+		if s.pendingReq != nil {
+			idx := findHTTPMessageEnd(s.serverBuf)
+			if idx < 0 {
+				return
+			}
+			msgData := s.serverBuf[:idx]
+			s.serverBuf = s.serverBuf[idx:]
+			if isHTTPResponse(msgData) {
+				resp := parseHTTPResponse(msgData)
+				if resp != nil {
+					s.pendingReq.StatusCode = resp.StatusCode
+					s.pendingReq.ResHeaders = resp.Headers
+					s.pendingReq.ResBody = resp.Body
+					s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
+					s.pendingReq.SizeBytes = int64(len(msgData))
+					s.engine.emitNonBlocking(s.pendingReq)
+					s.pendingReq = nil
+				}
+			}
+		}
+
+		if len(s.clientBuf) == 0 && len(s.serverBuf) == 0 {
 			return
 		}
-		msgData := s.buf[:idx]
-		s.buf = s.buf[idx:] // 消费已解析数据
-
-		if isHTTPResponse(msgData) {
-			resp := parseHTTPResponse(msgData)
-			if resp != nil && s.pendingReq != nil {
-				s.pendingReq.StatusCode = resp.StatusCode
-				s.pendingReq.ResHeaders = resp.Headers
-				s.pendingReq.ResBody = resp.Body
-				s.pendingReq.DurationMs = time.Since(s.pendingReq.CapturedAt).Milliseconds()
-				s.pendingReq.SizeBytes = int64(len(msgData))
-				s.engine.emitNonBlocking(s.pendingReq)
-				s.pendingReq = nil
-			}
-		} else {
-			req := parseHTTPRequest(msgData, s.srcIP, s.srcPort, s.dstPort, s.engine)
-			if req != nil {
-				if s.pendingReq != nil {
-					s.engine.emitNonBlocking(s.pendingReq)
-				}
-				s.pendingReq = req
-			}
+		if s.pendingReq != nil && len(s.serverBuf) == 0 {
+			return
+		}
+		if s.pendingReq == nil && len(s.clientBuf) == 0 {
+			return
 		}
 	}
 }

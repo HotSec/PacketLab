@@ -84,16 +84,17 @@ func BenchmarkStoreBatchWrite(b *testing.B) {
 	}
 }
 
-func BenchmarkSafeTruncate(b *testing.B) {
-	// 构造 512KB 含多个完整消息的 buffer
+func BenchmarkTryExtractHTTP(b *testing.B) {
 	msg := []byte("GET /api/x HTTP/1.1\r\nHost: bench\r\n\r\n")
-	buf := make([]byte, 0, 512*1024)
-	for len(buf) < 512*1024 {
-		buf = append(buf, msg...)
+	clientBuf := make([]byte, 0, 512*1024)
+	for len(clientBuf) < 512*1024 {
+		clientBuf = append(clientBuf, msg...)
 	}
-	s := &TCPStream{buf: buf}
+	s := &TCPStream{clientBuf: clientBuf}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		s.safeTruncate()
+		s.clientBuf = make([]byte, len(clientBuf))
+		copy(s.clientBuf, clientBuf)
+		s.tryExtractHTTP()
 	}
 }
