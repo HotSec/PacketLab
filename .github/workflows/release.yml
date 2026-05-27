@@ -18,22 +18,28 @@ jobs:
             goarch: amd64
             runner: ubuntu-latest
             cgo_enabled: 1
+            cc: gcc
           - goos: linux
             goarch: arm64
             runner: ubuntu-latest
-            cgo_enabled: 0
+            cgo_enabled: 1
+            cc: aarch64-linux-gnu-gcc
+            cross: true
           - goos: darwin
             goarch: amd64
             runner: macos-13
             cgo_enabled: 1
+            cc: clang
           - goos: darwin
             goarch: arm64
             runner: macos-latest
             cgo_enabled: 1
+            cc: clang
           - goos: windows
             goarch: amd64
             runner: windows-latest
             cgo_enabled: 0
+            cc: ""
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -44,22 +50,41 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install libpcap-dev (Linux)
-        if: matrix.goos == 'linux' && matrix.cgo_enabled == 1
+      - name: Install libpcap-dev (Linux amd64)
+        if: matrix.goos == 'linux' && !matrix.cross
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+      - name: Install cross-compile toolchain (Linux arm64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          # Build libpcap for arm64 from source
+          git clone https://github.com/the-tcpdump-group/libpcap.git /tmp/libpcap
+          cd /tmp/libpcap
+          CC=aarch64-linux-gnu-gcc ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu --disable-shared --disable-dbus --disable-rdma
+          make -j$(nproc)
+          sudo make install
 
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo_enabled }}
+          CC: ${{ matrix.cc }}
         shell: bash
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; else EXT=""; fi
+
+          EXTRA_FLAGS=""
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            EXTRA_FLAGS="-extldflags=-L/usr/aarch64-linux-gnu/lib"
+          fi
+
           cd cmd/proxy
           go build -trimpath \
-            -ldflags="-s -w -X main.version=${VERSION}" \
+            -ldflags="-s -w -X main.version=${VERSION} ${EXTRA_FLAGS}" \
             -o "../../packetlab-${GOOS}-${GOARCH}${EXT}"
 
       - name: Upload artifact
