@@ -143,9 +143,13 @@ func (p *AsyncWriterPool) Start() {
 
 // Stop 停止并排空
 func (p *AsyncWriterPool) Stop() {
+	select {
+	case <-p.stopCh:
+		return
+	default:
+	}
 	close(p.stopCh)
 	p.wg.Wait()
-	// 排空残余
 	p.flushAll()
 }
 
