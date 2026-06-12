@@ -106,7 +106,11 @@ func main() {
 
 	// 捕获回调
 	onCapture := func(req *models.CapturedRequest) {
-		apiSrv.BroadcastCapture(req)
+		if req.IsSSE && req.ID > 0 {
+			apiSrv.BroadcastUpdate(req)
+		} else {
+			apiSrv.BroadcastCapture(req)
+		}
 	}
 
 	// 加载/生成 CA 证书（HTTPS MITM）

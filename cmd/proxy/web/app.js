@@ -62,6 +62,7 @@ applyTheme();
 const API_BASE = '';
 let requests = [];
 let requestDetailCache = {};
+let requestElCache = new Map(); // id → { el, sizeSpan, durSpan } DOM 缓存
 let selectedRequestId = null;
 let activeTab = 'request';
 let currentFilter = 'all', currentHost = '', errorFilterOnly = false, isRecording = true;
@@ -181,6 +182,32 @@ function formatSize(b) {
   return (b / 1048576).toFixed(1) + ' MB';
 }
 
+// SSE 等流式响应的增量更新：更新列表中已有请求的 size/duration
+function updateRequestInList(data) {
+  const idx = requests.findIndex(r => r.id === data.id);
+  if (idx < 0) return;
+  const r = requests[idx];
+  if (data.size_bytes !== undefined) { r.size_bytes = data.size_bytes; r.size = formatSize(data.size_bytes); }
+  if (data.duration_ms !== undefined) { r.duration_ms = data.duration_ms; r.time = `${data.duration_ms}ms`; }
+  if (data.status_code !== undefined) { r.status = data.status_code; r.status_code = data.status_code; }
+  // 优先从 DOM 缓存 Map 获取，O(1) 查找
+  const cached = requestElCache.get(r.id);
+  if (cached) {
+    if (cached.sizeSpan) cached.sizeSpan.textContent = r.size;
+    if (cached.durSpan) cached.durSpan.textContent = r.time;
+  } else {
+    // 回退到 querySelector（首次渲染后尚未缓存）
+    const el = document.querySelector(`[data-id="${r.id}"]`);
+    if (el) {
+      const sizeSpan = el.querySelector('.item-size');
+      const durSpan = el.querySelector('.item-duration');
+      requestElCache.set(r.id, { el, sizeSpan, durSpan });
+      if (sizeSpan) sizeSpan.textContent = r.size;
+      if (durSpan) durSpan.textContent = r.time;
+    }
+  }
+}
+
 // ── WebSocket ────────────────────────────────
 function connectWebSocket() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
@@ -193,6 +220,7 @@ function connectWebSocket() {
         const m = JSON.parse(e.data);
         if (m.type === 'new_request' && m.data) { requestVersion++; requests.unshift(normalizeReq(m.data)); renderRequestList(); }
         if (m.type === 'intercept_request' && m.data) { addPendingToList(m.data); }
+        if (m.type === 'update_request' && m.data) { updateRequestInList(m.data); }
       } catch { /* ignore parse errors */ }
     };
     ws.onclose = () => { wsReconnectTimer = setTimeout(connectWebSocket, 3000); };
@@ -264,12 +292,14 @@ function renderRequestList() {
         <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
         <div class="request-info">
           <span class="request-url">${esc(r.url)}</span>
-          <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span>${ts}</span><span>${r.size}</span></div>
+          <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span></div>
         </div>
         ${pendingExtra}
         <span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
       </div>`;
     }).join('');
+    // innerHTML 替换后旧 DOM 缓存失效，清空让 updateRequestInList 重新建立
+    requestElCache.clear();
   }
   document.getElementById('requestCount').textContent = `${requests.length} ${t('recordings')}`;
   loadStats();

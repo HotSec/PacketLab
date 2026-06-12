@@ -29,6 +29,7 @@ type wsHub struct {
 	clients          map[*wsClient]bool
 	broadcastCh      chan *models.CapturedRequest
 	interceptCh      chan *models.PendingRequest
+	updateCh         chan *models.CapturedRequest // SSE 等流式响应的增量更新
 	register         chan *wsClient
 	unregister       chan *wsClient
 	stopCh           chan struct{}
@@ -39,6 +40,7 @@ func newWSHub() *wsHub {
 		clients:          make(map[*wsClient]bool),
 		broadcastCh:      make(chan *models.CapturedRequest, 256),
 		interceptCh:      make(chan *models.PendingRequest, 64),
+		updateCh:         make(chan *models.CapturedRequest, 256),
 		register:         make(chan *wsClient),
 		unregister:       make(chan *wsClient),
 		stopCh:           make(chan struct{}),
@@ -105,6 +107,26 @@ func (h *wsHub) run() {
 				case client.send <- msg:
 				default:
 					slog.Warn("ws intercept notification dropped, client buffer full")
+				}
+			}
+
+		case req := <-h.updateCh:
+			msg, err := json.Marshal(map[string]interface{}{
+				"type": "update_request",
+				"data": map[string]interface{}{
+					"id":          req.ID,
+					"status_code": req.StatusCode,
+					"duration_ms": req.DurationMs,
+					"size_bytes":  req.SizeBytes,
+				},
+			})
+			if err != nil {
+				continue
+			}
+			for client := range h.clients {
+				select {
+				case client.send <- msg:
+				default:
 				}
 			}
 		}
@@ -178,6 +200,15 @@ func (h *wsHub) broadcastIntercept(req *models.PendingRequest) {
 	case h.interceptCh <- req:
 	default:
 		slog.Warn("ws intercept channel full, dropping message")
+	}
+}
+
+// BroadcastUpdate 广播请求更新（SSE 等流式响应的增量推送）
+func (h *wsHub) BroadcastUpdate(req *models.CapturedRequest) {
+	select {
+	case h.updateCh <- req:
+	default:
+		slog.Warn("ws update channel full, dropping message", "url", req.URL)
 	}
 }
 

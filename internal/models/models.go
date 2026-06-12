@@ -22,6 +22,8 @@ type CapturedRequest struct {
 	CaptureMode string            `json:"capture_mode,omitempty"` // "proxy" | "nic"
 	ProcessPID  int               `json:"process_pid,omitempty"`
 	ProcessName string            `json:"process_name,omitempty"`
+	IsSSE       bool              `json:"is_sse,omitempty"`      // 是否为 SSE 流式响应
+	SSEEvents   string            `json:"sse_events,omitempty"`  // SSE 事件累积内容
 }
 
 // ProcessInfo 进程信息

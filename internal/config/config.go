@@ -29,8 +29,8 @@ const (
 	DefaultProxyPort    = 8080
 	DefaultAPIPort      = 9090
 	DefaultTimeoutSec   = 30
-	DefaultMaxReqBodyKB = 32
-	DefaultMaxResBodyKB = 64
+	DefaultMaxReqBodyKB = 2048  // 2MB
+	DefaultMaxResBodyKB = 4096  // 4MB
 	defaultOrg          = "PacketLab"
 )
 

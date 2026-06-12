@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,7 +138,14 @@ func (s *Server) setupHandlers() {
 		captured.ResHeaders = api.FlattenHeaders(resp.Header)
 		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
 
-		// 读取响应体（完整转发，捕获最多 maxResBodyKB）
+		// 检测 SSE 响应
+		if isSSEResponse(resp) && resp.Body != nil {
+			captured.IsSSE = true
+			s.handleSSEResponse(resp, captured)
+			return resp
+		}
+
+		// 普通响应：读取响应体（完整转发，捕获最多 maxResBodyKB）
 		maxResBytes := int64(s.maxResBodyKB) * 1024
 		if resp.Body != nil {
 			bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResBytes+1))
@@ -244,4 +253,99 @@ func shouldMITM(host string) bool {
 		}
 	}
 	return true
+}
+
+// isSSEResponse 检测响应是否为 SSE 流
+func isSSEResponse(resp *http.Response) bool {
+	ct := resp.Header.Get("Content-Type")
+	return strings.Contains(ct, "text/event-stream")
+}
+
+// handleSSEResponse 处理 SSE 流式响应：用 Pipe 同时转发给客户端和捕获事件
+func (s *Server) handleSSEResponse(resp *http.Response, captured *models.CapturedRequest) {
+	maxResBytes := int64(s.maxResBodyKB) * 1024
+
+	// 同步保存初始记录（只有 headers，body 为空），确保拿到真实 ID
+	captured.ResBody = ""
+	captured.SSEEvents = ""
+	id, err := s.store.Save(captured)
+	if err != nil {
+		slog.Warn("proxy: SSE initial save failed", "url", captured.URL, "error", err)
+		return
+	}
+	captured.ID = id
+	if s.onCapture != nil {
+		s.onCapture(captured)
+	}
+
+	// 用 pipe 实现流式转发：写入端由 SSE 读取 goroutine 控制，读取端替代原始 body
+	pr, pw := io.Pipe()
+
+	originalBody := resp.Body
+	resp.Body = pr
+
+	// 启动 goroutine 流式读取 SSE
+	go func() {
+		defer pw.Close()
+		defer originalBody.Close()
+
+		var captureBuf strings.Builder
+		var totalSize int64
+		scanner := bufio.NewScanner(originalBody)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+		lastUpdate := time.Now()
+		updateInterval := 500 * time.Millisecond
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			lineBytes := []byte(line)
+			lineBytes = append(lineBytes, '\n')
+			totalSize += int64(len(lineBytes))
+
+			// 转发给客户端
+			if _, err := pw.Write(lineBytes); err != nil {
+				return
+			}
+
+			// 捕获事件内容
+			if int64(captureBuf.Len()) < maxResBytes {
+				captureBuf.WriteString(line)
+				captureBuf.WriteByte('\n')
+			}
+
+			// 定时更新 DB 和推送 WebSocket
+			now := time.Now()
+			if now.Sub(lastUpdate) >= updateInterval {
+				lastUpdate = now
+				captured.ResBody = captureBuf.String()
+				captured.SSEEvents = captureBuf.String()
+				captured.SizeBytes = totalSize
+				captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
+
+				if err := s.store.UpdateResBody(captured.ID, captured.ResBody, captured.SSEEvents, captured.SizeBytes); err != nil {
+					slog.Warn("proxy: SSE update DB failed", "id", captured.ID, "error", err)
+				}
+
+				// 推送 WebSocket 更新
+				if s.onCapture != nil {
+					s.onCapture(captured)
+				}
+			}
+		}
+
+		// SSE 流结束，最终更新
+		captured.ResBody = captureBuf.String()
+		captured.SSEEvents = captureBuf.String()
+		captured.SizeBytes = totalSize
+		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
+
+		if err := s.store.UpdateResBody(captured.ID, captured.ResBody, captured.SSEEvents, captured.SizeBytes); err != nil {
+			slog.Warn("proxy: SSE final update DB failed", "id", captured.ID, "error", err)
+		}
+
+		if s.onCapture != nil {
+			s.onCapture(captured)
+		}
+	}()
 }

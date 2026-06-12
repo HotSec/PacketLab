@@ -482,9 +482,14 @@ type TCPStream struct {
 	nonHTTP    bool   // 标记为非HTTP流，跳过后续处理
 	firstData  bool   // 是否已收到首批数据（用于非HTTP检测）
 	sniEmitted bool   // 是否已emit TLS SNI记录
+
+	// SSE 流式追踪
+	ssePending bool  // 是否为 SSE 流（已 emit 初始记录）
+	sseReqID   int64 // SSE 流对应的 DB 记录 ID
+	sseBuf     []byte // SSE 事件累积缓冲
 }
 
-const streamBufMax = 2 * 1024 * 1024 // 2MB max per stream
+const streamBufMax = 8 * 1024 * 1024 // 8MB max per stream
 
 // Feed 喂入 TCP 数据（按方向分离缓冲区）
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
@@ -493,6 +498,21 @@ func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.lastActive = time.Now()
 
 	if s.nonHTTP {
+		return
+	}
+
+	// SSE 流已 emit 初始记录，后续服务端数据追加事件
+	if s.ssePending && !clientToServer {
+		s.sseBuf = append(s.sseBuf, data...)
+		// 定时更新 DB（每 4KB 或超过阈值时）
+		if len(s.sseBuf) >= 4096 {
+			s.flushSSEEvents()
+		}
+		// 限制 SSE 缓冲区大小
+		if len(s.sseBuf) > 4*1024*1024 {
+			slog.Warn("capture: SSE events truncated (exceeds 4MB limit)", "id", s.sseReqID, "total_size", len(s.sseBuf))
+			s.sseBuf = s.sseBuf[len(s.sseBuf)-4*1024*1024:]
+		}
 		return
 	}
 
@@ -528,10 +548,35 @@ func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.tryExtractHTTP()
 
 	if len(s.clientBuf) > streamBufMax {
-		s.clientBuf = truncateBuffer(s.clientBuf, 256*1024)
+		s.clientBuf = truncateBuffer(s.clientBuf, 1024*1024)
 	}
 	if len(s.serverBuf) > streamBufMax {
-		s.serverBuf = truncateBuffer(s.serverBuf, 256*1024)
+		s.serverBuf = truncateBuffer(s.serverBuf, 1024*1024)
+	}
+}
+
+// isSSEHeader 检测响应头是否为 SSE（Content-Type: text/event-stream）
+func isSSEHeader(headerData []byte) bool {
+	return strings.Contains(strings.ToLower(string(headerData)), "text/event-stream")
+}
+
+// flushSSEEvents 将 SSE 事件缓冲区更新到 DB 并推送 WebSocket
+func (s *TCPStream) flushSSEEvents() {
+	if s.sseReqID <= 0 || len(s.sseBuf) == 0 {
+		return
+	}
+	events := string(s.sseBuf)
+	if err := s.engine.store.UpdateResBody(s.sseReqID, events, events, int64(len(s.sseBuf))); err != nil {
+		slog.Warn("capture: SSE update DB failed", "id", s.sseReqID, "error", err)
+	}
+	// 推送 WebSocket 更新
+	if s.engine.hub != nil {
+		s.engine.hub.BroadcastCapture(&models.CapturedRequest{
+			ID:         s.sseReqID,
+			IsSSE:      true,
+			SSEEvents:  events,
+			SizeBytes:  int64(len(s.sseBuf)),
+		})
 	}
 }
 
@@ -573,6 +618,20 @@ func (s *TCPStream) HandleClose(a *Assembler) {
 	defer s.mu.Unlock()
 
 	if s.nonHTTP {
+		a.mu.Lock()
+		for key, stream := range a.streams {
+			if stream == s {
+				delete(a.streams, key)
+				break
+			}
+		}
+		a.mu.Unlock()
+		return
+	}
+
+	// SSE 流关闭，最终 flush
+	if s.ssePending {
+		s.flushSSEEvents()
 		a.mu.Lock()
 		for key, stream := range a.streams {
 			if stream == s {
@@ -636,6 +695,39 @@ func (s *TCPStream) tryExtractHTTP() {
 		headerData := s.serverBuf[:idx]
 		hasCL := parseContentLength(headerData) >= 0
 		hasChunked := strings.Contains(parseTransferEncoding(headerData), "chunked")
+		isSSE := isSSEHeader(headerData)
+
+		// SSE 响应：无 Content-Length，收到响应头即 emit，后续数据作为增量更新
+		if isSSE && !hasCL && !hasChunked {
+			msgData := s.serverBuf[:idx]
+			s.serverBuf = s.serverBuf[idx:]
+			resp := parseHTTPResponse(msgData)
+			if resp != nil && resp.StatusCode >= 200 {
+				req := s.pendingReq
+				s.pendingReq = nil
+				req.StatusCode = resp.StatusCode
+				req.ResHeaders = resp.Headers
+				req.ResBody = resp.Body
+				req.IsSSE = true
+				req.SSEEvents = resp.Body
+				req.DurationMs = time.Since(req.CapturedAt).Milliseconds()
+				req.SizeBytes = int64(len(msgData))
+				// 同步 Save 以确保拿到真实 ID，SSE 响应头很小，开销可忽略
+				id, err := s.engine.store.Save(req)
+				if err != nil {
+					slog.Warn("capture: SSE initial save failed", "url", req.URL, "error", err)
+					continue
+				}
+				req.ID = id
+				s.ssePending = true
+				s.sseReqID = id
+				s.engine.stats.HTTPFound.Add(1)
+				if s.engine.hub != nil {
+					s.engine.hub.BroadcastCapture(req)
+				}
+			}
+			continue
+		}
 
 		if !hasCL && !hasChunked {
 			statusCode := parseStatusCodeFromHeader(headerData)

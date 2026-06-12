@@ -134,6 +134,10 @@ func (s *Server) BroadcastCapture(req *models.CapturedRequest) {
 	s.hub.broadcast(req)
 }
 
+func (s *Server) BroadcastUpdate(req *models.CapturedRequest) {
+	s.hub.BroadcastUpdate(req)
+}
+
 func (s *Server) Stop() {
 	s.rateLimiter.stop()
 	s.hub.Stop()

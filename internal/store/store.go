@@ -138,6 +138,8 @@ func (s *Store) migrate() error {
 		{14, `ALTER TABLE requests ADD COLUMN capture_mode TEXT DEFAULT 'proxy'`},
 		{15, `ALTER TABLE requests ADD COLUMN process_pid INTEGER DEFAULT 0`},
 		{16, `ALTER TABLE requests ADD COLUMN process_name TEXT DEFAULT ''`},
+		{17, `ALTER TABLE requests ADD COLUMN is_sse INTEGER NOT NULL DEFAULT 0`},
+		{18, `ALTER TABLE requests ADD COLUMN sse_events TEXT NOT NULL DEFAULT ''`},
 	}
 
 	for _, m := range migrations {
@@ -177,14 +179,15 @@ func (s *Store) saveLocked(req *models.CapturedRequest) (int64, error) {
 	}
 
 	result, err := s.db.Exec(
-		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.Method, req.URL, req.Host, req.Path, req.Protocol, boolToInt(req.IsHTTPS),
-		string(reqHeadersJSON), truncateStr(req.ReqBody, 32768),
+		string(reqHeadersJSON), truncateStr(req.ReqBody, 2*1024*1024),
 		req.StatusCode, string(resHeadersJSON),
-		truncateStr(req.ResBody, 65536), req.DurationMs, req.SizeBytes,
+		truncateStr(req.ResBody, 4*1024*1024), req.DurationMs, req.SizeBytes,
 		req.CapturedAt.Format(time.RFC3339),
 		req.CaptureMode, req.ProcessPID, req.ProcessName,
+		boolToInt(req.IsSSE), truncateStr(req.SSEEvents, 4*1024*1024),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert request: %w", err)
@@ -209,8 +212,8 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(
-		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, fmt.Errorf("prepare: %w", err)
 	}
@@ -226,10 +229,11 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 
 		result, err := stmt.Exec(
 			req.Method, req.URL, req.Host, req.Path, req.Protocol, boolToInt(req.IsHTTPS),
-			string(reqHeadersJSON), truncateStr(req.ReqBody, 32768),
-			req.StatusCode, string(resHeadersJSON), truncateStr(req.ResBody, 65536),
+			string(reqHeadersJSON), truncateStr(req.ReqBody, 2*1024*1024),
+			req.StatusCode, string(resHeadersJSON), truncateStr(req.ResBody, 4*1024*1024),
 			req.DurationMs, req.SizeBytes, req.CapturedAt.Format(time.RFC3339),
 			req.CaptureMode, req.ProcessPID, req.ProcessName,
+			boolToInt(req.IsSSE), truncateStr(req.SSEEvents, 4*1024*1024),
 		)
 		if err != nil {
 			return ids, fmt.Errorf("exec batch: %w", err)
@@ -312,14 +316,15 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 
 	var req models.CapturedRequest
 	var reqHeadersJSON, resHeadersJSON, capturedAt string
+	var isSSE int
 
 	err := s.db.QueryRow(
-		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name
+		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events
 		 FROM requests WHERE id = ?`, id,
 	).Scan(&req.ID, &req.Method, &req.URL, &req.Host, &req.Path, &req.Protocol, &req.IsHTTPS,
 		&reqHeadersJSON, &req.ReqBody, &req.StatusCode, &resHeadersJSON, &req.ResBody,
 		&req.DurationMs, &req.SizeBytes, &capturedAt,
-		&req.CaptureMode, &req.ProcessPID, &req.ProcessName)
+		&req.CaptureMode, &req.ProcessPID, &req.ProcessName, &isSSE, &req.SSEEvents)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("request not found: %d", id)
@@ -331,6 +336,7 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 	json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders)
 	json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders)
 	req.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
+	req.IsSSE = isSSE == 1
 
 	if req.ReqHeaders == nil {
 		req.ReqHeaders = make(map[string]string)
@@ -409,6 +415,17 @@ func (s *Store) Delete(id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("DELETE FROM requests WHERE id = ?", id)
+	return err
+}
+
+// UpdateResBody 更新响应体和 SSE 事件（流式捕获 SSE 时增量更新）
+func (s *Store) UpdateResBody(id int64, resBody, sseEvents string, sizeBytes int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		"UPDATE requests SET res_body = ?, sse_events = ?, size_bytes = ? WHERE id = ?",
+		truncateStr(resBody, 4*1024*1024), truncateStr(sseEvents, 4*1024*1024), sizeBytes, id,
+	)
 	return err
 }
 
