@@ -17,6 +17,30 @@ import (
 // key: "iface|linkType|snaplen|expr"，value: 编译后的指令（不可变，可安全并发复用）。
 var bpfCache sync.Map
 
+// openHandle 创建并配置 InactiveHandle，以指定 promisc 模式激活返回 *pcap.Handle。
+// InactiveHandle 不可重复激活，每次尝试需新建。
+func openHandle(iface string, promisc bool) (*pcap.Handle, error) {
+	inactive, err := pcap.NewInactiveHandle(iface)
+	if err != nil {
+		return nil, err
+	}
+	defer inactive.CleanUp()
+	// 内核缓冲区调大到 32MB（默认仅 ~2MB），降低高吞吐丢包
+	if err := inactive.SetBufferSize(32 * 1024 * 1024); err != nil {
+		slog.Warn("capture: SetBufferSize 失败（忽略，使用默认值）", "error", err)
+	}
+	if err := inactive.SetSnapLen(16384); err != nil {
+		slog.Warn("capture: SetSnapLen 失败（忽略，使用默认值）", "error", err)
+	}
+	if err := inactive.SetPromisc(promisc); err != nil {
+		slog.Warn("capture: SetPromisc 失败（忽略，使用默认值）", "error", err)
+	}
+	if err := inactive.SetTimeout(pcap.BlockForever); err != nil {
+		slog.Warn("capture: SetTimeout 失败（忽略，使用默认值）", "error", err)
+	}
+	return inactive.Activate()
+}
+
 func (e *Engine) Start() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -27,28 +51,15 @@ func (e *Engine) Start() error {
 
 	e.stopCh = make(chan struct{})
 
-	// 使用 InactiveHandle 配置内核缓冲区后再激活，避免高吞吐丢包
-	inactive, err := pcap.NewInactiveHandle(e.iface)
+	// 激活：优先尝试 promisc（混杂）模式；若失败（如非 root 用户、macOS 无权限），
+	// 回退到非 promisc 模式（对本机流量捕获完全足够）。
+	h, err := openHandle(e.iface, true)
 	if err != nil {
-		return fmt.Errorf("pcap.NewInactiveHandle(%s): %w", e.iface, err)
-	}
-	defer inactive.CleanUp()
-	// 内核缓冲区调大到 32MB（默认仅 ~2MB）
-	if err := inactive.SetBufferSize(32 * 1024 * 1024); err != nil {
-		slog.Warn("capture: SetBufferSize 失败（忽略，使用默认值）", "error", err)
-	}
-	if err := inactive.SetSnapLen(16384); err != nil {
-		slog.Warn("capture: SetSnapLen 失败（忽略，使用默认值）", "error", err)
-	}
-	if err := inactive.SetPromisc(true); err != nil {
-		slog.Warn("capture: SetPromisc 失败（忽略，使用默认值）", "error", err)
-	}
-	if err := inactive.SetTimeout(pcap.BlockForever); err != nil {
-		slog.Warn("capture: SetTimeout 失败（忽略，使用默认值）", "error", err)
-	}
-	h, err := inactive.Activate()
-	if err != nil {
-		return fmt.Errorf("pcap.Activate(%s): %w", e.iface, err)
+		h, err = openHandle(e.iface, false)
+		if err != nil {
+			return fmt.Errorf("pcap.Activate(%s): %w", e.iface, err)
+		}
+		slog.Info("capture: promisc 模式不可用，使用非混杂模式（仅捕获本机流量）", "iface", e.iface)
 	}
 	e.handle = h
 
