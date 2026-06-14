@@ -263,6 +263,9 @@ func isSSEResponse(resp *http.Response) bool {
 
 // handleSSEResponse 处理 SSE 流式响应：用 Pipe 同时转发给客户端和捕获事件
 func (s *Server) handleSSEResponse(resp *http.Response, captured *models.CapturedRequest) {
+	if captured == nil {
+		return
+	}
 	maxResBytes := int64(s.maxResBodyKB) * 1024
 
 	// 同步保存初始记录（只有 headers，body 为空），确保拿到真实 ID
@@ -283,6 +286,9 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 
 	originalBody := resp.Body
 	resp.Body = pr
+
+	// SSE goroutine 修改 captured 字段时需要加锁，防止 onCapture 回调并发读取
+	var capturedMu sync.Mutex
 
 	// 启动 goroutine 流式读取 SSE
 	go func() {
@@ -318,10 +324,12 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 			now := time.Now()
 			if now.Sub(lastUpdate) >= updateInterval {
 				lastUpdate = now
+				capturedMu.Lock()
 				captured.ResBody = captureBuf.String()
 				captured.SSEEvents = captureBuf.String()
 				captured.SizeBytes = totalSize
 				captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
+				capturedMu.Unlock()
 
 				if err := s.store.UpdateResBody(captured.ID, captured.ResBody, captured.SSEEvents, captured.SizeBytes); err != nil {
 					slog.Warn("proxy: SSE update DB failed", "id", captured.ID, "error", err)
@@ -329,23 +337,29 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 
 				// 推送 WebSocket 更新
 				if s.onCapture != nil {
+					capturedMu.Lock()
 					s.onCapture(captured)
+					capturedMu.Unlock()
 				}
 			}
 		}
 
 		// SSE 流结束，最终更新
+		capturedMu.Lock()
 		captured.ResBody = captureBuf.String()
 		captured.SSEEvents = captureBuf.String()
 		captured.SizeBytes = totalSize
 		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
+		capturedMu.Unlock()
 
 		if err := s.store.UpdateResBody(captured.ID, captured.ResBody, captured.SSEEvents, captured.SizeBytes); err != nil {
 			slog.Warn("proxy: SSE final update DB failed", "id", captured.ID, "error", err)
 		}
 
 		if s.onCapture != nil {
+			capturedMu.Lock()
 			s.onCapture(captured)
+			capturedMu.Unlock()
 		}
 	}()
 }

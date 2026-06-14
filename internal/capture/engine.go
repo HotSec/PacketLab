@@ -537,7 +537,11 @@ func (a *Assembler) FlushOlderThan(t time.Time, engine *Engine) {
 			continue
 		}
 		if s.lastActive.Before(t) {
-			s.tryExtractHTTPOnClose()
+			if s.ssePending {
+				s.flushSSEEvents()
+			} else {
+				s.tryExtractHTTPOnClose()
+			}
 			s.mu.Unlock()
 			delete(a.streams, key)
 		} else {
@@ -553,7 +557,11 @@ func (a *Assembler) FlushAllWithPending(engine *Engine) {
 	for _, s := range a.streams {
 		s.mu.Lock()
 		if !s.nonHTTP {
-			s.tryExtractHTTPOnClose()
+			if s.ssePending {
+				s.flushSSEEvents()
+			} else {
+				s.tryExtractHTTPOnClose()
+			}
 		}
 		s.mu.Unlock()
 	}
