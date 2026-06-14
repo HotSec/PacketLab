@@ -432,3 +432,17 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .star-btn:hover{color:var(--yellow);transform:scale(1.2)}
 .star-btn.starred{color:var(--yellow)}
 #starredFilterBtn.active{color:var(--yellow)}
+
+/* ===== Refresh Mode & Pagination ===== */
+.refresh-controls{display:flex;align-items:center;gap:4px;margin-left:auto}
+.refresh-select{padding:2px 4px;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-elevated);color:var(--text-secondary);font-size:10px;font-weight:550;cursor:pointer;outline:none;transition:border-color .15s}
+.refresh-select:hover{border-color:var(--accent)}
+.manual-refresh-btn{width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;transition:all .15s;flex-shrink:0}
+.manual-refresh-btn:hover{color:var(--accent);border-color:var(--accent)}
+.manual-refresh-btn.spin svg{animation:spin360 .4s ease}
+@keyframes spin360{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+.pagination-bar{display:flex;align-items:center;justify-content:center;gap:10px;padding:6px 8px;border-top:1px solid var(--border-subtle);background:var(--bg-surface);flex-shrink:0}
+.page-btn{width:24px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius-sm);border:1px solid var(--border-default);background:var(--bg-elevated);color:var(--text-primary);font-size:13px;font-weight:600;cursor:pointer;transition:all .12s;line-height:1}
+.page-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.page-btn:disabled{opacity:.35;cursor:not-allowed}
+.page-info{font-size:11px;font-family:var(--font-mono);color:var(--text-secondary);min-width:50px;text-align:center}

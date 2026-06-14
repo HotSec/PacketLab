@@ -66,6 +66,20 @@ let requestElCache = new Map(); // id → { el, sizeSpan, durSpan } DOM 缓存
 let selectedRequestId = null;
 let activeTab = 'request';
 let currentFilter = 'all', currentHost = '', errorFilterOnly = false, starredOnly = false, isRecording = true;
+
+// ── 刷新模式 ──────────────────────────────────
+// refreshMode: 'realtime' = WebSocket 实时追加（无分页）
+//              '1s'/'3s'/'5s'/'15s'/'30s'/'60s' = 定时整页刷新（分页生效）
+//              'manual' = 仅手动刷新
+let refreshMode = 'realtime';
+let refreshTimer = null;
+const REFRESH_INTERVALS = { '1s': 1000, '3s': 3000, '5s': 5000, '15s': 15000, '30s': 30000, '60s': 60000 };
+
+// ── 分页 ──────────────────────────────────────
+const PAGE_SIZE = 50;
+let currentPage = 1;       // 1-based
+let pageTotal = 0;         // 当前过滤条件下的总条数（由后端返回）
+// isPaged: 是否启用分页（非 realtime 模式启用）
 let ws = null, wsReconnectTimer = null;
 let requestVersion = 0;
 
@@ -146,16 +160,94 @@ async function loadRequests() {
     const s = document.getElementById('searchInput').value.trim();
     if (s) p.set('search', s);
     if (currentHost) p.set('host', currentHost);
-    p.set('limit', '200');
+    // 分页模式：传 offset + limit（页面大小）；实时模式：拉取较大窗口供虚拟滚动
+    const paged = isPaged();
+    if (paged) {
+      p.set('limit', String(PAGE_SIZE));
+      p.set('offset', String((currentPage - 1) * PAGE_SIZE));
+    } else {
+      p.set('limit', '200');
+    }
     const r = await apiGet('/api/requests?' + p.toString());
     requestVersion++;
     requests = (r.data || []).map(normalizeReq);
+    pageTotal = r.total || 0;
     // 过滤/重新加载后回到顶部，避免虚拟滚动残留位置错位
     virtualScrollTop = 0;
     const listEl = document.getElementById('requestList');
     if (listEl) listEl.scrollTop = 0;
     renderRequestList();
+    updatePagination();
   } catch (e) { console.error('loadRequests failed:', e); }
+}
+
+// 是否启用分页：仅当刷新模式不是 realtime 时启用
+function isPaged() {
+  return refreshMode !== 'realtime';
+}
+
+// 切换刷新模式
+function setRefreshMode(mode) {
+  refreshMode = mode;
+  const sel = document.getElementById('refreshModeSelect');
+  if (sel) sel.value = mode;
+  // 清理旧的定时器
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  // 模式切换时分页语义重置
+  if (mode === 'realtime') {
+    // realtime: 回到不分页的大窗口加载
+    currentPage = 1;
+    loadRequests();
+  } else {
+    // 定时 / 手动：启用分页，回到第 1 页
+    currentPage = 1;
+    loadRequests();
+    const ms = REFRESH_INTERVALS[mode];
+    if (ms) {
+      refreshTimer = setInterval(() => { if (document.visibilityState !== 'hidden') loadRequests(); }, ms);
+    }
+  }
+  updateRefreshUI();
+}
+
+// 手动刷新按钮
+function manualRefresh() {
+  loadRequests();
+  // 视觉反馈：按钮短暂高亮
+  const btn = document.getElementById('manualRefreshBtn');
+  if (btn) {
+    btn.classList.add('spin');
+    setTimeout(() => btn.classList.remove('spin'), 400);
+  }
+}
+
+function updateRefreshUI() {
+  const btn = document.getElementById('manualRefreshBtn');
+  if (btn) btn.style.display = (refreshMode === 'manual') ? '' : 'none';
+}
+
+// ── 分页控制 ──────────────────────────────────
+function updatePagination() {
+  const bar = document.getElementById('paginationBar');
+  if (!bar) return;
+  if (!isPaged()) { bar.style.display = 'none'; return; }
+  const totalPages = Math.max(1, Math.ceil(pageTotal / PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  bar.style.display = '';
+  const info = document.getElementById('pageInfo');
+  if (info) info.textContent = `${currentPage} / ${totalPages}`;
+  const prev = document.getElementById('pagePrev');
+  const next = document.getElementById('pageNext');
+  if (prev) prev.disabled = (currentPage <= 1);
+  if (next) next.disabled = (currentPage >= totalPages);
+}
+
+function goToPage(delta) {
+  const totalPages = Math.max(1, Math.ceil(pageTotal / PAGE_SIZE));
+  const np = currentPage + delta;
+  if (np < 1 || np > totalPages) return;
+  currentPage = np;
+  loadRequests();
 }
 
 async function loadRequestDetail(id) {
@@ -245,6 +337,8 @@ function connectWebSocket() {
       try {
         const m = JSON.parse(e.data);
         if (m.type === 'new_request' && m.data) {
+          // 仅 realtime 模式实时追加；定时/手动模式由刷新或翻页统一加载
+          if (refreshMode !== 'realtime') return;
           requestVersion++; requests.unshift(normalizeReq(m.data));
           // 虚拟滚动模式：保持视口稳定，新条目加到顶部时同步下移滚动位置
           if (virtualFiltered.length > VIRTUAL_THRESHOLD) {
@@ -872,15 +966,20 @@ function toggleCapture() {
     dot.classList.remove('recording'); text.textContent = t('paused');
   }
 }
-function setFilter(btn, f) { currentFilter = f; currentHost = ''; document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active')); btn.classList.add('active'); loadRequests(); }
+function setFilter(btn, f) { currentFilter = f; currentHost = ''; currentPage = 1; document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active')); btn.classList.add('active'); loadRequests(); }
 function toggleErrorFilter() {
-  errorFilterOnly = !errorFilterOnly; currentHost = '';
+  errorFilterOnly = !errorFilterOnly; currentHost = ''; currentPage = 1;
   const btn = document.getElementById('errorFilterBtn');
   if (errorFilterOnly) { btn.style.background = 'var(--red-muted)'; btn.style.color = 'var(--red)'; btn.classList.add('active'); }
   else { btn.style.background = 'transparent'; btn.style.color = 'var(--text-secondary)'; btn.classList.remove('active'); }
   loadRequests();
 }
-function filterRequests() { currentHost = ''; loadRequests(); }
+// 搜索输入防抖：避免每次按键都请求；重置到第 1 页
+let searchTimer = null;
+function debounceSearch() {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { currentPage = 1; loadRequests(); }, 300);
+}
 function toggleStarredOnly() {
   starredOnly = !starredOnly;
   const btn = document.getElementById('starredFilterBtn');

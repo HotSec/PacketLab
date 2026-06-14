@@ -15,7 +15,7 @@
 <div class="divider-v"></div>
 <div class="search-wrap">
 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-<input type="text" class="search-input" data-i18n-placeholder="filter_placeholder" placeholder="过滤 URL / 状态码 / 方法..." id="searchInput" oninput="filterRequests()">
+<input type="text" class="search-input" data-i18n-placeholder="filter_placeholder" placeholder="过滤 URL / 状态码 / 方法..." id="searchInput" oninput="debounceSearch()">
 </div>
 <div class="topbar-actions">
 <button class="icon-btn" data-i18n-title="theme_toggle" data-tooltip="切换主题" title="切换主题" onclick="toggleTheme()" id="themeBtn">
@@ -46,7 +46,23 @@
 </header>
 <div class="main-content">
 <aside class="request-panel" id="requestPanel">
-<div class="panel-header"><span class="panel-title" data-i18n="request_list">请求列表</span><span class="panel-count" id="requestCount">0</span></div>
+<div class="panel-header"><span class="panel-title" data-i18n="request_list">请求列表</span><span class="panel-count" id="requestCount">0</span>
+<div class="refresh-controls">
+<select id="refreshModeSelect" class="refresh-select" onchange="setRefreshMode(this.value)" title="刷新模式">
+<option value="realtime" selected>实时</option>
+<option value="1s">1s</option>
+<option value="3s">3s</option>
+<option value="5s">5s</option>
+<option value="15s">15s</option>
+<option value="30s">30s</option>
+<option value="60s">60s</option>
+<option value="manual">手动</option>
+</select>
+<button id="manualRefreshBtn" class="manual-refresh-btn" onclick="manualRefresh()" title="手动刷新" style="display:none">
+<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+</button>
+</div>
+</div>
 <div class="filter-chips">
 <button class="filter-chip active" data-filter="all" onclick="setFilter(this,'all')" data-i18n="filter_all">全部</button>
 <button class="filter-chip" data-filter="GET" onclick="setFilter(this,'GET')">GET</button>
@@ -58,6 +74,11 @@
 <button class="filter-chip" data-filter="OPTIONS" onclick="setFilter(this,'OPTIONS')">OPTIONS</button>
 </div>
 <div class="request-list" id="requestList"></div>
+<div class="pagination-bar" id="paginationBar" style="display:none">
+<button class="page-btn" id="pagePrev" onclick="goToPage(-1)" title="上一页">‹</button>
+<span class="page-info" id="pageInfo">1 / 1</span>
+<button class="page-btn" id="pageNext" onclick="goToPage(1)" title="下一页">›</button>
+</div>
 </aside>
 <div class="resize-handle" id="resizeHandle"></div>
 <section class="detail-panel" id="detailPanel">
