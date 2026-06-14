@@ -344,6 +344,11 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 			}
 		}
 
+		// 检查 scanner 错误（如单行超过 1MB 缓冲区限制）
+		if err := scanner.Err(); err != nil {
+			slog.Warn("proxy: SSE scanner error, stream may be incomplete", "url", captured.URL, "error", err)
+		}
+
 		// SSE 流结束，最终更新
 		capturedMu.Lock()
 		captured.ResBody = captureBuf.String()

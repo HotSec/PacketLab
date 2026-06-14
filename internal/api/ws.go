@@ -111,25 +111,15 @@ func (h *wsHub) run() {
 			}
 
 		case req := <-h.updateCh:
-			// SSE 流式响应增量推送：携带 res_body / sse_events / size，前端可实时刷新详情
-			data := map[string]interface{}{
-				"id":          req.ID,
-				"status_code": req.StatusCode,
-				"duration_ms": req.DurationMs,
-				"size_bytes":  req.SizeBytes,
-			}
-			if req.IsSSE {
-				data["is_sse"] = true
-			}
-			if req.ResBody != "" {
-				data["res_body"] = req.ResBody
-			}
-			if req.SSEEvents != "" {
-				data["sse_events"] = req.SSEEvents
-			}
+			// SSE 流式响应增量推送：仅推送元数据，body 由前端按需请求 API
 			msg, err := json.Marshal(map[string]interface{}{
 				"type": "update_request",
-				"data": data,
+				"data": map[string]interface{}{
+					"id":          req.ID,
+					"status_code": req.StatusCode,
+					"duration_ms": req.DurationMs,
+					"size_bytes":  req.SizeBytes,
+				},
 			})
 			if err != nil {
 				continue
@@ -138,6 +128,7 @@ func (h *wsHub) run() {
 				select {
 				case client.send <- msg:
 				default:
+					slog.Warn("ws update_request dropped, client buffer full", "id", req.ID)
 				}
 			}
 		}

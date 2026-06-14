@@ -22,7 +22,10 @@ type Engine struct {
 	bpf     string
 	handle  pcapHandle
 	store   *store.Store
-	hub     interface{ BroadcastCapture(req *models.CapturedRequest) }
+	hub     interface {
+		BroadcastCapture(req *models.CapturedRequest)
+		BroadcastUpdate(req *models.CapturedRequest)
+	}
 	running atomic.Bool
 	mu      sync.Mutex
 	stopCh  chan struct{}
@@ -72,7 +75,10 @@ type Stats struct {
 
 // New 创建抓包引擎
 func New(iface, bpf string, st *store.Store,
-	hub interface{ BroadcastCapture(req *models.CapturedRequest) }) *Engine {
+	hub interface {
+		BroadcastCapture(req *models.CapturedRequest)
+		BroadcastUpdate(req *models.CapturedRequest)
+	}) *Engine {
 
 	if bpf == "" {
 		bpf = "tcp"
@@ -694,13 +700,12 @@ func (s *TCPStream) flushSSEEvents() {
 	if err := s.engine.store.UpdateResBody(s.sseReqID, events, events, int64(len(s.sseBuf))); err != nil {
 		slog.Warn("capture: SSE update DB failed", "id", s.sseReqID, "error", err)
 	}
-	// 推送 WebSocket 更新
+	// 推送 WebSocket 增量更新（仅元数据，body 由前端按需请求）
 	if s.engine.hub != nil {
-		s.engine.hub.BroadcastCapture(&models.CapturedRequest{
-			ID:         s.sseReqID,
-			IsSSE:      true,
-			SSEEvents:  events,
-			SizeBytes:  int64(len(s.sseBuf)),
+		s.engine.hub.BroadcastUpdate(&models.CapturedRequest{
+			ID:        s.sseReqID,
+			IsSSE:     true,
+			SizeBytes: int64(len(s.sseBuf)),
 		})
 	}
 }
@@ -848,7 +853,7 @@ func (s *TCPStream) tryExtractHTTP() {
 				s.sseReqID = id
 				s.engine.stats.HTTPFound.Add(1)
 				if s.engine.hub != nil {
-					s.engine.hub.BroadcastCapture(req)
+					s.engine.hub.BroadcastUpdate(req)
 				}
 			}
 			continue

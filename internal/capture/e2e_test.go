@@ -17,6 +17,10 @@ func (h *testHub) BroadcastCapture(req *models.CapturedRequest) {
 	h.captured = append(h.captured, req)
 }
 
+func (h *testHub) BroadcastUpdate(req *models.CapturedRequest) {
+	h.captured = append(h.captured, req)
+}
+
 func TestNICDataFlowE2E(t *testing.T) {
 	dbPath := "/tmp/test_nic_e2e.db"
 	os.Remove(dbPath)
