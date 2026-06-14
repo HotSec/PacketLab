@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.0.2 (2026-06-14) — 稳定性、功能完善与性能优化
+
+### 🔴 Bug 修复（数据正确性）
+
+- **Resend 重试 body 丢失**：重试 / 5xx 重试时复用已消费的 body，POST/PUT 重发在网络抖动下请求体静默丢失。改为每次重试用 `bytes.NewReader(bodyBytes)` 重建请求。(`internal/api/service.go`)
+- **dbRO 只读连接长期闲置 + 读路径加锁**：打开的只读 DB 连接从未被使用，所有读查询仍走写连接并持有 `s.mu.RLock()`。新增 `readDB()` 辅助，所有读方法（List/Get/ListFull/Stats/GetAPINotes/GetAPIMap/ListHosts/ListInterceptLogs/GetSetting/ListRules）改走 dbRO 并去掉读锁，真正利用 WAL 一写多读。(`internal/store/store.go`)
+- **网卡抓包完全不支持 IPv6**：`Assembler.Assemble` / `flowHash` 只解析 IPv4 层，IPv6 流量被丢弃。新增 `layers.LayerTypeIPv6` 分支与 `foldIPv6` 哈希折叠。(`internal/capture/engine.go`)
+- **SSE 增量推送内容缺失**：`update_request` WebSocket 消息只推送 id/status/size，前端无法实时看到 SSE 事件。补全 `res_body`/`sse_events` 字段并在查看中请求时实时刷新响应体。(`internal/api/ws.go`, `cmd/proxy/web/app.js`)
+
+### 🟢 功能完善
+
+- **数据库定期清理**：补全 `Store.Cleanup` + `/api/maintenance/cleanup` 端点 + 后台每 6 小时自动清理（`retention_days` 由 settings 控制）。(`internal/store`, `internal/api`, `cmd/proxy/main.go`)
+- **进程缓存淘汰**：`procCache` 只增不减导致长跑内存泄漏。新增 TTL（30s）+ 容量上限（10000）整体重建淘汰，并提取 `resolveProcessCached` 统一 unix/windows。(`internal/capture/engine.go`, `proc_unix.go`, `proc_windows.go`)
+- **请求列表虚拟滚动**：超过 200 条时启用 windowing（50px/项 + 8 overscan + rAF 节流），万条记录流畅滚动。(`cmd/proxy/web/app.js`)
+- **拦截规则 method 维度匹配**：规则支持限定 HTTP 方法（逗号分隔多个），大小写不敏感。含 DB 迁移 v19、`matchRule` 重构、测试覆盖。(`internal/store`, `internal/proxy/interceptor.go`)
+- **复制为 fetch / python-requests**：在 `copy as curl` 旁新增 `fetch`、`python` 一键复制。(`cmd/proxy/web/app.js`, `index.html`)
+- **拦截日志按 host/pattern 过滤**：`ListInterceptLogs` 新增 host/pattern LIKE 模糊匹配参数 + 前端防抖过滤输入框。(`internal/store`, `internal/api`, `cmd/proxy/web/app.js`)
+- **请求收藏（starred）**：DB 迁移 v20/v21 + `SetStarred`/`ListStarred` + `/api/starred` 端点 + 列表项星标按钮 + 顶栏「仅显示收藏」筛选。(`internal/store`, `internal/api`, `cmd/proxy/web/*`)
+
+### 🟡 性能与配置
+
+- **BPF 编译缓存**：包级 `sync.Map` 缓存 `pcap.BPFInstruction`，启停抓包不重复编译。(`internal/capture/engine_pcap.go`)
+- **pcap 内核缓冲调优**：用 `InactiveHandle` 配置 32MB buffer + 16384 snaplen，降低高吞吐丢包。(`internal/capture/engine_pcap.go`)
+- **抓包流超时参数化**：新增 `--capture-stream-timeout` flag（默认 2 分钟），GC 周期取其 1/8。(`internal/config`, `internal/capture`, `cmd/proxy/main.go`)
+- **代理/网卡截断阈值统一**：网卡侧 `truncateBuffer` 与 SSE 缓冲区上限改用 `config.MaxResBodyKB`（默认 4MB），与代理侧一致。(`internal/capture/engine.go`)
+- **CORS Origin 白名单修正**：`isAllowedOrigin` 允许 localhost/回环任意端口 + https 本地源（修复 `http://localhost:9090` 被拒的回归）。(`internal/api/middleware.go`)
+
+### 🔵 工程化
+
+- **Dockerfile**：多阶段构建（golang:1.25-bookworm → debian-slim），含 libpcap 运行库，数据卷持久化。
+
+### 迁移
+
+- `ALTER TABLE intercept_rules ADD COLUMN method` (v19)
+- `ALTER TABLE requests ADD COLUMN starred` (v20)
+- `CREATE INDEX idx_requests_starred` (v21)
+
+---
+
 ## v0.0.1 (2026-05-22) — First Tagged Release
 
 > PacketLab 首个正式版本 — MITM 代理、API 地图、拦截编辑重发，即开即用。

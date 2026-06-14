@@ -111,14 +111,25 @@ func (h *wsHub) run() {
 			}
 
 		case req := <-h.updateCh:
+			// SSE 流式响应增量推送：携带 res_body / sse_events / size，前端可实时刷新详情
+			data := map[string]interface{}{
+				"id":          req.ID,
+				"status_code": req.StatusCode,
+				"duration_ms": req.DurationMs,
+				"size_bytes":  req.SizeBytes,
+			}
+			if req.IsSSE {
+				data["is_sse"] = true
+			}
+			if req.ResBody != "" {
+				data["res_body"] = req.ResBody
+			}
+			if req.SSEEvents != "" {
+				data["sse_events"] = req.SSEEvents
+			}
 			msg, err := json.Marshal(map[string]interface{}{
 				"type": "update_request",
-				"data": map[string]interface{}{
-					"id":          req.ID,
-					"status_code": req.StatusCode,
-					"duration_ms": req.DurationMs,
-					"size_bytes":  req.SizeBytes,
-				},
+				"data": data,
 			})
 			if err != nil {
 				continue

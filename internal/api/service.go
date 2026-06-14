@@ -58,27 +58,42 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 
 	isHTTPS := parsedURL.Scheme == "https"
 
-	var bodyReader io.Reader
-	if req.Body != "" {
-		bodyReader = bytes.NewBufferString(req.Body)
+	// bodyBytes: 缓存请求体字节，用于每次重试重建 body (http.Request.Body 只能读一次)
+	bodyBytes := []byte(req.Body)
+
+	// newRequest 构造一个全新的 *http.Request（含 fresh body），供每次发送/重试使用
+	newRequest := func() (*http.Request, error) {
+		var bodyReader io.Reader
+		if len(bodyBytes) > 0 {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+		r, err := http.NewRequest(req.Method, req.URL, bodyReader)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range req.Headers {
+			r.Header.Set(k, v)
+		}
+		if r.Header.Get("User-Agent") == "" {
+			r.Header.Set("User-Agent", "PacketLab/2.0")
+		}
+		return r, nil
 	}
 
-	httpReq, err := http.NewRequest(req.Method, req.URL, bodyReader)
-	if err != nil {
+	// 首次构造用于校验 Method/URL 合法性
+	if _, err := newRequest(); err != nil {
 		return nil, ErrValidation(fmt.Sprintf("create request: %s", err.Error()))
-	}
-
-	for k, v := range req.Headers {
-		httpReq.Header.Set(k, v)
-	}
-	if httpReq.Header.Get("User-Agent") == "" {
-		httpReq.Header.Set("User-Agent", "PacketLab/2.0")
 	}
 
 	var resp *http.Response
 	var lastErr error
 	startTime := time.Now()
 	for attempt := 1; attempt <= 3; attempt++ {
+		var httpReq *http.Request
+		httpReq, lastErr = newRequest()
+		if lastErr != nil {
+			break
+		}
 		resp, lastErr = s.client.Do(httpReq)
 		if lastErr == nil {
 			break
@@ -95,10 +110,11 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 
 	if resp.StatusCode >= 500 && resp.StatusCode < 600 {
 		time.Sleep(200 * time.Millisecond)
-		resp2, err := s.client.Do(httpReq)
-		if err == nil {
-			resp.Body.Close()
-			resp = resp2
+		if retryReq, err := newRequest(); err == nil {
+			if resp2, err := s.client.Do(retryReq); err == nil {
+				resp.Body.Close()
+				resp = resp2
+			}
 		}
 	}
 

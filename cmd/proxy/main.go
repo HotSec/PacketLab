@@ -37,6 +37,7 @@ func main() {
 	captureIFace  := flag.String("capture-iface", "", "指定抓包网卡（默认自动检测）")
 	captureBPF    := flag.String("capture-bpf", "tcp", "BPF 过滤器 (默认捕获所有 TCP)")
 	captureNoProc := flag.Bool("capture-no-proc", false, "禁用进程关联")
+	captureStreamTimeout := flag.Int("capture-stream-timeout", config.DefaultStreamTimeoutMin, "网卡抓包流空闲超时（分钟，0=默认2）")
 	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
 	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")
 	flag.Parse()
@@ -47,7 +48,8 @@ func main() {
 
 	// 集中化配置 fail-fast 校验
 	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure,
-		*captureFlag, *captureIFace, *captureBPF, *captureNoProc, *maxReqBodyKB, *maxResBodyKB)
+		*captureFlag, *captureIFace, *captureBPF, *captureNoProc,
+		*captureStreamTimeout, *maxReqBodyKB, *maxResBodyKB)
 	if err != nil {
 		slog.Error("配置加载失败", "error", err)
 		os.Exit(1)
@@ -93,6 +95,8 @@ func main() {
 			iface = capture.DetectInterface()
 		}
 		capEngine = capture.New(iface, cfg.CaptureBPF, st, apiSrv)
+		capEngine.SetStreamTimeout(time.Duration(cfg.CaptureStreamTimeoutMin) * time.Minute)
+		capEngine.SetMaxResBytes(int64(cfg.MaxResBodyKB) * 1024)
 		if err := capEngine.Start(); err != nil {
 			slog.Warn("抓包引擎启动失败（可能需要 sudo 权限）",
 				"iface", iface, "error", err,
@@ -149,6 +153,9 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// 后台定期清理：每 6 小时执行一次，retention_days 由 settings 表控制（<=0 表示禁用）
+	cleanupStop := startAutoCleanup(st, 6*time.Hour)
+
 	// 优雅关闭
 	shutdownCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, syscall.SIGINT, syscall.SIGTERM)
@@ -195,6 +202,9 @@ func main() {
 	// 关闭 API 服务器资源（rateLimiter goroutine、wsHub）
 	apiSrv.Stop()
 
+	// 停止后台清理
+	cleanupStop()
+
 	// 关闭数据库
 	if err := st.Close(); err != nil {
 		slog.Error("数据库关闭失败", "error", err)
@@ -210,4 +220,31 @@ func loadFrontend() http.Handler {
 		return http.NotFoundHandler()
 	}
 	return http.FileServer(http.FS(sub))
+}
+
+// startAutoCleanup 启动后台定期清理 goroutine，返回停止函数。
+// retention_days 由 settings 表控制：<=0（含缺失）时 Cleanup 为 no-op。
+func startAutoCleanup(st *store.Store, interval time.Duration) func() {
+	ticker := time.NewTicker(interval)
+	stopCh := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				// retention_days<=0 时 Cleanup 内部直接返回，零成本
+				dr, dl, days, err := st.Cleanup(0)
+				if err != nil {
+					slog.Warn("auto cleanup failed", "error", err)
+					continue
+				}
+				if days > 0 && (dr > 0 || dl > 0) {
+					slog.Info("auto cleanup", "deleted_requests", dr, "deleted_logs", dl, "retention_days", days)
+				}
+			case <-stopCh:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+	return func() { close(stopCh) }
 }

@@ -27,6 +27,8 @@ type Engine struct {
 	mu      sync.Mutex
 	stopCh  chan struct{}
 	stats   Stats
+	streamTimeout time.Duration // 流空闲超时（超过则 GC 清理并 emit）
+	maxResBytes   int64         // 单个响应体最大保留字节（截断阈值，与代理侧 config 统一）
 
 	streamPool  *TCPStreamPool
 	assembler   *Assembler
@@ -35,8 +37,10 @@ type Engine struct {
 	workerSg    sync.WaitGroup
 
 	// 进程缓存
-	procCache   map[string]*models.ProcessInfo
-	procCacheMu sync.RWMutex
+	procCache     map[string]*models.ProcessInfo
+	procCacheTS   map[string]time.Time // 每条缓存写入时间，用于 TTL 淘汰
+	procCacheMu   sync.RWMutex
+	procCacheTTL  time.Duration // 单条缓存有效期（默认 30s）
 
 	// 批量发射 buffer (ring)
 	emitBuf    []*models.CapturedRequest
@@ -75,21 +79,88 @@ func New(iface, bpf string, st *store.Store,
 	}
 
 	e := &Engine{
-		iface:     iface,
-		bpf:       bpf,
-		store:     st,
-		hub:       hub,
-		stopCh:    make(chan struct{}),
-		procCache: make(map[string]*models.ProcessInfo),
+		iface:         iface,
+		bpf:           bpf,
+		store:         st,
+		hub:           hub,
+		stopCh:        make(chan struct{}),
+		procCache:     make(map[string]*models.ProcessInfo),
+		procCacheTS:   make(map[string]time.Time),
+		procCacheTTL:  30 * time.Second,
+		streamTimeout: 2 * time.Minute, // 默认流空闲超时 2 分钟（可被 SetStreamTimeout 覆盖）
+		maxResBytes:   4 * 1024 * 1024, // 默认 4MB，与 config.DefaultMaxResBodyKB 对齐
 	}
 	return e
+}
+
+// SetStreamTimeout 设置流空闲超时（超过则 GC 清理并 emit）
+func (e *Engine) SetStreamTimeout(d time.Duration) {
+	if d > 0 {
+		e.streamTimeout = d
+	}
+}
+
+// SetMaxResBytes 设置单条响应体最大保留字节（截断阈值），与代理侧 config 统一
+func (e *Engine) SetMaxResBytes(n int64) {
+	if n > 0 {
+		e.maxResBytes = n
+	}
+}
+
+// resolveProcessCached 通用的进程解析缓存逻辑（TTL + 容量上限淘汰）。
+// buildFn 由各平台实现：macOS/Linux 用 lsof，Windows 用 netstat。
+func (e *Engine) resolveProcessCached(srcIP string, srcPort uint16, buildFn func() map[string]*models.ProcessInfo) *models.ProcessInfo {
+	key := fmt.Sprintf("%s:%d", srcIP, srcPort)
+	now := time.Now()
+
+	e.procCacheMu.RLock()
+	if ts, ok := e.procCacheTS[key]; ok {
+		if now.Sub(ts) < e.procCacheTTL {
+			p := e.procCache[key]
+			e.procCacheMu.RUnlock()
+			return p
+		}
+	}
+	e.procCacheMu.RUnlock()
+
+	table := buildFn()
+	if table == nil {
+		return nil
+	}
+
+	e.procCacheMu.Lock()
+	defer e.procCacheMu.Unlock()
+
+	// 防御性初始化：支持直接用结构体字面量构造 Engine（如测试）的场景
+	if e.procCache == nil {
+		e.procCache = make(map[string]*models.ProcessInfo, len(table))
+	}
+	if e.procCacheTS == nil {
+		e.procCacheTS = make(map[string]time.Time, len(table))
+	}
+	if e.procCacheTTL == 0 {
+		e.procCacheTTL = 30 * time.Second
+	}
+
+	// 容量上限淘汰：超过 maxProcCache 时整体过期重建（简单且避免热点 eviction 开销）
+	const maxProcCache = 10000
+	if len(e.procCache) >= maxProcCache {
+		e.procCache = make(map[string]*models.ProcessInfo, len(table))
+		e.procCacheTS = make(map[string]time.Time, len(table))
+	}
+
+	for k, v := range table {
+		e.procCache[k] = v
+		e.procCacheTS[k] = now
+	}
+
+	return table[key]
 }
 
 // Stop 停止抓包（幂等）
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	if !e.running.Swap(false) {
 		return
 	}
@@ -145,26 +216,51 @@ func (e *Engine) GetMetrics() map[string]interface{} {
 
 // flowHash 基于五元组计算 worker 索引，确保同一流的数据包到同一 worker
 func (e *Engine) flowHash(packet gopacket.Packet) int {
-	ipLayer := packet.Layer(layers.LayerTypeIPv4)
 	tcpLayer := packet.Layer(layers.LayerTypeTCP)
-	if ipLayer == nil || tcpLayer == nil {
+	if tcpLayer == nil {
 		return 0
 	}
-	ip, ok1 := ipLayer.(*layers.IPv4)
-	tcp, ok2 := tcpLayer.(*layers.TCP)
-	if !ok1 || !ok2 {
+	tcp, ok := tcpLayer.(*layers.TCP)
+	if !ok {
 		return 0
 	}
+
 	var sIP, dIP uint32
-	for _, b := range ip.SrcIP.To4() {
-		sIP = sIP<<8 | uint32(b)
-	}
-	for _, b := range ip.DstIP.To4() {
-		dIP = dIP<<8 | uint32(b)
+	if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
+		if ip, ok := ip4Layer.(*layers.IPv4); ok {
+			for _, b := range ip.SrcIP.To4() {
+				sIP = sIP<<8 | uint32(b)
+			}
+			for _, b := range ip.DstIP.To4() {
+				dIP = dIP<<8 | uint32(b)
+			}
+		}
+	} else if ip6Layer := packet.Layer(layers.LayerTypeIPv6); ip6Layer != nil {
+		if ip, ok := ip6Layer.(*layers.IPv6); ok {
+			// IPv6 16 字节地址折叠成 uint32（FNV-like 简易哈希，仅需分布均匀）
+			sIP = foldIPv6(ip.SrcIP)
+			dIP = foldIPv6(ip.DstIP)
+		}
+	} else {
+		return 0
 	}
 	h := sIP ^ dIP ^ uint32(tcp.SrcPort) ^ uint32(tcp.DstPort)
 	h = (h >> 16) ^ h
 	return int(h) % e.workers
+}
+
+// foldIPv6 将 16 字节 IPv6 地址折叠成一个 uint32（用于 worker 哈希分布，非密码学用途）
+func foldIPv6(ip net.IP) uint32 {
+	b := ip.To16()
+	if b == nil {
+		return 0
+	}
+	// 每 4 字节异或折叠
+	var v uint32
+	for i := 0; i < 16; i += 4 {
+		v ^= uint32(b[i])<<24 | uint32(b[i+1])<<16 | uint32(b[i+2])<<8 | uint32(b[i+3])
+	}
+	return v
 }
 
 // workerLoop 独立 goroutine 处理数据包（per-worker Assembler + 流超时清理）
@@ -172,9 +268,14 @@ func (e *Engine) workerLoop(id int) {
 	defer e.workerSg.Done()
 	assembler := NewAssembler(e.streamPool)
 	ch := e.workerChs[id]
-	gcTicker := time.NewTicker(15 * time.Second)
+	// GC 周期取流超时的 1/8（最少 5s），保证过期流及时回收
+	gcInterval := e.streamTimeout / 8
+	if gcInterval < 5*time.Second {
+		gcInterval = 5 * time.Second
+	}
+	gcTicker := time.NewTicker(gcInterval)
 	defer gcTicker.Stop()
-	flushDeadline := time.Now().Add(2 * time.Minute)
+	flushDeadline := time.Now().Add(e.streamTimeout)
 	for {
 		select {
 		case packet, ok := <-ch:
@@ -185,7 +286,7 @@ func (e *Engine) workerLoop(id int) {
 			assembler.Assemble(packet)
 		case <-gcTicker.C:
 			assembler.FlushOlderThan(flushDeadline, e)
-			flushDeadline = time.Now().Add(2 * time.Minute)
+			flushDeadline = time.Now().Add(e.streamTimeout)
 		}
 	}
 }
@@ -318,24 +419,40 @@ func NewAssembler(pool *TCPStreamPool) *Assembler {
 	}
 }
 
-// Assemble 组装数据包到流中（双方向归一化）
+// Assemble 组装数据包到流中（双方向归一化），支持 IPv4 与 IPv6
 func (a *Assembler) Assemble(packet gopacket.Packet) {
-	ipLayer := packet.Layer(layers.LayerTypeIPv4)
 	tcpLayer := packet.Layer(layers.LayerTypeTCP)
-	if ipLayer == nil || tcpLayer == nil {
+	if tcpLayer == nil {
 		return
 	}
-	ip, ok1 := ipLayer.(*layers.IPv4)
-	tcp, ok2 := tcpLayer.(*layers.TCP)
-	if !ok1 || !ok2 {
+	tcp, ok := tcpLayer.(*layers.TCP)
+	if !ok {
+		return
+	}
+
+	// 提取 IP 层（IPv4 或 IPv6）
+	var srcIP, dstIP net.IP
+	if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
+		ip, ok := ip4Layer.(*layers.IPv4)
+		if !ok {
+			return
+		}
+		srcIP, dstIP = ip.SrcIP, ip.DstIP
+	} else if ip6Layer := packet.Layer(layers.LayerTypeIPv6); ip6Layer != nil {
+		ip, ok := ip6Layer.(*layers.IPv6)
+		if !ok {
+			return
+		}
+		srcIP, dstIP = ip.SrcIP, ip.DstIP
+	} else {
 		return
 	}
 
 	isFIN := tcp.FIN
 	isRST := tcp.RST
 
-	srcIPStr := ip.SrcIP.String()
-	dstIPStr := ip.DstIP.String()
+	srcIPStr := srcIP.String()
+	dstIPStr := dstIP.String()
 	srcPort := uint16(tcp.SrcPort)
 	dstPort := uint16(tcp.DstPort)
 
@@ -344,11 +461,11 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	var clientIP net.IP
 	var clientPort, serverPort uint16
 	if isClientToServer {
-		clientIP = ip.SrcIP
+		clientIP = srcIP
 		clientPort = srcPort
 		serverPort = dstPort
 	} else {
-		clientIP = ip.DstIP
+		clientIP = dstIP
 		clientPort = dstPort
 		serverPort = srcPort
 	}
@@ -508,10 +625,10 @@ func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 		if len(s.sseBuf) >= 4096 {
 			s.flushSSEEvents()
 		}
-		// 限制 SSE 缓冲区大小
-		if len(s.sseBuf) > 4*1024*1024 {
-			slog.Warn("capture: SSE events truncated (exceeds 4MB limit)", "id", s.sseReqID, "total_size", len(s.sseBuf))
-			s.sseBuf = s.sseBuf[len(s.sseBuf)-4*1024*1024:]
+		// 限制 SSE 缓冲区大小（与响应体截断阈值一致）
+		if int64(len(s.sseBuf)) > s.engine.maxResBytes {
+			slog.Warn("capture: SSE events truncated (exceeds maxResBytes limit)", "id", s.sseReqID, "total_size", len(s.sseBuf))
+			s.sseBuf = s.sseBuf[int64(len(s.sseBuf))-s.engine.maxResBytes:]
 		}
 		return
 	}
@@ -548,10 +665,10 @@ func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 	s.tryExtractHTTP()
 
 	if len(s.clientBuf) > streamBufMax {
-		s.clientBuf = truncateBuffer(s.clientBuf, 1024*1024)
+		s.clientBuf = truncateBuffer(s.clientBuf, int(s.engine.maxResBytes))
 	}
 	if len(s.serverBuf) > streamBufMax {
-		s.serverBuf = truncateBuffer(s.serverBuf, 1024*1024)
+		s.serverBuf = truncateBuffer(s.serverBuf, int(s.engine.maxResBytes))
 	}
 }
 

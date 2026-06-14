@@ -57,35 +57,57 @@ func TestSetGetMode(t *testing.T) {
 // ========================================
 
 func TestMatchRuleExact(t *testing.T) {
-	if !matchRule("example.com", "example.com", "/") {
+	if !matchRule(models.InterceptRule{Pattern: "example.com"}, "GET", "example.com", "/") {
 		t.Error("expected exact host match")
 	}
-	if matchRule("example.com", "other.com", "/") {
+	if matchRule(models.InterceptRule{Pattern: "example.com"}, "GET", "other.com", "/") {
 		t.Error("expected no match for different host")
 	}
 }
 
 func TestMatchRuleWildcard(t *testing.T) {
-	if !matchRule("*.example.com", "sub.example.com", "/api") {
+	if !matchRule(models.InterceptRule{Pattern: "*.example.com"}, "GET", "sub.example.com", "/api") {
 		t.Error("expected wildcard match *.example.com → sub.example.com")
 	}
-	if matchRule("*.example.com", "other.com", "/api") {
+	if matchRule(models.InterceptRule{Pattern: "*.example.com"}, "GET", "other.com", "/api") {
 		t.Error("expected no match for wildcard on different host")
 	}
 }
 
 func TestMatchRuleHostPathPrefix(t *testing.T) {
-	if !matchRule("example.com/api", "example.com", "/api/v1/users") {
+	if !matchRule(models.InterceptRule{Pattern: "example.com/api"}, "GET", "example.com", "/api/v1/users") {
 		t.Error("expected host/path prefix match")
 	}
-	if matchRule("example.com/api", "example.com", "/other") {
+	if matchRule(models.InterceptRule{Pattern: "example.com/api"}, "GET", "example.com", "/other") {
 		t.Error("expected no match for different path")
 	}
 }
 
 func TestMatchRuleCaseInsensitive(t *testing.T) {
-	if !matchRule("EXAMPLE.COM", "example.com", "/") {
+	if !matchRule(models.InterceptRule{Pattern: "EXAMPLE.COM"}, "GET", "example.com", "/") {
 		t.Error("expected case-insensitive host match")
+	}
+}
+
+func TestMatchRuleMethod(t *testing.T) {
+	// 规则限定 GET → GET 命中、POST 不命中
+	if !matchRule(models.InterceptRule{Pattern: "example.com", Method: "GET"}, "GET", "example.com", "/") {
+		t.Error("expected method GET to match")
+	}
+	if matchRule(models.InterceptRule{Pattern: "example.com", Method: "GET"}, "POST", "example.com", "/") {
+		t.Error("expected method POST to NOT match GET-only rule")
+	}
+	// 方法大小写不敏感
+	if !matchRule(models.InterceptRule{Pattern: "example.com", Method: "get"}, "GET", "example.com", "/") {
+		t.Error("expected case-insensitive method match")
+	}
+	// 多方法（逗号分隔）
+	if !matchRule(models.InterceptRule{Pattern: "example.com", Method: "GET,POST"}, "POST", "example.com", "/") {
+		t.Error("expected POST to match GET,POST rule")
+	}
+	// 空 method → 所有方法都命中
+	if !matchRule(models.InterceptRule{Pattern: "example.com", Method: ""}, "DELETE", "example.com", "/") {
+		t.Error("expected empty method to match any")
 	}
 }
 

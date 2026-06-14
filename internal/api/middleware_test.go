@@ -66,7 +66,8 @@ func TestIsAllowedOrigin(t *testing.T) {
 		{"http://[::1]", true},
 		{"http://[::1]:8080", true},
 		{"http://evil.com", false},
-		{"https://localhost", false},
+		{"https://localhost", true}, // 本地开发常用 https，应放行
+		{"https://localhost:8443", true},
 		{"http://192.168.1.1", false},
 		{"http://localhost.evil.com", false},
 	}

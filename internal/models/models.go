@@ -90,7 +90,8 @@ type APINoteRequest struct {
 type InterceptRule struct {
 	ID        int64     `json:"id"`
 	Pattern   string    `json:"pattern"`
-	Action    string    `json:"action"` // "allow" | "block"
+	Method    string    `json:"method,omitempty"` // 可选：限定 HTTP 方法（空=所有方法）
+	Action    string    `json:"action"`           // "allow" | "block"
 	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"created_at"`
 }

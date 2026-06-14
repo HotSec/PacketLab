@@ -82,7 +82,7 @@ func TestListInterceptLogsAll(t *testing.T) {
 		}
 	}
 
-	logs, total, err := st.ListInterceptLogs("", "", 50, 0)
+	logs, total, err := st.ListInterceptLogs("", "", "", "", 50, 0)
 	if err != nil {
 		t.Fatalf("ListInterceptLogs: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestListInterceptLogsFilterByAction(t *testing.T) {
 		}
 	}
 
-	logs, total, err := st.ListInterceptLogs("allow", "", 50, 0)
+	logs, total, err := st.ListInterceptLogs("allow", "", "", "", 50, 0)
 	if err != nil {
 		t.Fatalf("ListInterceptLogs allow: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestListInterceptLogsFilterByDrop(t *testing.T) {
 		}
 	}
 
-	logs, total, err := st.ListInterceptLogs("drop", "", 10, 0)
+	logs, total, err := st.ListInterceptLogs("drop", "", "", "", 10, 0)
 	if err != nil {
 		t.Fatalf("ListInterceptLogs drop: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestListInterceptLogsPagination(t *testing.T) {
 	}
 
 	// limit=2, should get 2 results
-	logs, total, err := st.ListInterceptLogs("", "", 2, 0)
+	logs, total, err := st.ListInterceptLogs("", "", "", "", 2, 0)
 	if err != nil {
 		t.Fatalf("ListInterceptLogs page1: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestListInterceptLogsPagination(t *testing.T) {
 	}
 
 	// offset=2, should get next 2
-	logs2, total2, err := st.ListInterceptLogs("", "", 2, 2)
+	logs2, total2, err := st.ListInterceptLogs("", "", "", "", 2, 2)
 	if err != nil {
 		t.Fatalf("ListInterceptLogs page2: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestListInterceptLogsPagination(t *testing.T) {
 func TestListInterceptLogsEmpty(t *testing.T) {
 	st := newTestStore(t)
 
-	logs, total, err := st.ListInterceptLogs("", "", 50, 0)
+	logs, total, err := st.ListInterceptLogs("", "", "", "", 50, 0)
 	if err != nil {
 		t.Fatalf("ListInterceptLogs: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestListInterceptLogsModifyAction(t *testing.T) {
 		t.Fatalf("SaveInterceptLog: %v", err)
 	}
 
-	logs, total, err := st.ListInterceptLogs("modify", "", 10, 0)
+	logs, total, err := st.ListInterceptLogs("modify", "", "", "", 10, 0)
 	if err != nil {
 		t.Fatalf("ListInterceptLogs modify: %v", err)
 	}

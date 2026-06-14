@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,9 +62,22 @@ func (s *Store) initReadConn(dbPath string) {
 		slog.Warn("failed to open read-only DB, reads will use write conn", "error", err)
 		return
 	}
-	dbRO.SetMaxOpenConns(2)
+	dbRO.SetMaxOpenConns(4)
 	dbRO.SetConnMaxLifetime(0)
+	// 只读连接也设置 busy_timeout，避免 WAL checkpoint 时读阻塞报错
+	if _, err := dbRO.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		slog.Warn("read-only busy_timeout failed", "error", err)
+	}
 	s.dbRO = dbRO
+}
+
+// readDB 返回用于读操作的连接：优先 dbRO（WAL 并发读），失败回退到主连接。
+// 读操作不需要 s.mu 锁：SQLite WAL 模式天然支持一写多读并发。
+func (s *Store) readDB() *sql.DB {
+	if s.dbRO != nil {
+		return s.dbRO
+	}
+	return s.db
 }
 
 // migrate 建表（版本化迁移）
@@ -140,6 +154,9 @@ func (s *Store) migrate() error {
 		{16, `ALTER TABLE requests ADD COLUMN process_name TEXT DEFAULT ''`},
 		{17, `ALTER TABLE requests ADD COLUMN is_sse INTEGER NOT NULL DEFAULT 0`},
 		{18, `ALTER TABLE requests ADD COLUMN sse_events TEXT NOT NULL DEFAULT ''`},
+		{19, `ALTER TABLE intercept_rules ADD COLUMN method TEXT NOT NULL DEFAULT ''`},
+		{20, `ALTER TABLE requests ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`},
+		{21, `CREATE INDEX IF NOT EXISTS idx_requests_starred ON requests(starred)`},
 	}
 
 	for _, m := range migrations {
@@ -251,9 +268,6 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 
 // List 获取请求列表（分页 + 过滤）
 func (s *Store) List(method, search, host string, errorOnly bool, limit, offset int) ([]models.RequestListItem, int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	where := []string{"1=1"}
 	args := []interface{}{}
 
@@ -278,7 +292,7 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 
 	var total int
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM requests WHERE %s", whereClause)
-	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
+	if err := s.readDB().QueryRow(countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count: %w", err)
 	}
 
@@ -287,7 +301,7 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 		 FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
 	args = append(args, limit, offset)
 
-	rows, err := s.db.Query(querySQL, args...)
+	rows, err := s.readDB().Query(querySQL, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("query: %w", err)
 	}
@@ -311,14 +325,11 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 
 // Get 获取单条请求完整详情
 func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	var req models.CapturedRequest
 	var reqHeadersJSON, resHeadersJSON, capturedAt string
 	var isSSE int
 
-	err := s.db.QueryRow(
+	err := s.readDB().QueryRow(
 		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events
 		 FROM requests WHERE id = ?`, id,
 	).Scan(&req.ID, &req.Method, &req.URL, &req.Host, &req.Path, &req.Protocol, &req.IsHTTPS,
@@ -350,9 +361,6 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 
 // ListFull 获取请求完整详情列表（分页 + 过滤，消除 N+1 查询）
 func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, offset int) ([]models.CapturedRequest, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	where := []string{"1=1"}
 	args := []interface{}{}
 
@@ -380,7 +388,7 @@ func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, off
 		 FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
 	args = append(args, limit, offset)
 
-	rows, err := s.db.Query(querySQL, args...)
+	rows, err := s.readDB().Query(querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query full: %w", err)
 	}
@@ -418,6 +426,53 @@ func (s *Store) Delete(id int64) error {
 	return err
 }
 
+// SetStarred 标记/取消标记请求为收藏（starred=1 收藏，0 取消）
+func (s *Store) SetStarred(id int64, starred bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := 0
+	if starred {
+		v = 1
+	}
+	res, err := s.db.Exec("UPDATE requests SET starred = ? WHERE id = ?", v, id)
+	if err != nil {
+		return fmt.Errorf("set starred: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("request not found: %d", id)
+	}
+	return nil
+}
+
+// ListStarred 获取所有标星收藏的请求（按 id 倒序）
+func (s *Store) ListStarred(limit int) ([]models.RequestListItem, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	querySQL := `SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name
+			 FROM requests WHERE starred = 1 ORDER BY id DESC LIMIT ?`
+	rows, err := s.readDB().Query(querySQL, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query starred: %w", err)
+	}
+	defer rows.Close()
+
+	var items []models.RequestListItem
+	for rows.Next() {
+		var item models.RequestListItem
+		var capturedAt string
+		if err := rows.Scan(&item.ID, &item.Method, &item.URL, &item.Host,
+			&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS,
+			&item.CaptureMode, &item.ProcessPID, &item.ProcessName); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		item.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
+		items = append(items, item)
+	}
+	return items, nil
+}
+
 // UpdateResBody 更新响应体和 SSE 事件（流式捕获 SSE 时增量更新）
 func (s *Store) UpdateResBody(id int64, resBody, sseEvents string, sizeBytes int64) error {
 	s.mu.Lock()
@@ -437,16 +492,47 @@ func (s *Store) Clear() error {
 	return err
 }
 
+// Cleanup 清理超过保留期的请求与拦截日志，返回各自删除条数。
+// retentionDays <= 0 时从 settings 表读取 'retention_days'，仍为 0 则跳过。
+func (s *Store) Cleanup(retentionDays int) (deletedRequests, deletedLogs int64, appliedDays int, err error) {
+	if retentionDays <= 0 {
+		if v, gerr := s.GetSetting("retention_days"); gerr == nil {
+			if d, _ := strconv.Atoi(v); d > 0 {
+				retentionDays = d
+			}
+		}
+	}
+	if retentionDays <= 0 {
+		return 0, 0, 0, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
+
+	res, err := s.db.Exec("DELETE FROM requests WHERE captured_at < ?", cutoff)
+	if err != nil {
+		return 0, 0, retentionDays, fmt.Errorf("cleanup requests: %w", err)
+	}
+	deletedRequests, _ = res.RowsAffected()
+
+	res, err = s.db.Exec("DELETE FROM intercept_logs WHERE created_at < ?", cutoff)
+	if err != nil {
+		return deletedRequests, 0, retentionDays, fmt.Errorf("cleanup logs: %w", err)
+	}
+	deletedLogs, _ = res.RowsAffected()
+
+	return deletedRequests, deletedLogs, retentionDays, nil
+}
+
 // Stats 统计信息
 func (s *Store) Stats() (total int, errors int, totalSize int64, err error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if err := s.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM requests").Scan(&total, &totalSize); err != nil {
+	if err := s.readDB().QueryRow("SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM requests").Scan(&total, &totalSize); err != nil {
 		return 0, 0, 0, fmt.Errorf("stats count: %w", err)
 	}
 	// 错误计数失败不影响主统计返回
-	if scanErr := s.db.QueryRow("SELECT COUNT(*) FROM requests WHERE status_code >= 400").Scan(&errors); scanErr != nil {
+	if scanErr := s.readDB().QueryRow("SELECT COUNT(*) FROM requests WHERE status_code >= 400").Scan(&errors); scanErr != nil {
 		errors = 0
 	}
 	return
@@ -482,10 +568,7 @@ func (s *Store) DeleteAPINote(id int64) error {
 
 // GetAPINotes 获取所有 API 备注
 func (s *Store) GetAPINotes() ([]models.APINote, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.db.Query("SELECT id, host, path, method, note, created_at, updated_at FROM api_notes ORDER BY host, path")
+	rows, err := s.readDB().Query("SELECT id, host, path, method, note, created_at, updated_at FROM api_notes ORDER BY host, path")
 	if err != nil {
 		return nil, fmt.Errorf("query notes: %w", err)
 	}
@@ -527,15 +610,12 @@ type methodInfo struct {
 
 // GetAPIMap 按 host 获取 API 地图树
 func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	// 去端口：httpbin.org:443 → httpbin.org，解决 host 精确匹配不到非 CONNECT 请求的问题
 	hostNoPort := stripPort(host)
 
 	// 查询该 host 下所有不同路径+方法的组合，及出现次数和状态码分布
 	// 匹配: 精确host / 去端口host / 去端口host:任意端口（如 httpbin.org → 匹配 httpbin.org:443 等）
-	rows, err := s.db.Query(
+	rows, err := s.readDB().Query(
 		`SELECT path, method, COUNT(*) as cnt, status_code
 		 FROM requests WHERE (host = ? OR host = ? OR host LIKE ? || ':%') AND path != ''
 		 GROUP BY path, method, status_code
@@ -567,7 +647,7 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 
 	// 加载备注 — 同样匹配 host / hostNoPort / hostNoPort:*
 	notesMap := make(map[string]models.APINote)
-	noteRows, err := s.db.Query("SELECT path, method, note, id FROM api_notes WHERE host = ? OR host = ? OR host LIKE ? || ':%'", host, hostNoPort, hostNoPort)
+	noteRows, err := s.readDB().Query("SELECT path, method, note, id FROM api_notes WHERE host = ? OR host = ? OR host LIKE ? || ':%'", host, hostNoPort, hostNoPort)
 	if err == nil {
 		defer noteRows.Close()
 		for noteRows.Next() {
@@ -662,9 +742,6 @@ func aggregateNodeStats(node *APIMapNode) {
 
 // ListHosts 获取捕获过的 host 列表（支持搜索 + 分页）
 func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -677,7 +754,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	}
 
 	// 先查所有 host 去端口后去重，得到总数（distinctTotal）
-	totalRows, err := s.db.Query(fmt.Sprintf("SELECT host FROM requests %s", where), args...)
+	totalRows, err := s.readDB().Query(fmt.Sprintf("SELECT host FROM requests %s", where), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -694,7 +771,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 
 	// 分页 — 按请求数降序
 	args = append(args, limit, offset)
-	rows, err := s.db.Query(
+	rows, err := s.readDB().Query(
 		fmt.Sprintf("SELECT host, COUNT(*) as cnt FROM requests %s GROUP BY host ORDER BY cnt DESC LIMIT ? OFFSET ?", where),
 		args...,
 	)
@@ -843,11 +920,9 @@ func (s *Store) SaveInterceptLog(log *models.InterceptLog) error {
 	return nil
 }
 
-// ListInterceptLogs 查询拦截日志（支持按 action 过滤、分页）
-func (s *Store) ListInterceptLogs(action, since string, limit, offset int) ([]models.InterceptLog, int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+// ListInterceptLogs 查询拦截日志（支持按 action/host/pattern 过滤、分页）
+// host/pattern 支持模糊匹配（LIKE %value%），均为空则不过滤。
+func (s *Store) ListInterceptLogs(action, since, host, pattern string, limit, offset int) ([]models.InterceptLog, int, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -866,12 +941,20 @@ func (s *Store) ListInterceptLogs(action, since string, limit, offset int) ([]mo
 		where = append(where, "created_at >= ?")
 		args = append(args, since)
 	}
+	if host != "" {
+		where = append(where, "request_host LIKE ?")
+		args = append(args, "%"+host+"%")
+	}
+	if pattern != "" {
+		where = append(where, "rule_pattern LIKE ?")
+		args = append(args, "%"+pattern+"%")
+	}
 
 	whereClause := strings.Join(where, " AND ")
 
 	var total int
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM intercept_logs WHERE %s", whereClause)
-	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
+	if err := s.readDB().QueryRow(countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count intercept logs: %w", err)
 	}
 
@@ -880,7 +963,7 @@ func (s *Store) ListInterceptLogs(action, since string, limit, offset int) ([]mo
 		 FROM intercept_logs WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
 	args = append(args, limit, offset)
 
-	rows, err := s.db.Query(querySQL, args...)
+	rows, err := s.readDB().Query(querySQL, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("query intercept logs: %w", err)
 	}
@@ -947,10 +1030,8 @@ func isDuplicateColumnError(err error) bool {
 // ========================================
 
 func (s *Store) GetSetting(key string) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	var val string
-	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
+	err := s.readDB().QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -972,8 +1053,8 @@ func (s *Store) SaveRule(rule *models.InterceptRule) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result, err := s.db.Exec(
-		"INSERT INTO intercept_rules (pattern, action, enabled) VALUES (?, ?, ?)",
-		rule.Pattern, rule.Action, boolToInt(rule.Enabled),
+		"INSERT INTO intercept_rules (pattern, method, action, enabled) VALUES (?, ?, ?, ?)",
+		rule.Pattern, rule.Method, rule.Action, boolToInt(rule.Enabled),
 	)
 	if err != nil {
 		return 0, err
@@ -982,9 +1063,7 @@ func (s *Store) SaveRule(rule *models.InterceptRule) (int64, error) {
 }
 
 func (s *Store) ListRules() ([]models.InterceptRule, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rows, err := s.db.Query("SELECT id, pattern, action, enabled, created_at FROM intercept_rules ORDER BY id")
+	rows, err := s.readDB().Query("SELECT id, pattern, method, action, enabled, created_at FROM intercept_rules ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -993,7 +1072,7 @@ func (s *Store) ListRules() ([]models.InterceptRule, error) {
 	for rows.Next() {
 		var r models.InterceptRule
 		var ca string
-		if err := rows.Scan(&r.ID, &r.Pattern, &r.Action, &r.Enabled, &ca); err != nil {
+		if err := rows.Scan(&r.ID, &r.Pattern, &r.Method, &r.Action, &r.Enabled, &ca); err != nil {
 			continue
 		}
 		r.CreatedAt, _ = time.Parse(time.RFC3339, ca)

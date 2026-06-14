@@ -65,23 +65,14 @@ func isAllowedOrigin(origin string) bool {
 	if err != nil {
 		return false
 	}
-	if u.Scheme != "http" {
+	// 仅允许 http/https 本地源（localhost / 回环地址任意端口）
+	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}
 	host := u.Hostname()
-	port := u.Port()
-
 	switch host {
-	case "localhost", "127.0.0.1", "::1":
+	case "localhost", "127.0.0.1", "::1", "localhost.localdomain":
 		return true
-	case "localhost.localdomain":
-		return true
-	}
-	if host == "" {
-		return false
-	}
-	if port != "" {
-		return false
 	}
 	return false
 }

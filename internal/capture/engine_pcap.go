@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
 )
+
+// bpfCache 缓存已编译的 BPF 指令，避免重复启停抓包时重新编译同一表达式。
+// key: "iface|linkType|snaplen|expr"，value: 编译后的指令（不可变，可安全并发复用）。
+var bpfCache sync.Map
 
 func (e *Engine) Start() error {
 	e.mu.Lock()
@@ -22,17 +27,55 @@ func (e *Engine) Start() error {
 
 	e.stopCh = make(chan struct{})
 
-	var err error
-	h, err := pcap.OpenLive(e.iface, 65536, true, pcap.BlockForever)
+	// 使用 InactiveHandle 配置内核缓冲区后再激活，避免高吞吐丢包
+	inactive, err := pcap.NewInactiveHandle(e.iface)
 	if err != nil {
-		return fmt.Errorf("pcap.OpenLive(%s): %w", e.iface, err)
+		return fmt.Errorf("pcap.NewInactiveHandle(%s): %w", e.iface, err)
+	}
+	defer inactive.CleanUp()
+	// 内核缓冲区调大到 32MB（默认仅 ~2MB）
+	if err := inactive.SetBufferSize(32 * 1024 * 1024); err != nil {
+		slog.Warn("capture: SetBufferSize 失败（忽略，使用默认值）", "error", err)
+	}
+	if err := inactive.SetSnapLen(16384); err != nil {
+		slog.Warn("capture: SetSnapLen 失败（忽略，使用默认值）", "error", err)
+	}
+	if err := inactive.SetPromisc(true); err != nil {
+		slog.Warn("capture: SetPromisc 失败（忽略，使用默认值）", "error", err)
+	}
+	if err := inactive.SetTimeout(pcap.BlockForever); err != nil {
+		slog.Warn("capture: SetTimeout 失败（忽略，使用默认值）", "error", err)
+	}
+	h, err := inactive.Activate()
+	if err != nil {
+		return fmt.Errorf("pcap.Activate(%s): %w", e.iface, err)
 	}
 	e.handle = h
 
-	if err := e.handle.SetBPFFilter(e.bpf); err != nil {
-		e.handle.Close()
-		e.handle = nil
-		return fmt.Errorf("SetBPFFilter(%s): %w", e.bpf, err)
+	// 应用 BPF 过滤：优先复用缓存指令，未命中则编译并缓存
+	cacheKey := fmt.Sprintf("%s|%d|%d|%s", e.iface, h.LinkType(), 16384, e.bpf)
+	if cached, ok := bpfCache.Load(cacheKey); ok {
+		if err := h.SetBPFInstructionFilter(cached.([]pcap.BPFInstruction)); err != nil {
+			slog.Warn("capture: 缓存 BPF 应用失败，回退到重新编译", "error", err)
+			if err := h.SetBPFFilter(e.bpf); err != nil {
+				e.handle.Close()
+				e.handle = nil
+				return fmt.Errorf("SetBPFFilter(%s): %w", e.bpf, err)
+			}
+		}
+	} else {
+		insns, ierr := h.CompileBPFFilter(e.bpf)
+		if ierr != nil {
+			e.handle.Close()
+			e.handle = nil
+			return fmt.Errorf("CompileBPFFilter(%s): %w", e.bpf, ierr)
+		}
+		if err := h.SetBPFInstructionFilter(insns); err != nil {
+			e.handle.Close()
+			e.handle = nil
+			return fmt.Errorf("SetBPFInstructionFilter(%s): %w", e.bpf, err)
+		}
+		bpfCache.Store(cacheKey, insns)
 	}
 
 	slog.Info("capture: 开始抓包", "iface", e.iface, "bpf", e.bpf)

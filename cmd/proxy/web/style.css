@@ -426,3 +426,9 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 /* ===== Copy Format Buttons ===== */
 .copy-format-btns{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
 .copy-format-btns .mini-btn{gap:3px;display:inline-flex;align-items:center}
+
+/* ===== Star Button ===== */
+.star-btn{cursor:pointer;font-size:14px;color:var(--text-tertiary);flex-shrink:0;padding:0 2px;transition:color .15s,transform .15s;user-select:none;line-height:1}
+.star-btn:hover{color:var(--yellow);transform:scale(1.2)}
+.star-btn.starred{color:var(--yellow)}
+#starredFilterBtn.active{color:var(--yellow)}

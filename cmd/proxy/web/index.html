@@ -31,6 +31,9 @@
 <button class="icon-btn" data-i18n-title="export_har" data-tooltip="导出 HAR" title="导出 HAR" onclick="exportHAR()">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
 </button>
+<button class="icon-btn" onclick="toggleStarredOnly()" id="starredFilterBtn" data-tooltip="仅显示收藏" title="仅显示收藏">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+</button>
 <button class="icon-btn" onclick="toggleInterceptMode()" id="interceptModeBtn" data-i18n-title="intercept_mode" data-tooltip="拦截模式: 自动" title="拦截模式: 自动">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
 </button>
@@ -79,7 +82,9 @@
 <div class="kv-row"><span class="kv-key">Method</span><span class="kv-value" id="req-method"></span></div>
 <div class="kv-row"><span class="kv-key">Host</span><span class="kv-value" id="req-host"></span></div>
 <div class="kv-row"><span class="kv-key">Protocol</span><span class="kv-value" id="req-protocol"></span></div>
-<button class="mini-btn" onclick="copyAsCurl()" style="margin-top:8px" data-tooltip="复制为 curl 命令" title="复制为 curl 命令">📋 copy as curl</button></div>
+<button class="mini-btn" onclick="copyAsCurl()" style="margin-top:8px" data-tooltip="复制为 curl 命令" title="复制为 curl 命令">📋 curl</button>
+<button class="mini-btn" onclick="copyAsFetch()" style="margin-top:8px" data-tooltip="复制为 fetch 代码" title="复制为 fetch 代码">⬇ fetch</button>
+<button class="mini-btn" onclick="copyAsPython()" style="margin-top:8px" data-tooltip="复制为 python-requests 代码" title="复制为 python-requests 代码">🐍 python</button></div>
 <div class="detail-section"><div class="section-label" data-i18n="req_headers">请求头</div>
 <div id="req-headers" class="code-block"><div class="code-block-header"><span class="code-block-lang">Headers</span><button class="mini-btn" onclick="copyToClipboard('req-headers')" data-i18n="copy">复制</button></div><pre id="req-headers-content"></pre></div></div>
 <div class="detail-section"><div class="section-label" data-i18n="req_body">请求体</div>
@@ -152,6 +157,7 @@
 <div id="rulesPanelContent">
 <div class="rule-add-row">
 <input type="text" id="newRulePattern" placeholder="*.example.com or host/path" style="flex:1">
+<select id="newRuleMethod" style="width:90px"><option value="">所有方法</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option></select>
 <select id="newRuleAction" style="width:80px"><option value="allow">Allow</option><option value="block">Block</option></select>
 <button class="mini-btn primary" onclick="addRule()">添加</button>
 </div>
@@ -159,6 +165,8 @@
 <div id="logsPanelContent" style="display:none">
 <div class="logs-filter-row">
 <select id="logActionFilter" onchange="loadInterceptLogs()"><option value="">全部操作</option><option value="allow">Allow</option><option value="drop">Drop</option><option value="modify">Modify</option></select>
+<input type="text" id="logHostFilter" placeholder="按 host 过滤..." oninput="debounceLogFilter()" style="flex:1;min-width:80px;padding:4px 6px;border:1px solid var(--border-default);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-primary);font-size:11px">
+<input type="text" id="logPatternFilter" placeholder="按规则 pattern 过滤..." oninput="debounceLogFilter()" style="flex:1;min-width:80px;padding:4px 6px;border:1px solid var(--border-default);border-radius:var(--radius-sm);background:var(--bg-elevated);color:var(--text-primary);font-size:11px">
 <select id="logLimitSelect" onchange="loadInterceptLogs()"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option></select>
 </div>
 <div class="log-list" id="logList"></div>

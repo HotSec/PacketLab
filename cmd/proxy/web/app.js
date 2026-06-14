@@ -65,9 +65,17 @@ let requestDetailCache = {};
 let requestElCache = new Map(); // id → { el, sizeSpan, durSpan } DOM 缓存
 let selectedRequestId = null;
 let activeTab = 'request';
-let currentFilter = 'all', currentHost = '', errorFilterOnly = false, isRecording = true;
+let currentFilter = 'all', currentHost = '', errorFilterOnly = false, starredOnly = false, isRecording = true;
 let ws = null, wsReconnectTimer = null;
 let requestVersion = 0;
+
+// ── 虚拟滚动 ──────────────────────────────────
+const VIRTUAL_ITEM_HEIGHT = 50;   // 每个列表项高度（与 CSS padding 对齐）
+const VIRTUAL_OVERSCAN = 8;        // 视口外额外渲染的项数（减少滚动时空白）
+const VIRTUAL_THRESHOLD = 200;     // 超过此数量启用虚拟滚动
+let virtualFiltered = [];          // 当前过滤后的列表（虚拟滚动用）
+let virtualScrollTop = 0;          // 当前滚动位置
+let virtualRafPending = false;     // rAF 节流标记
 
 // ── API Client ───────────────────────────────
 const ERROR_MESSAGES = {
@@ -142,6 +150,10 @@ async function loadRequests() {
     const r = await apiGet('/api/requests?' + p.toString());
     requestVersion++;
     requests = (r.data || []).map(normalizeReq);
+    // 过滤/重新加载后回到顶部，避免虚拟滚动残留位置错位
+    virtualScrollTop = 0;
+    const listEl = document.getElementById('requestList');
+    if (listEl) listEl.scrollTop = 0;
     renderRequestList();
   } catch (e) { console.error('loadRequests failed:', e); }
 }
@@ -190,6 +202,11 @@ function updateRequestInList(data) {
   if (data.size_bytes !== undefined) { r.size_bytes = data.size_bytes; r.size = formatSize(data.size_bytes); }
   if (data.duration_ms !== undefined) { r.duration_ms = data.duration_ms; r.time = `${data.duration_ms}ms`; }
   if (data.status_code !== undefined) { r.status = data.status_code; r.status_code = data.status_code; }
+  // SSE 流式内容增量更新：同步到缓存对象
+  if (data.is_sse !== undefined) { r.is_sse = data.is_sse; }
+  let bodyChanged = false;
+  if (data.res_body !== undefined) { r.resBody = data.res_body; bodyChanged = true; }
+  if (data.sse_events !== undefined) { r.sseEvents = data.sse_events; bodyChanged = true; }
   // 优先从 DOM 缓存 Map 获取，O(1) 查找
   const cached = requestElCache.get(r.id);
   if (cached) {
@@ -206,6 +223,15 @@ function updateRequestInList(data) {
       if (durSpan) durSpan.textContent = r.time;
     }
   }
+  // 若当前正查看该请求且 body 有更新，实时刷新响应体（SSE 场景）
+  if (bodyChanged && String(selectedRequestId) === String(r.id)) {
+    const bodyEl = document.getElementById('res-body-content');
+    if (bodyEl) bodyEl.textContent = formatJSONBody('res', r.resBody) || t('empty');
+    const sizeEl = document.getElementById('res-size');
+    if (sizeEl && r.size) sizeEl.textContent = r.size;
+    const timeEl = document.getElementById('res-time');
+    if (timeEl && r.time) timeEl.textContent = r.time;
+  }
 }
 
 // ── WebSocket ────────────────────────────────
@@ -218,7 +244,15 @@ function connectWebSocket() {
     ws.onmessage = (e) => {
       try {
         const m = JSON.parse(e.data);
-        if (m.type === 'new_request' && m.data) { requestVersion++; requests.unshift(normalizeReq(m.data)); renderRequestList(); }
+        if (m.type === 'new_request' && m.data) {
+          requestVersion++; requests.unshift(normalizeReq(m.data));
+          // 虚拟滚动模式：保持视口稳定，新条目加到顶部时同步下移滚动位置
+          if (virtualFiltered.length > VIRTUAL_THRESHOLD) {
+            const list = document.getElementById('requestList');
+            virtualScrollTop = list.scrollTop += VIRTUAL_ITEM_HEIGHT;
+          }
+          renderRequestList();
+        }
         if (m.type === 'intercept_request' && m.data) { addPendingToList(m.data); }
         if (m.type === 'update_request' && m.data) { updateRequestInList(m.data); }
       } catch { /* ignore parse errors */ }
@@ -268,18 +302,30 @@ function animateContentIn(container, delay) {
 
 function renderRequestList() {
   const list = document.getElementById('requestList');
-  let filtered = requests.filter(r => {
+  virtualFiltered = requests.filter(r => {
     if (currentFilter !== 'all' && r.method !== currentFilter) return false;
     if (errorFilterOnly && r.status < 400) return false;
+    if (starredOnly && !r.starred) return false;
     const q = document.getElementById('searchInput').value.toLowerCase();
     if (q) { return r.url.toLowerCase().includes(q) || r.method.toLowerCase().includes(q) || String(r.status).includes(q); }
     return true;
   });
+  const filtered = virtualFiltered;
 
   if (filtered.length === 0) {
     list.innerHTML = `<div class="request-list-empty">
       <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".4"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
       <span style="font-size:13px">${t('no_requests')}</span></div>`;
+    // innerHTML 替换后旧 DOM 缓存失效，清空让 updateRequestInList 重新建立
+    requestElCache.clear();
+    document.getElementById('requestCount').textContent = `${requests.length} ${t('recordings')}`;
+    loadStats();
+    return;
+  }
+
+  // 超过阈值启用虚拟滚动，避免大量 DOM 卡顿
+  if (filtered.length > VIRTUAL_THRESHOLD) {
+    renderVirtualList();
   } else {
     list.innerHTML = filtered.map((r, i) => {
       const sc = r.is_pending ? '' : `status-${Math.floor(r.status / 100)}xx`;
@@ -303,6 +349,59 @@ function renderRequestList() {
   }
   document.getElementById('requestCount').textContent = `${requests.length} ${t('recordings')}`;
   loadStats();
+}
+
+// 渲染单个请求项的 HTML（虚拟滚动与全量渲染共用）
+function renderItemHTML(r, i) {
+  const sc = r.is_pending ? '' : `status-${Math.floor(r.status / 100)}xx`;
+  const pcls = r.is_pending ? ' pending' : '';
+  const pendingExtra = r.is_pending ? '<span class="pending-tag">PENDING</span>' : '';
+  const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
+  const starIcon = r.starred
+    ? '<span class="star-btn starred" onclick="event.stopPropagation();toggleStar(' + r.id + ',true)" title="取消收藏">★</span>'
+    : '<span class="star-btn" onclick="event.stopPropagation();toggleStar(' + r.id + ',false)" title="收藏">☆</span>';
+  return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
+    <span class="method-badge method-${r.method}">${r.method}</span>
+    <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
+    <div class="request-info">
+      <span class="request-url">${esc(r.url)}</span>
+      <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span></div>
+    </div>
+    ${starIcon}
+    ${pendingExtra}
+    <span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>`;
+}
+
+// 虚拟滚动：用顶部 spacer 撑起总高度，只渲染 [start, end) 区间的项
+function renderVirtualList() {
+  const list = document.getElementById('requestList');
+  const filtered = virtualFiltered;
+  const total = filtered.length;
+  const viewH = list.clientHeight || 600;
+  const start = Math.max(0, Math.floor(virtualScrollTop / VIRTUAL_ITEM_HEIGHT) - VIRTUAL_OVERSCAN);
+  const end = Math.min(total, Math.ceil((virtualScrollTop + viewH) / VIRTUAL_ITEM_HEIGHT) + VIRTUAL_OVERSCAN);
+
+  // 顶部 spacer（撑起滚动位置）+ 可见项 + 底部 spacer（撑起总高度）
+  const topH = start * VIRTUAL_ITEM_HEIGHT;
+  const bottomH = (total - end) * VIRTUAL_ITEM_HEIGHT;
+  const items = filtered.slice(start, end).map((r, i) => {
+    return `<div style="height:${VIRTUAL_ITEM_HEIGHT}px;box-sizing:border-box">${renderItemHTML(r, start + i)}</div>`;
+  }).join('');
+  list.innerHTML = `<div style="height:${topH}px"></div>${items}${bottomH > 0 ? `<div style="height:${bottomH}px"></div>` : ''}`;
+  requestElCache.clear();
+}
+
+// 滚动事件处理（rAF 节流）
+function onListScroll() {
+  if (virtualFiltered.length <= VIRTUAL_THRESHOLD) return;
+  if (virtualRafPending) return;
+  virtualRafPending = true;
+  requestAnimationFrame(() => {
+    virtualRafPending = false;
+    virtualScrollTop = document.getElementById('requestList').scrollTop || 0;
+    renderVirtualList();
+  });
 }
 
 // =============================================
@@ -696,6 +795,7 @@ async function loadRules() {
     let html = rules.map(r => `
       <div class="rule-item">
         <span class="rule-item-pattern">${esc(r.pattern)}</span>
+        ${r.method ? `<span class="method-badge method-${r.method}" style="font-size:9px;padding:1px 5px">${esc(r.method)}</span>` : ''}
         <span class="rule-item-action ${r.action}">${r.action.toUpperCase()}</span>
         <div class="rule-item-actions">
           <button class="${r.enabled ? 'enabled' : 'disabled'}" onclick="toggleRule(${r.id},${!r.enabled})">${r.enabled ? 'ON' : 'OFF'}</button>
@@ -708,10 +808,12 @@ async function loadRules() {
 async function addRule() {
   const pattern = document.getElementById('newRulePattern').value.trim();
   const action = document.getElementById('newRuleAction').value;
+  const method = document.getElementById('newRuleMethod').value;
   if (!pattern) { showToast('error', '请输入匹配模式'); return; }
   try {
-    await apiPost('/api/intercept/rules', { pattern, action, enabled: true });
+    await apiPost('/api/intercept/rules', { pattern, method, action, enabled: true });
     document.getElementById('newRulePattern').value = '';
+    document.getElementById('newRuleMethod').value = '';
     showToast('success', '规则已添加');
     await loadRules();
   } catch(e) { showToast('error', '添加失败: ' + e.message); }
@@ -779,6 +881,31 @@ function toggleErrorFilter() {
   loadRequests();
 }
 function filterRequests() { currentHost = ''; loadRequests(); }
+function toggleStarredOnly() {
+  starredOnly = !starredOnly;
+  const btn = document.getElementById('starredFilterBtn');
+  if (starredOnly) {
+    btn.style.color = 'var(--yellow)';
+    btn.classList.add('active');
+    // 切换到收藏视图时，从后端拉取所有收藏请求
+    loadStarred();
+  } else {
+    btn.style.color = '';
+    btn.classList.remove('active');
+    loadRequests();
+  }
+}
+async function loadStarred() {
+  try {
+    const r = await apiGet('/api/starred?limit=1000');
+    requestVersion++;
+    requests = (r.data || []).map(normalizeReq);
+    virtualScrollTop = 0;
+    const listEl = document.getElementById('requestList');
+    if (listEl) listEl.scrollTop = 0;
+    renderRequestList();
+  } catch (e) { console.error('loadStarred failed:', e); }
+}
 async function clearHistory() {
   if (!confirm(t('confirm_clear'))) return;
   try {
@@ -839,6 +966,22 @@ function copyToClipboard(cid) {
   if (!pre) return;
   navigator.clipboard.writeText(pre.textContent).then(() => showToast('success', t('copied'))).catch(() => showToast('error', 'Copy failed'));
 }
+// 切换请求收藏状态（starred=true 表示当前已是收藏，点击则取消）
+async function toggleStar(id, starred) {
+  try {
+    await apiPost('/api/starred', { id, starred: !starred });
+    // 更新内存中的请求对象
+    const idx = requests.findIndex(r => r.id === id);
+    if (idx >= 0) requests[idx].starred = !starred;
+    // 收藏视图下取消收藏需移除
+    if (starredOnly && starred) {
+      requests.splice(idx, 1);
+    }
+    renderRequestList();
+    showToast('success', !starred ? '已收藏' : '已取消收藏');
+  } catch (e) { showToast('error', '操作失败: ' + e.message); }
+}
+
 function copyAsCurl() {
   if (!selectedRequestId) { showToast('error', '请先选择一个请求'); return; }
   const req = requestDetailCache[selectedRequestId];
@@ -849,6 +992,55 @@ function copyAsCurl() {
   });
   if (req.req_body) curl += ` -d '${req.req_body.replace(/'/g, "\\'")}'`;
   navigator.clipboard.writeText(curl).then(() => showToast('success', 'curl 命令已复制')).catch(() => showToast('error', 'Copy failed'));
+}
+
+// 生成 fetch / python-requests 代码并复制到剪贴板
+function copyAsFetch() {
+  if (!selectedRequestId) { showToast('error', '请先选择一个请求'); return; }
+  const req = requestDetailCache[selectedRequestId];
+  if (!req) { showToast('error', '请求详情未加载'); return; }
+  const opts = { method: req.method };
+  const hdrs = {};
+  if (req.req_headers) Object.entries(req.req_headers).forEach(([k, v]) => { hdrs[k] = v; });
+  if (Object.keys(hdrs).length > 0) opts.headers = hdrs;
+  if (req.req_body) {
+    // 尝试解析为 JSON，否则作为纯文本
+    try { opts.body = JSON.parse(req.req_body); } catch { opts.body = req.req_body; }
+  }
+  let code = `fetch('${req.url}', ${JSON.stringify(opts, null, 2)})\n  .then(res => res.text())\n  .then(text => console.log(text));`;
+  navigator.clipboard.writeText(code).then(() => showToast('success', 'fetch 代码已复制')).catch(() => showToast('error', 'Copy failed'));
+}
+
+function copyAsPython() {
+  if (!selectedRequestId) { showToast('error', '请先选择一个请求'); return; }
+  const req = requestDetailCache[selectedRequestId];
+  if (!req) { showToast('error', '请求详情未加载'); return; }
+  const hdrs = {};
+  if (req.req_headers) Object.entries(req.req_headers).forEach(([k, v]) => { hdrs[k] = v; });
+  let code = `import requests\n\n`;
+  code += `url = '${req.url}'\n`;
+  if (Object.keys(hdrs).length > 0) code += `headers = ${JSON.stringify(hdrs, null, 4)}\n`;
+  if (req.req_body) {
+    // 尝试解析为 JSON
+    try {
+      const parsed = JSON.parse(req.req_body);
+      code += `json_data = ${JSON.stringify(parsed, null, 4)}\n`;
+      code += `\nresponse = requests.${req.method.toLowerCase()}(url`;
+      if (Object.keys(hdrs).length > 0) code += `, headers=headers`;
+      code += `, json=json_data)`;
+    } catch {
+      code += `data = ${JSON.stringify(req.req_body)}\n`;
+      code += `\nresponse = requests.${req.method.toLowerCase()}(url`;
+      if (Object.keys(hdrs).length > 0) code += `, headers=headers`;
+      code += `, data=data)`;
+    }
+  } else {
+    code += `\nresponse = requests.${req.method.toLowerCase()}(url`;
+    if (Object.keys(hdrs).length > 0) code += `, headers=headers`;
+    code += `)`;
+  }
+  code += `\nprint(response.status_code)\nprint(response.text)`;
+  navigator.clipboard.writeText(code).then(() => showToast('success', 'python 代码已复制')).catch(() => showToast('error', 'Copy failed'));
 }
 function formatJSONBody(el, text) {
   try { const obj = JSON.parse(text); return JSON.stringify(obj, null, 2); }
@@ -960,12 +1152,23 @@ function switchRulesTab(tab) {
   if (tab === 'logs') loadInterceptLogs();
 }
 
+// 输入框过滤的防抖（避免每次按键都发请求）
+let logFilterTimer = null;
+function debounceLogFilter() {
+  if (logFilterTimer) clearTimeout(logFilterTimer);
+  logFilterTimer = setTimeout(loadInterceptLogs, 300);
+}
+
 async function loadInterceptLogs() {
   try {
     const action = document.getElementById('logActionFilter').value;
     const limit = document.getElementById('logLimitSelect').value || '50';
+    const host = (document.getElementById('logHostFilter')?.value || '').trim();
+    const pattern = (document.getElementById('logPatternFilter')?.value || '').trim();
     const p = new URLSearchParams();
     if (action) p.set('action', action);
+    if (host) p.set('host', host);
+    if (pattern) p.set('pattern', pattern);
     p.set('limit', limit);
     const r = await apiGet('/api/intercept/logs?' + p.toString());
     renderInterceptLogs(r.data || []);
@@ -999,7 +1202,13 @@ function renderInterceptLogs(logs) {
   applyLang();
 
   // 请求列表点击事件委托 — DOM 此时已就绪
-  document.getElementById('requestList').addEventListener('click', (e) => {
+  const listEl = document.getElementById('requestList');
+  listEl.addEventListener('scroll', onListScroll, { passive: true });
+  // 窗口大小变化时重新计算可见区
+  window.addEventListener('resize', () => {
+    if (virtualFiltered.length > VIRTUAL_THRESHOLD) renderVirtualList();
+  });
+  listEl.addEventListener('click', (e) => {
     const item = e.target.closest('.request-item');
     if (item && item.dataset.id) {
       createRipple(e, item);

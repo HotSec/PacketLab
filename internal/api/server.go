@@ -66,6 +66,7 @@ func (s *Server) setupRoutes() {
 
 	mux.HandleFunc("/api/requests", s.handleListRequests)
 	mux.HandleFunc("/api/requests/", s.handleRequestByID)
+	mux.HandleFunc("/api/starred", s.handleStarred)
 	mux.HandleFunc("/api/resend", s.handleResend)
 	mux.HandleFunc("/api/clear", s.handleClear)
 	mux.HandleFunc("/api/stats", s.handleStats)
@@ -90,6 +91,8 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/capture/stop", s.handleCaptureStop)
 
 	mux.HandleFunc("/api/export/har", s.handleExportHAR)
+
+	mux.HandleFunc("/api/maintenance/cleanup", s.handleMaintenanceCleanup)
 
 	mux.HandleFunc("/api/metrics", s.handleMetrics)
 
@@ -244,6 +247,45 @@ func (s *Server) deleteRequest(w http.ResponseWriter, r *http.Request, id int64)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleStarred GET 列出收藏；POST {id, starred} 切换收藏状态
+func (s *Server) handleStarred(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		items, err := s.store.ListStarred(limit)
+		if err != nil {
+			slog.Error("list starred failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+			writeAppError(w, ErrInternal("Failed to list starred"))
+			return
+		}
+		if items == nil {
+			items = []models.RequestListItem{}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": items})
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		var body struct {
+			ID      int64 `json:"id"`
+			Starred bool  `json:"starred"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeAppError(w, ErrValidation("Invalid JSON"))
+			return
+		}
+		if body.ID <= 0 {
+			writeAppError(w, ErrValidation("id required"))
+			return
+		}
+		if err := s.store.SetStarred(body.ID, body.Starred); err != nil {
+			writeAppError(w, ErrNotFound("Request", strconv.FormatInt(body.ID, 10)))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"id": body.ID, "starred": body.Starred})
+	default:
+		writeAppError(w, ErrMethodNotAllowed())
+	}
 }
 
 func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
@@ -582,6 +624,8 @@ func (s *Server) handleInterceptLogs(w http.ResponseWriter, r *http.Request) {
 
 	action := r.URL.Query().Get("action")
 	since := r.URL.Query().Get("since")
+	host := r.URL.Query().Get("host")
+	pattern := r.URL.Query().Get("pattern")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
@@ -592,7 +636,7 @@ func (s *Server) handleInterceptLogs(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 
-	logs, total, err := s.store.ListInterceptLogs(action, since, limit, offset)
+	logs, total, err := s.store.ListInterceptLogs(action, since, host, pattern, limit, offset)
 	if err != nil {
 		slog.Error("list intercept logs failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeAppError(w, ErrInternal("Failed to list intercept logs"))
@@ -708,6 +752,47 @@ func (s *Server) handleExportHAR(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", "attachment; filename=packetlab.har")
 	json.NewEncoder(w).Encode(har)
+}
+
+// ========================================
+// 维护 / 清理
+// ========================================
+
+func (s *Server) handleMaintenanceCleanup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAppError(w, ErrMethodNotAllowed())
+		return
+	}
+
+	var body models.CleanupRequest
+	if r.ContentLength > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			writeAppError(w, ErrValidation("Invalid JSON"))
+			return
+		}
+	}
+	// 若请求体未指定保留天数，则尝试从 settings 读取
+	if body.RetentionDays <= 0 {
+		if v, err := s.store.GetSetting("retention_days"); err == nil {
+			if d, _ := strconv.Atoi(v); d > 0 {
+				body.RetentionDays = d
+			}
+		}
+	}
+
+	deletedRequests, deletedLogs, appliedDays, err := s.store.Cleanup(body.RetentionDays)
+	if err != nil {
+		slog.Error("cleanup failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to cleanup"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.CleanupResponse{
+		DeletedRequests: deletedRequests,
+		DeletedLogs:     deletedLogs,
+		RetentionDays:   appliedDays,
+	})
 }
 
 // ========================================

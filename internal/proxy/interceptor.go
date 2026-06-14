@@ -147,7 +147,7 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			if !rule.Enabled {
 				continue
 			}
-			if matchRule(rule.Pattern, req.URL.Host, req.URL.Path) {
+			if matchRule(rule, req.Method, req.URL.Host, req.URL.Path) {
 				if rule.Action == "block" {
 					// 记录拦截日志（非阻塞）
 					it.writeLog(&models.InterceptLog{
@@ -264,10 +264,26 @@ func (it *Interceptor) writeLog(log *models.InterceptLog) {
 	}
 }
 
-// matchRule 简单通配匹配（host 大小写不敏感）
-func matchRule(pattern, host, path string) bool {
+// matchRule 简单通配匹配（host 大小写不敏感）。
+// method 非空时额外校验请求方法（大小写不敏感）。
+func matchRule(rule models.InterceptRule, method, host, path string) bool {
+	// 方法过滤：规则指定了 method 时必须匹配（支持逗号分隔多个方法）
+	if rule.Method != "" {
+		m := strings.ToUpper(method)
+		matched := false
+		for _, rm := range strings.Split(rule.Method, ",") {
+			if strings.ToUpper(strings.TrimSpace(rm)) == m {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	pattern := strings.ToLower(rule.Pattern)
 	host = strings.ToLower(host)
-	pattern = strings.ToLower(pattern)
 	if pattern == host {
 		return true
 	}

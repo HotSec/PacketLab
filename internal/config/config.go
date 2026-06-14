@@ -20,6 +20,7 @@ type Config struct {
 	CaptureIface   string
 	CaptureBPF     string
 	CaptureNoProc  bool
+	CaptureStreamTimeoutMin int // 网卡抓包：流空闲超时（分钟），0=使用默认值
 	MaxReqBodyKB   int // 请求体最大 KB，0=使用默认值
 	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
 }
@@ -31,13 +32,14 @@ const (
 	DefaultTimeoutSec   = 30
 	DefaultMaxReqBodyKB = 2048  // 2MB
 	DefaultMaxResBodyKB = 4096  // 4MB
+	DefaultStreamTimeoutMin = 2 // 网卡抓包流空闲超时默认 2 分钟
 	defaultOrg          = "PacketLab"
 )
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
 func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	capture bool, captureIface, captureBPF string, captureNoProc bool,
-	maxReqBodyKB, maxResBodyKB int) (*Config, error) {
+	streamTimeoutMin, maxReqBodyKB, maxResBodyKB int) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -74,22 +76,29 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	if maxResBodyKB == 0 {
 		maxResBodyKB = DefaultMaxResBodyKB
 	}
+	if streamTimeoutMin < 0 {
+		return nil, fmt.Errorf("config: capture-stream-timeout must be >= 0, got %d", streamTimeoutMin)
+	}
+	if streamTimeoutMin == 0 {
+		streamTimeoutMin = DefaultStreamTimeoutMin
+	}
 
 	cfg := &Config{
-		ProxyPort:     proxyPort,
-		APIPort:       apiPort,
-		DBPath:        dbPath,
-		NoProxy:       noProxy,
-		NoMitm:        noMitm,
-		Insecure:      insecure,
-		BaseDir:       baseDir,
-		CertDir:       filepath.Join(baseDir, "certs"),
-		Capture:       capture,
-		CaptureIface:  captureIface,
-		CaptureBPF:    captureBPF,
-		CaptureNoProc: captureNoProc,
-		MaxReqBodyKB:  maxReqBodyKB,
-		MaxResBodyKB:  maxResBodyKB,
+		ProxyPort:              proxyPort,
+		APIPort:                apiPort,
+		DBPath:                 dbPath,
+		NoProxy:                noProxy,
+		NoMitm:                 noMitm,
+		Insecure:               insecure,
+		BaseDir:                baseDir,
+		CertDir:                filepath.Join(baseDir, "certs"),
+		Capture:                capture,
+		CaptureIface:           captureIface,
+		CaptureBPF:             captureBPF,
+		CaptureNoProc:          captureNoProc,
+		CaptureStreamTimeoutMin: streamTimeoutMin,
+		MaxReqBodyKB:           maxReqBodyKB,
+		MaxResBodyKB:           maxResBodyKB,
 	}
 	return cfg, nil
 }

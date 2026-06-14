@@ -94,6 +94,13 @@ sudo update-ca-certificates
 | `--no-proxy` | `false` | 仅启动 API 服务，不启动代理 |
 | `--no-mitm` | `false` | 禁用 HTTPS MITM 解密 |
 | `--insecure` | `false` | 跳过上游 TLS 证书验证 |
+| `--capture` | `false` | 启用网卡抓包（需 sudo / CAP_NET_RAW） |
+| `--capture-iface` | `auto` | 指定抓包网卡 |
+| `--capture-bpf` | `tcp` | BPF 过滤器 |
+| `--capture-no-proc` | `false` | 禁用进程关联 |
+| `--capture-stream-timeout` | `2` | 网卡抓包流空闲超时（分钟） |
+| `--max-req-body-kb` | `2048` | 请求体最大 KB |
+| `--max-res-body-kb` | `4096` | 响应体最大 KB |
 
 ## 使用指南
 
@@ -137,6 +144,7 @@ sudo update-ca-certificates
 | `POST` | `/api/resend` | 通过代理重发请求 |
 | `POST` | `/api/clear` | 清空所有记录 |
 | `GET` | `/api/stats` | 统计信息（总数、错误数、数据量） |
+| `GET`/`POST` | `/api/starred` | 收藏列表 / 切换收藏状态（`id`, `starred`） |
 | `GET` | `/api/apimap` | API 地图树（参数 `host`） |
 | `GET` | `/api/apimap/hosts` | 站点列表（参数 `search`, `limit`, `offset`） |
 | `POST` | `/api/apimap/notes` | 添加/更新备注 |
@@ -144,8 +152,13 @@ sudo update-ca-certificates
 | `GET/POST` | `/api/intercept/mode` | 拦截模式查询/切换 |
 | `GET` | `/api/intercept/pending` | 待审批请求列表 |
 | `POST` | `/api/intercept/action` | 审批操作（allow/drop/modify） |
-| `GET/POST` | `/api/intercept/rules` | 拦截规则 |
+| `GET/POST` | `/api/intercept/rules` | 拦截规则（支持 `method` 维度） |
 | `PUT/DELETE` | `/api/intercept/rules/:id` | 规则启用/删除 |
+| `GET` | `/api/intercept/logs` | 拦截日志（`action`, `host`, `pattern`, `since`） |
+| `GET/POST` | `/api/capture/status\|start\|stop` | 网卡抓包状态/启停 |
+| `GET` | `/api/export/har` | 导出 HAR |
+| `POST` | `/api/maintenance/cleanup` | 清理超期数据（`retention_days`） |
+| `GET` | `/api/metrics` | 运行时指标（goroutine/内存/抓包统计） |
 | `WS` | `/ws` | WebSocket 实时通知 |
 
 ## 架构
