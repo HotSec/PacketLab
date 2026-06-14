@@ -333,7 +333,7 @@ function renderRequestList() {
       const pcls = r.is_pending ? ' pending' : '';
       const pendingExtra = r.is_pending ? '<span class="pending-tag">PENDING</span>' : '';
       const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
-      return `<div class="request-item${pcls}${isActive}" style="--i:${i}" data-id="${r.id}">
+      return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
         <span class="method-badge method-${r.method}">${r.method}</span>
         <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
         <div class="request-info">

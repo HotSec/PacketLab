@@ -102,9 +102,9 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .request-list::-webkit-scrollbar{width:5px}
 .request-list::-webkit-scrollbar-track{background:transparent}
 .request-list::-webkit-scrollbar-thumb{background:var(--border-default);border-radius:10px}
-.request-item{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;border-left:3px solid transparent;transition:background .15s,transform .2s;animation:listFadeIn .35s cubic-bezier(.16,1,.3,1) both;animation-delay:calc(var(--i,0)*35ms)}
-.request-item:hover{background:var(--bg-hover);transform:translateX(2px)}
-.request-item.active{background:var(--bg-active);border-left-color:var(--accent);transform:translateX(1px)}
+.request-item{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;border-left:3px solid transparent;transition:background .12s}
+.request-item:hover{background:var(--bg-hover)}
+.request-item.active{background:var(--bg-active);border-left-color:var(--accent)}
 @keyframes listFadeIn{from{opacity:0;transform:translateY(3px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
 .method-badge{min-width:48px;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;text-align:center;font-family:var(--font-mono);letter-spacing:.03em;flex-shrink:0}
 .method-GET{background:var(--green-muted);color:var(--green)}
@@ -421,7 +421,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .log-item-time{font-size:9px;color:var(--text-tertiary)}
 
 /* ===== Virtual Scroll ===== */
-.request-list-virtual .request-item{content-visibility:auto;contain-intrinsic-size:auto 48px}
+/* 虚拟滚动项已被外层固定高度 div 撑高，无需额外 content-visibility 优化 */
 
 /* ===== Copy Format Buttons ===== */
 .copy-format-btns{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
