@@ -412,7 +412,7 @@ function renderRequestList() {
       <span style="font-size:13px">${t('no_requests')}</span></div>`;
     // innerHTML 替换后旧 DOM 缓存失效，清空让 updateRequestInList 重新建立
     requestElCache.clear();
-    document.getElementById('requestCount').textContent = `${requests.length} ${t('recordings')}`;
+    document.getElementById('requestCount').textContent = `${listCount()} ${t('recordings')}`;
     loadStats();
     return;
   }
@@ -441,8 +441,14 @@ function renderRequestList() {
     // innerHTML 替换后旧 DOM 缓存失效，清空让 updateRequestInList 重新建立
     requestElCache.clear();
   }
-  document.getElementById('requestCount').textContent = `${requests.length} ${t('recordings')}`;
+  document.getElementById('requestCount').textContent = `${listCount()} ${t('recordings')}`;
   loadStats();
+}
+
+// 列表计数：分页模式显示后端 total，否则显示本地条数
+function listCount() {
+  if (isPaged() && pageTotal > 0) return pageTotal;
+  return requests.length;
 }
 
 // 渲染单个请求项的 HTML（虚拟滚动与全量渲染共用）
@@ -1010,10 +1016,13 @@ async function clearHistory() {
   try {
     await apiPost('/api/clear', {});
     requests = []; requestDetailCache = {}; selectedRequestId = null; currentHost = ''; requestVersion++;
+    currentPage = 1; pageTotal = 0;
     document.getElementById('searchInput').value = '';
     document.getElementById('detailEmpty').style.display = 'flex';
     document.getElementById('detailContent').style.display = 'none';
-    renderRequestList(); showToast('success', t('cleared'));
+    renderRequestList();
+    updatePagination();
+    showToast('success', t('cleared'));
   } catch (e) { showToast('error', t('send_failed') + ': ' + e.message); }
 }
 
