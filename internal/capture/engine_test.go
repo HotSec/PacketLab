@@ -2,6 +2,7 @@ package capture
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -524,4 +525,161 @@ func TestEmitNonBlocking_NoDoubleCountAfterFlushAll(t *testing.T) {
 	if final != before+1 {
 		t.Fatalf("expected HTTPFound to remain %d after flushAll (no double-count), got %d", before+1, final)
 	}
+}
+
+// ---- Task 17: packetLoop / Stop 并发安全回归保护测试 ----
+// These tests verify concurrent safety of Stop and packetLoop cleanup.
+// Tests 1-3 are regression protection (behavior that should already hold);
+// Test 4 (ReleasesLockBeforeBlockingOps) is a true RED test for the
+// lock-holding-during-blocking bug and fails on the pre-fix Stop code.
+
+// TestEngine_Stop_WithoutStart_NoPanic 验证未调用 Start 直接 Stop 不 panic。
+// 回归保护：handle/writer 为 nil 时 Stop 必须安全。
+func TestEngine_Stop_WithoutStart_NoPanic(t *testing.T) {
+	e := &Engine{
+		stopCh: make(chan struct{}),
+	}
+	// 不调用 Start，直接 Stop / Stop without prior Start
+	if panicked := panics(func() { e.Stop() }); panicked {
+		t.Fatal("Stop() panicked when called without Start")
+	}
+}
+
+// TestEngine_Stop_Idempotent 验证 Stop 多次调用不 panic。
+// 回归保护：running.Swap(false) 必须保证幂等。
+func TestEngine_Stop_Idempotent(t *testing.T) {
+	e := &Engine{
+		stopCh: make(chan struct{}),
+	}
+	e.running.Store(true)
+	if panicked := panics(func() {
+		e.Stop()
+		e.Stop() // 第二次不应 panic / second call must not panic
+		e.Stop() // 第三次也不应 panic / third call must not panic
+	}); panicked {
+		t.Fatal("multiple Stop() calls panicked")
+	}
+}
+
+// TestEngine_Stop_SetsRunningFalse 验证 Stop 后 running 为 false。
+// 回归保护：running.Swap(false) 必须将状态置为 false。
+func TestEngine_Stop_SetsRunningFalse(t *testing.T) {
+	e := &Engine{
+		stopCh: make(chan struct{}),
+	}
+	e.running.Store(true)
+	e.Stop()
+	if e.running.Load() {
+		t.Fatal("expected running=false after Stop")
+	}
+}
+
+// TestEngine_Stop_ReleasesLockBeforeBlockingOps 是 Task 17 的核心 RED 测试。
+//
+// Bug：修改前 Stop 用 `defer e.mu.Unlock()`，导致 flushEmitBuf/writer.Stop 等
+// 阻塞操作在持锁期间执行。若 flushEmitBuf → bulkEmit → hub.BroadcastCapture 阻塞
+// （例如 WebSocket 写入慢），其他需要 e.mu 的操作（如 Start、并发 Stop）会被阻塞。
+//
+// 修改后：Stop 在 handle 清理后立即释放 e.mu，再执行阻塞操作。
+//
+// 本测试用 blockingHub 让 BroadcastCapture 阻塞，验证 e.mu 在阻塞期间可被获取：
+//   - 修改前：e.mu 在 flushEmitBuf 期间仍被持有 → 第二个 goroutine 超时 → FAIL
+//   - 修改后：e.mu 已释放 → 第二个 goroutine 立即获取 → PASS
+func TestEngine_Stop_ReleasesLockBeforeBlockingOps(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	blockHub := make(chan struct{})
+	hub := &blockingHub{block: blockHub, broadcasted: make(chan struct{})}
+
+	e := &Engine{
+		store:     st,
+		hub:       hub,
+		stopCh:    make(chan struct{}),
+		procCache: make(map[string]*models.ProcessInfo),
+		// ringBuf=nil → flushEmitBuf 走 emitBuf → bulkEmit → hub.BroadcastCapture 路径
+	}
+
+	// 预填一条 emit 记录，使 flushEmitBuf 调用 bulkEmit → hub.BroadcastCapture（阻塞）
+	e.emitMu.Lock()
+	e.emitBuf = make([]*models.CapturedRequest, emitBufSize)
+	e.emitBuf[0] = &models.CapturedRequest{Method: "GET", URL: "http://test"}
+	e.emitHead = 1
+	e.emitMu.Unlock()
+
+	e.running.Store(true)
+
+	// goroutine 1: 调用 Stop（会阻塞在 flushEmitBuf → hub.BroadcastCapture）
+	stopDone := make(chan struct{})
+	go func() {
+		e.Stop()
+		close(stopDone)
+	}()
+
+	// 等待 Stop 进入 flushEmitBuf 阻塞 / wait for Stop to reach blocking flushEmitBuf
+	// hub.broadcasted 在 BroadcastCapture 被调用后关闭
+	select {
+	case <-hub.broadcasted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not reach flushEmitBuf within 2s (hub.BroadcastCapture not called)")
+	}
+
+	// 此时 Stop 应已释放 e.mu（fix）或仍持有 e.mu（bug）
+	// 尝试在另一个 goroutine 获取 e.mu
+	acquired := make(chan struct{})
+	go func() {
+		e.mu.Lock()
+		close(acquired)
+		e.mu.Unlock()
+	}()
+
+	select {
+	case <-acquired:
+		// e.mu 已释放，fix 生效 / lock released before blocking op, fix works
+	case <-time.After(1 * time.Second):
+		t.Fatal("e.mu still held during flushEmitBuf (Stop holds lock during blocking operation)")
+	}
+
+	// 解除 hub 阻塞，让 Stop 完成 / unblock hub so Stop can complete
+	close(blockHub)
+
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not complete after unblocking hub")
+	}
+}
+
+// blockingHub 是测试用 hub，BroadcastCapture 会阻塞直到 block channel 被关闭。
+// broadcasted 在 BroadcastCapture 被调用时关闭，用于测试同步。
+type blockingHub struct {
+	block       chan struct{}
+	broadcasted chan struct{}
+	captured    []*models.CapturedRequest
+	once        sync.Once
+}
+
+func (h *blockingHub) BroadcastCapture(req *models.CapturedRequest) {
+	h.once.Do(func() { close(h.broadcasted) })
+	h.captured = append(h.captured, req)
+	<-h.block // 阻塞直到 block 被关闭 / block until block channel is closed
+}
+
+func (h *blockingHub) BroadcastUpdate(req *models.CapturedRequest) {
+	h.captured = append(h.captured, req)
+}
+
+// panics 执行 fn，返回是否 panic。
+func panics(fn func()) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+		}
+	}()
+	fn()
+	return
 }

@@ -115,15 +115,35 @@ func (e *Engine) Start() error {
 }
 
 func (e *Engine) packetLoop() {
+	// 快照 workerChs，避免与 Stop 的潜在并发修改 race
+	// Snapshot workerChs to avoid race with any concurrent mutation by Stop
+	workerChs := e.workerChs
+	// defer 保证：无论 packetLoop 如何退出（range 结束 / running=false 早退 / panic），
+	// 都会关闭 worker channels 并等待 workers 退出，避免 goroutine 泄漏
+	// defer ensures worker channels are always closed and workers awaited,
+	// regardless of how packetLoop exits (range end / running=false early return / panic),
+	// preventing goroutine leaks.
+	defer func() {
+		for _, ch := range workerChs {
+			close(ch)
+		}
+		e.workerSg.Wait()
+	}()
+
 	packetSource := gopacket.NewPacketSource(e.handle, e.handle.LinkType())
 	lastReport := time.Now()
 	for packet := range packetSource.Packets() {
 		if !e.running.Load() {
-			return
+			return // defer 会执行清理 / defer will run cleanup
 		}
 		e.stats.PacketsRecv.Add(1)
 		workerIdx := e.flowHash(packet)
-		ch := e.workerChs[workerIdx]
+		// 越界守卫：防御 workerChs 长度与 workers 不一致的边界情况
+		// Bounds guard: defends against workerChs length mismatch with workers
+		if workerIdx < 0 || workerIdx >= len(workerChs) {
+			continue
+		}
+		ch := workerChs[workerIdx]
 		select {
 		case ch <- packet:
 		default:
@@ -134,10 +154,8 @@ func (e *Engine) packetLoop() {
 			lastReport = now
 		}
 	}
-	for _, ch := range e.workerChs {
-		close(ch)
-	}
-	e.workerSg.Wait()
+	// range 正常结束（handle.Close() 导致 channel 关闭）时，defer 也会执行清理
+	// When range ends normally (handle.Close() closes the channel), defer handles cleanup
 }
 
 func ListInterfaces() ([]string, error) {

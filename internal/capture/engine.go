@@ -175,16 +175,18 @@ func (e *Engine) resolveProcessCached(srcIP string, srcPort uint16, buildFn func
 // Stop 停止抓包（幂等）
 func (e *Engine) Stop() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if !e.running.Swap(false) {
+		e.mu.Unlock()
 		return
 	}
 
-	// 先关闭 handle，packetLoop 会退出并 close worker channels
+	// 先关闭 handle，packetLoop 的 range 会退出，defer 会清理 worker channels
+	// Close handle first so packetLoop's range exits and defer cleans up worker channels
 	if e.handle != nil {
 		e.handle.Close()
 		e.handle = nil
 	}
+	e.mu.Unlock() // 释放锁，避免阻塞操作持锁 / release lock before blocking ops
 
 	select {
 	case <-e.stopCh:
@@ -192,9 +194,11 @@ func (e *Engine) Stop() {
 		close(e.stopCh)
 	}
 
-	// flush 剩余 emit 数据
+	// flush 剩余 emit 数据（可能阻塞，不持锁）
+	// flush remaining emit buffer (may block, not holding lock)
 	e.flushEmitBuf()
-	// 停止异步写入池
+	// 停止异步写入池（可能阻塞，不持锁）
+	// stop async writer pool (may block, not holding lock)
 	if e.writer != nil {
 		e.writer.Stop()
 	}
