@@ -424,3 +424,44 @@ func TestInterceptor_Stop_Idempotent(t *testing.T) {
 	it.Stop()
 	it.Stop() // 不 panic
 }
+
+// TestInterceptor_Stop_NoPanicOnConcurrentWriteLog 验证 Stop 后调用 writeLog 不会 panic。
+// 这是 Bug 7 修复的 critical 部分：writeLog 加 RWMutex 保护，避免 send on closed channel。
+func TestInterceptor_Stop_NoPanicOnConcurrentWriteLog(t *testing.T) {
+	st := newTestInterceptorStore(t)
+	it := NewInterceptor(1, func(*models.PendingRequest) {}, st)
+
+	// 启动一个 goroutine 持续调用 writeLog
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				it.writeLog(&models.InterceptLog{
+					Action: "allow", RequestURL: "http://x", RequestHost: "x", Mode: "manual",
+				})
+			}
+		}
+	}()
+
+	// 让 writeLog 跑一会
+	time.Sleep(20 * time.Millisecond)
+
+	// 调用 Stop，不应 panic
+	it.Stop()
+
+	// Stop 后再调用 writeLog，不应 panic（应被 closed 检查拦截）
+	for i := 0; i < 100; i++ {
+		it.writeLog(&models.InterceptLog{
+			Action: "allow", RequestURL: "http://x", RequestHost: "x", Mode: "manual",
+		})
+	}
+
+	close(stop)
+	wg.Wait()
+}

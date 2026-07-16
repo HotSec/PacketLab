@@ -28,6 +28,8 @@ type Interceptor struct {
 	logCh     chan *models.InterceptLog
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
+	closeMu   sync.RWMutex
+	closed    bool
 }
 
 type pendingReq struct {
@@ -86,7 +88,10 @@ func (it *Interceptor) startLogWriter(st *store.Store) {
 // 幂等，可重复调用。
 func (it *Interceptor) Stop() {
 	it.stopOnce.Do(func() {
+		it.closeMu.Lock()
+		it.closed = true
 		close(it.logCh)
+		it.closeMu.Unlock()
 		it.wg.Wait()
 	})
 }
@@ -268,8 +273,14 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	}
 }
 
-// writeLog 非阻塞写入拦截日志到 channel
+// writeLog 非阻塞写入拦截日志到 channel。
+// 持读锁期间 channel 不会被 close，确保 send 安全。
 func (it *Interceptor) writeLog(log *models.InterceptLog) {
+	it.closeMu.RLock()
+	defer it.closeMu.RUnlock()
+	if it.closed {
+		return
+	}
 	select {
 	case it.logCh <- log:
 	default:

@@ -194,14 +194,14 @@ func main() {
 		slog.Error("API 服务器关闭失败", "error", err)
 	}
 
-	// 关闭拦截器：先刷盘拦截日志（logCh goroutine），再停代理与 API 资源
-	if interceptor != nil {
-		interceptor.Stop()
-	}
-
-	// 关闭代理
+	// 关闭代理（先停代理，等在途请求完成，避免 Stop 后 writeLog panic）
 	if proxySrv != nil {
 		proxySrv.Stop()
+	}
+
+	// 关闭拦截器：logCh 在所有 Handle 退出后才关闭，刷盘拦截日志
+	if interceptor != nil {
+		interceptor.Stop()
 	}
 
 	// 关闭 API 服务器资源（rateLimiter goroutine、wsHub）
