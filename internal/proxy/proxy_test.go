@@ -146,3 +146,33 @@ func TestProxy_ForwardsFullResponseBody(t *testing.T) {
 			len(received), bodySize)
 	}
 }
+
+// TestMatchSkipHost 验证 shouldMITM 在匹配跳过列表前正确去除端口后缀。
+//
+// Bug 3 复现：HandleConnectFunc 收到的 host 形如 "abc.wns.windows.com:443"，
+// 旧实现直接对带端口的 host 做 HasSuffix(".wns.windows.com")，末尾是 ":443"，
+// 永远匹配不上，导致本应跳过 MITM 的主机被错误地解密。
+func TestMatchSkipHost(t *testing.T) {
+	cases := []struct {
+		host string
+		wantSkip bool // true 表示应跳过 MITM（shouldMITM 返回 false）
+	}{
+		{"abc.wns.windows.com:443", true},
+		{"abc.wns.windows.com", true},
+		{"cdn.push.apple.com:443", true},
+		{"api.example.com:443", false},
+		{"push.microsoft.com:443", false},
+		{"1.2.3.4:8080", false},
+		{"ntp.msn.cn:443", true},             // 完整匹配（无前导点的条目）
+		{"x.wns.windows.com:80", true},       // 非标准端口也应匹配
+		{"xwns.windows.com:443", false},      // 前缀不对（不含 .wns.windows.com）
+	}
+	for _, c := range cases {
+		got := shouldMITM(c.host)
+		// shouldMITM 返回 true 表示应 MITM；skip 时返回 false
+		if got == c.wantSkip {
+			t.Errorf("shouldMITM(%q) = %v, want MITM=%v (skip=%v)",
+				c.host, got, !c.wantSkip, c.wantSkip)
+		}
+	}
+}

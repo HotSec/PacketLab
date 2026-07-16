@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -268,7 +269,11 @@ func portToAddr(port int) string { return ":" + strconv.Itoa(port) }
 
 // shouldMITM 判断某 host 是否适合 MITM 解密
 // 跳过已知的非 HTTP 协议主机（WNS、遥测、自定义 TCP 等）
-func shouldMITM(host string) bool {
+func shouldMITM(rawHost string) bool {
+	host := rawHost
+	if h, _, err := net.SplitHostPort(rawHost); err == nil {
+		host = h
+	}
 	skipSuffixes := []string{
 		".wns.windows.com",
 		".notify.windows.com",
@@ -285,7 +290,7 @@ func shouldMITM(host string) bool {
 		".settings-win.data.microsoft.com",
 	}
 	for _, s := range skipSuffixes {
-		if len(host) >= len(s) && host[len(host)-len(s):] == s {
+		if host == s || strings.HasSuffix(host, s) {
 			return false
 		}
 	}
