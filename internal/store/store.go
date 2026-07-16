@@ -256,7 +256,9 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 			boolToInt(req.IsSSE), truncateStr(req.SSEEvents, 4*1024*1024),
 		)
 		if err != nil {
-			return ids, fmt.Errorf("exec batch: %w", err)
+			// 事务已由 defer tx.Rollback() 回滚，前 K-1 个 LastInsertId 均无效，
+			// 必须返回 nil ids 防止调用方误用已回滚的 ID。
+			return nil, fmt.Errorf("exec batch: %w", err)
 		}
 		id, _ := result.LastInsertId()
 		ids = append(ids, id)

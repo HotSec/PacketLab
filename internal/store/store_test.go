@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"packetlab/internal/models"
 )
@@ -604,6 +605,77 @@ func TestSaveBatchEmpty(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Errorf("expected 0 ids, got %d", len(ids))
+	}
+}
+
+// TestSaveBatch_BeginFailureReturnsNilIDs 验证 Begin 失败时返回 nil ids。
+// 关闭 db 连接强制让 s.db.Begin() 失败，此时应返回 (nil, err)。
+func TestSaveBatch_BeginFailureReturnsNilIDs(t *testing.T) {
+	st := newTestStore(t)
+	// 关闭 db 连接强制让 Begin 失败
+	st.db.Close()
+
+	ids, err := st.SaveBatch([]*models.CapturedRequest{
+		{Method: "GET", URL: "http://x", Host: "x", Path: "/", Protocol: "HTTP/1.1", CapturedAt: time.Now()},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if ids != nil {
+		t.Fatalf("expected nil ids on begin failure, got %v", ids)
+	}
+}
+
+// TestSaveBatch_ExecFailureReturnsNilIDs 验证事务内 Exec 失败时返回 nil ids，
+// 而不是包含前 K-1 个 LastInsertId 的部分 ids。
+//
+// Bug 2 复现：旧实现在 stmt.Exec 失败时 `return ids, err`（ids 含已插入的 LastInsertId），
+// 但 defer tx.Rollback() 已回滚事务，这些 ID 在 DB 中不存在。调用方若误用会引用无效记录。
+//
+// 测试方法：重建 requests 表并加 CHECK 约束，使第二条 INSERT 触发约束失败。
+func TestSaveBatch_ExecFailureReturnsNilIDs(t *testing.T) {
+	st := newTestStore(t)
+
+	// 重建 requests 表，加 CHECK 约束使 method='BADMETHOD' 的插入失败
+	if _, err := st.db.Exec("DROP TABLE requests"); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	if _, err := st.db.Exec(`CREATE TABLE requests (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		method      TEXT    NOT NULL CHECK (method != 'BADMETHOD'),
+		url         TEXT    NOT NULL,
+		host        TEXT    NOT NULL,
+		path        TEXT    NOT NULL,
+		protocol    TEXT    NOT NULL DEFAULT 'HTTP/1.1',
+		is_https    INTEGER NOT NULL DEFAULT 0,
+		req_headers TEXT    NOT NULL DEFAULT '{}',
+		req_body    TEXT    NOT NULL DEFAULT '',
+		status_code INTEGER NOT NULL DEFAULT 0,
+		res_headers TEXT    NOT NULL DEFAULT '{}',
+		res_body    TEXT    NOT NULL DEFAULT '',
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		size_bytes  INTEGER NOT NULL DEFAULT 0,
+		captured_at TEXT    NOT NULL DEFAULT (datetime('now')),
+		capture_mode TEXT DEFAULT 'proxy',
+		process_pid INTEGER DEFAULT 0,
+		process_name TEXT DEFAULT '',
+		is_sse      INTEGER NOT NULL DEFAULT 0,
+		sse_events  TEXT    NOT NULL DEFAULT ''
+	)`); err != nil {
+		t.Fatalf("recreate table: %v", err)
+	}
+
+	// 第一条正常插入（ids 会 append 第一个 LastInsertId），第二条触发 CHECK 约束失败
+	reqs := []*models.CapturedRequest{
+		{Method: "GET", URL: "http://a", Host: "a", Path: "/", Protocol: "HTTP/1.1", CapturedAt: time.Now()},
+		{Method: "BADMETHOD", URL: "http://b", Host: "b", Path: "/", Protocol: "HTTP/1.1", CapturedAt: time.Now()},
+	}
+	ids, err := st.SaveBatch(reqs)
+	if err == nil {
+		t.Fatal("expected error from CHECK constraint violation, got nil")
+	}
+	if ids != nil {
+		t.Fatalf("expected nil ids on exec failure (bug: returned partial ids %v)", ids)
 	}
 }
 
