@@ -4,12 +4,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"packetlab/internal/models"
+	"packetlab/internal/store"
 )
 
 // ========================================
@@ -373,4 +375,52 @@ func TestHandleManualTimeout(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Handle did not return after timeout")
 	}
+}
+
+// ========================================
+// Stop — flush logs and idempotent
+// ========================================
+
+// newTestInterceptorStore 在临时目录创建一个真实 store 用于 interceptor 测试
+func newTestInterceptorStore(t *testing.T) *store.Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+// TestInterceptor_Stop_FlushesLogs 注入 100 条 log，调用 Stop，断言全部落库
+func TestInterceptor_Stop_FlushesLogs(t *testing.T) {
+	st := newTestInterceptorStore(t)
+
+	it := NewInterceptor(1, func(*models.PendingRequest) {}, st)
+	for i := 0; i < 100; i++ {
+		it.logCh <- &models.InterceptLog{
+			Action: "allow", RequestURL: "http://x", RequestHost: "x", Mode: "manual",
+		}
+	}
+
+	it.Stop()
+
+	// Stop 内部 wg.Wait，应已落库
+	// 注：ListInterceptLogs 在 limit<=0 时默认 limit=50（store.go:931-933），
+	// 因此用 total（第二返回值）验证真实落库条数，而非 len(logs)。
+	_, total, err := st.ListInterceptLogs("", "", "", "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 100 {
+		t.Fatalf("expected 100 logs, got %d", total)
+	}
+}
+
+func TestInterceptor_Stop_Idempotent(t *testing.T) {
+	st := newTestInterceptorStore(t)
+	it := NewInterceptor(1, func(*models.PendingRequest) {}, st)
+	it.Stop()
+	it.Stop() // 不 panic
 }

@@ -19,13 +19,15 @@ import (
 
 // Interceptor 拦截控制器
 type Interceptor struct {
-	mu       sync.RWMutex
-	mode     string            // "auto" | "manual"
-	rules    []models.InterceptRule
-	pending  map[string]*pendingReq
-	onNotify func(req *models.PendingRequest)
-	timeout  time.Duration
-	logCh    chan *models.InterceptLog
+	mu        sync.RWMutex
+	mode      string            // "auto" | "manual"
+	rules     []models.InterceptRule
+	pending   map[string]*pendingReq
+	onNotify  func(req *models.PendingRequest)
+	timeout   time.Duration
+	logCh     chan *models.InterceptLog
+	wg        sync.WaitGroup
+	stopOnce  sync.Once
 }
 
 type pendingReq struct {
@@ -69,13 +71,24 @@ func (it *Interceptor) GetMode() string {
 }
 
 func (it *Interceptor) startLogWriter(st *store.Store) {
+	it.wg.Add(1)
 	go func() {
+		defer it.wg.Done()
 		for log := range it.logCh {
 			if err := st.SaveInterceptLog(log); err != nil {
 				slog.Warn("failed to save intercept log", "error", err)
 			}
 		}
 	}()
+}
+
+// Stop 关闭拦截器：刷盘所有未写日志，等待 goroutine 退出。
+// 幂等，可重复调用。
+func (it *Interceptor) Stop() {
+	it.stopOnce.Do(func() {
+		close(it.logCh)
+		it.wg.Wait()
+	})
 }
 
 // SetRules 设置规则列表
