@@ -267,11 +267,9 @@ func (p *AsyncWriterPool) flushAll() {
 			}
 		}
 		for _, req := range chunk {
-			if req.ID > 0 {
-				p.engine.stats.HTTPFound.Add(1)
-				if p.engine.hub != nil {
-					p.engine.hub.BroadcastCapture(req)
-				}
+			// HTTPFound 已在 emitNonBlocking 入口计数，这里不再重复 / HTTPFound already counted at emitNonBlocking entry, no double-count here
+			if req.ID > 0 && p.engine.hub != nil {
+				p.engine.hub.BroadcastCapture(req)
 			}
 		}
 	}

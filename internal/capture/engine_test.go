@@ -424,3 +424,104 @@ func TestMemRingBufferDropped(t *testing.T) {
 		t.Error("overflowed buffer should have Dropped() > 0")
 	}
 }
+
+// TestEmitNonBlocking_IncrementsHTTPFoundImmediately_RingPath 验证 ring buffer 路径下
+// emitNonBlocking 在入口立即计数 HTTPFound，不依赖后续 flushAll 补加。
+// 修改前：emitNonBlocking 不计数 → 测试 FAIL
+// 修改后：emitNonBlocking 入口计数 → 测试 PASS
+func TestEmitNonBlocking_IncrementsHTTPFoundImmediately_RingPath(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	e := &Engine{
+		store:     st,
+		procCache: make(map[string]*models.ProcessInfo),
+	}
+	e.ringBuf = NewMemRingBuffer(1024)
+	// 不启动 writer，避免后台 flushAll 干扰计数检查 / Don't start writer to avoid background flushAll interfering with count check
+
+	before := e.stats.HTTPFound.Load()
+	e.emitNonBlocking(&models.CapturedRequest{
+		Method: "GET",
+		URL:    "http://example.com/test",
+	})
+	after := e.stats.HTTPFound.Load()
+	if after != before+1 {
+		t.Fatalf("ring path: expected HTTPFound to increment by 1 immediately, got before=%d after=%d", before, after)
+	}
+}
+
+// TestEmitNonBlocking_IncrementsHTTPFoundImmediately_EmitBufPath 验证 emitBuf fallback 路径下
+// emitNonBlocking 在入口立即计数 HTTPFound。
+// 修改前：emitNonBlocking 不计数 → 测试 FAIL
+// 修改后：emitNonBlocking 入口计数 → 测试 PASS
+func TestEmitNonBlocking_IncrementsHTTPFoundImmediately_EmitBufPath(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	e := &Engine{
+		store:     st,
+		procCache: make(map[string]*models.ProcessInfo),
+	}
+	// ringBuf=nil，走 emitBuf fallback 路径 / ringBuf=nil, takes emitBuf fallback path
+
+	before := e.stats.HTTPFound.Load()
+	e.emitNonBlocking(&models.CapturedRequest{
+		Method: "GET",
+		URL:    "http://example.com/test",
+	})
+	after := e.stats.HTTPFound.Load()
+	if after != before+1 {
+		t.Fatalf("emitBuf path: expected HTTPFound to increment by 1 immediately, got before=%d after=%d", before, after)
+	}
+}
+
+// TestEmitNonBlocking_NoDoubleCountAfterFlushAll 验证 emitNonBlocking 入口计数 + flushAll 不再计数，
+// 避免每条记录被计数两次。
+// 修改前：emitNonBlocking 不计数（HTTPFound=0），flushAll 计数（HTTPFound=1）→ immediate 检查 FAIL
+// 修改后：emitNonBlocking 计数（HTTPFound=1），flushAll 不计数（HTTPFound=1）→ 全部 PASS
+// 该测试同时防御未来回归：若 emitNonBlocking 和 flushAll 都计数，final 检查会 FAIL（HTTPFound=2）
+func TestEmitNonBlocking_NoDoubleCountAfterFlushAll(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	st, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	e := &Engine{
+		store:     st,
+		procCache: make(map[string]*models.ProcessInfo),
+	}
+	e.ringBuf = NewMemRingBuffer(1024)
+	// 长间隔 + 不 Start，避免后台 worker 自动 tick 调用 flushAll / long interval + don't Start, avoid background worker auto-ticking flushAll
+	e.writer = NewAsyncWriterPool(st, e.ringBuf, 1, 1*time.Hour)
+	e.writer.engine = e
+
+	before := e.stats.HTTPFound.Load()
+	e.emitNonBlocking(&models.CapturedRequest{
+		Method: "GET",
+		URL:    "http://example.com/test",
+	})
+
+	// 立即计数检查 / immediate count check
+	immediate := e.stats.HTTPFound.Load()
+	if immediate != before+1 {
+		t.Fatalf("expected HTTPFound=%d immediately after emitNonBlocking, got %d", before+1, immediate)
+	}
+
+	// 手动调用 flushAll，不应再增加 HTTPFound / manually call flushAll, should NOT increment HTTPFound
+	e.writer.flushAll()
+	final := e.stats.HTTPFound.Load()
+	if final != before+1 {
+		t.Fatalf("expected HTTPFound to remain %d after flushAll (no double-count), got %d", before+1, final)
+	}
+}

@@ -355,7 +355,7 @@ func (e *Engine) bulkEmit(reqs []*models.CapturedRequest) {
 		}
 	}
 	for _, req := range reqs {
-		e.stats.HTTPFound.Add(1)
+		// HTTPFound 已在 emitNonBlocking 入口计数，这里不再重复 / HTTPFound already counted at emitNonBlocking entry, no double-count here
 		if e.hub != nil && req.ID > 0 {
 			e.hub.BroadcastCapture(req)
 		}
@@ -363,6 +363,10 @@ func (e *Engine) bulkEmit(reqs []*models.CapturedRequest) {
 }
 
 func (e *Engine) emitNonBlocking(req *models.CapturedRequest) {
+	// 立即计数 HTTPFound（与 emit 一致），避免 ring buffer drop 或 save 失败导致漏计
+	// Increment HTTPFound at entry (consistent with emit) to avoid undercount
+	// when ring buffer drops records or save fails.
+	e.stats.HTTPFound.Add(1)
 	req.CaptureMode = "nic"
 
 	if e.ringBuf != nil {
