@@ -157,6 +157,9 @@ func (s *Store) migrate() error {
 		{19, `ALTER TABLE intercept_rules ADD COLUMN method TEXT NOT NULL DEFAULT ''`},
 		{20, `ALTER TABLE requests ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`},
 		{21, `CREATE INDEX IF NOT EXISTS idx_requests_starred ON requests(starred)`},
+		{22, `ALTER TABLE requests ADD COLUMN is_llm INTEGER NOT NULL DEFAULT 0`},
+		{23, `ALTER TABLE requests ADD COLUMN llm_data TEXT NOT NULL DEFAULT ''`},
+		{24, `CREATE INDEX IF NOT EXISTS idx_requests_is_llm ON requests(is_llm)`},
 	}
 
 	for _, m := range migrations {
@@ -1096,4 +1099,97 @@ func (s *Store) DeleteRule(id int64) error {
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("DELETE FROM intercept_rules WHERE id = ?", id)
 	return err
+}
+
+// ========================================
+// LLM Exchange
+// ========================================
+
+// SetLLMData marks a request as an LLM exchange and stores the parsed LLM data JSON.
+func (s *Store) SetLLMData(id int64, llmDataJSON string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("UPDATE requests SET is_llm = 1, llm_data = ? WHERE id = ?",
+		truncateStr(llmDataJSON, 4*1024*1024), id)
+	return err
+}
+
+// LLMExchangeListItem is a lightweight summary for the LLM list view.
+type LLMExchangeListItem struct {
+	ID         int64  `json:"id"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Host       string `json:"host"`
+	URL        string `json:"url"`
+	IsHTTPS    bool   `json:"is_https"`
+	CapturedAt string `json:"captured_at"`
+	// Snippet of the last user message
+	PromptSnippet string `json:"prompt_snippet"`
+	// Snippet of the response
+	ResponseSnippet string `json:"response_snippet"`
+}
+
+// ListLLM returns all LLM exchanges, newest first.
+func (s *Store) ListLLM(limit, offset int) ([]LLMExchangeListItem, int, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	var total int
+	if err := s.readDB().QueryRow("SELECT COUNT(*) FROM requests WHERE is_llm = 1").Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count llm: %w", err)
+	}
+
+	rows, err := s.readDB().Query(
+		`SELECT id, host, url, is_https, captured_at, llm_data
+		 FROM requests WHERE is_llm = 1
+		 ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query llm: %w", err)
+	}
+	defer rows.Close()
+
+	var items []LLMExchangeListItem
+	for rows.Next() {
+		var item LLMExchangeListItem
+		var llmDataStr string
+		if err := rows.Scan(&item.ID, &item.Host, &item.URL, &item.IsHTTPS, &item.CapturedAt, &llmDataStr); err != nil {
+			continue
+		}
+		// Parse llm_data for display fields
+		if llmDataStr != "" {
+			var ex models.LLMExchange
+			if err := json.Unmarshal([]byte(llmDataStr), &ex); err == nil {
+				item.Provider = ex.Provider
+				item.Model = ex.Model
+				item.PromptSnippet = truncateStr(lastUserMessage(ex.Messages), 200)
+				item.ResponseSnippet = truncateStr(ex.Response, 200)
+			}
+		}
+		items = append(items, item)
+	}
+	return items, total, nil
+}
+
+// GetLLMData retrieves the raw llm_data JSON for a specific request.
+func (s *Store) GetLLMData(id int64) (string, error) {
+	var llmData string
+	err := s.readDB().QueryRow("SELECT llm_data FROM requests WHERE id = ? AND is_llm = 1", id).Scan(&llmData)
+	if err != nil {
+		return "", err
+	}
+	return llmData, nil
+}
+
+// lastUserMessage returns the content of the last user-role message.
+func lastUserMessage(messages []models.LLMMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	if len(messages) > 0 {
+		return messages[len(messages)-1].Content
+	}
+	return ""
 }

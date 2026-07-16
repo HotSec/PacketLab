@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"packetlab/internal/api"
+	"packetlab/internal/llm"
 	"packetlab/internal/models"
 	"packetlab/internal/store"
 
@@ -23,6 +24,14 @@ import (
 
 // OnCapture 新请求捕获回调
 type OnCapture func(req *models.CapturedRequest)
+
+// requestContext is stored in ctx.UserData, extending the captured request
+// with LLM-specific parsed data.
+type requestContext struct {
+	captured   *models.CapturedRequest
+	llmProvider llm.Provider
+	llmReqInfo *llm.RequestInfo
+}
 
 // Server 代理服务器
 type Server struct {
@@ -101,17 +110,35 @@ func (s *Server) setupHandlers() {
 		}
 		maxReqBytes := int64(s.maxReqBodyKB) * 1024
 		if req.Body != nil {
-			bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxReqBytes+1))
-			if err == nil && len(bodyBytes) > 0 {
-				if len(bodyBytes) > int(maxReqBytes) {
-					captured.ReqBody = string(bodyBytes[:maxReqBytes])
-				} else {
-					captured.ReqBody = string(bodyBytes)
+			// 全量读取请求体：转发侧需要完整 body，存储侧再取截断
+			fullBody, err := io.ReadAll(req.Body)
+			if err == nil {
+				// 转发完整 body（设置 ContentLength 与 GetBody 以支持重试）
+				req.Body = io.NopCloser(bytes.NewReader(fullBody))
+				req.ContentLength = int64(len(fullBody))
+				req.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(bytes.NewReader(fullBody)), nil
 				}
-				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+				// 存储侧取截断
+				if len(fullBody) > 0 {
+					storeBody := fullBody
+					if int64(len(storeBody)) > maxReqBytes {
+						storeBody = storeBody[:maxReqBytes]
+					}
+					captured.ReqBody = string(storeBody)
+				}
 			}
 		}
-		ctx.UserData = captured
+
+		// LLM 检测：检查是否为已知 LLM API 请求
+		reqCtx := &requestContext{captured: captured}
+		provider := llm.DetectProvider(captured.Host, captured.Path)
+		if provider != llm.ProviderUnknown {
+			reqCtx.llmProvider = provider
+			reqCtx.llmReqInfo = processLLMRequest(provider, captured.ReqBody)
+		}
+
+		ctx.UserData = reqCtx
 
 		// 2. 拦截检查（manual 模式会阻塞等待）
 		if s.interceptor != nil {
@@ -128,20 +155,23 @@ func (s *Server) setupHandlers() {
 			return resp
 		}
 
-		captured, ok := ctx.UserData.(*models.CapturedRequest)
+		reqCtx, ok := ctx.UserData.(*requestContext)
 		if !ok {
 			return resp
 		}
+		captured := reqCtx.captured
 
 		captured.StatusCode = resp.StatusCode
 		captured.Protocol = resp.Proto
 		captured.ResHeaders = api.FlattenHeaders(resp.Header)
 		captured.DurationMs = time.Since(captured.CapturedAt).Milliseconds()
 
+		isLLM := llm.IsValidProvider(reqCtx.llmProvider)
+
 		// 检测 SSE 响应
 		if isSSEResponse(resp) && resp.Body != nil {
 			captured.IsSSE = true
-			s.handleSSEResponse(resp, captured)
+			s.handleSSEResponse(resp, captured, reqCtx)
 			return resp
 		}
 
@@ -160,6 +190,12 @@ func (s *Server) setupHandlers() {
 					captured.ResBody = string(bodyBytes)
 				}
 			}
+		}
+
+		// LLM 请求：同步保存 + 提取 LLM 数据
+		if isLLM {
+			s.saveLLMCaptured(captured, reqCtx)
+			return resp
 		}
 
 		// 入队批量写入（高流量下不阻塞代理）
@@ -262,7 +298,7 @@ func isSSEResponse(resp *http.Response) bool {
 }
 
 // handleSSEResponse 处理 SSE 流式响应：用 Pipe 同时转发给客户端和捕获事件
-func (s *Server) handleSSEResponse(resp *http.Response, captured *models.CapturedRequest) {
+func (s *Server) handleSSEResponse(resp *http.Response, captured *models.CapturedRequest, reqCtx *requestContext) {
 	if captured == nil {
 		return
 	}
@@ -279,6 +315,13 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 	captured.ID = id
 	if s.onCapture != nil {
 		s.onCapture(captured)
+	}
+
+	// LLM 流式响应：创建 assembler
+	isLLM := reqCtx != nil && llm.IsValidProvider(reqCtx.llmProvider)
+	var llmAssembler *llm.StreamAssembler
+	if isLLM {
+		llmAssembler = llm.NewStreamAssembler(reqCtx.llmProvider)
 	}
 
 	// 用 pipe 实现流式转发：写入端由 SSE 读取 goroutine 控制，读取端替代原始 body
@@ -318,6 +361,13 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 			if int64(captureBuf.Len()) < maxResBytes {
 				captureBuf.WriteString(line)
 				captureBuf.WriteByte('\n')
+			}
+
+			// LLM: feed data lines to assembler
+			if llmAssembler != nil {
+				if data := parseSSEDataLine(line); data != nil {
+					llmAssembler.Feed(data)
+				}
 			}
 
 			// 定时更新 DB 和推送 WebSocket
@@ -361,10 +411,37 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 			slog.Warn("proxy: SSE final update DB failed", "id", captured.ID, "error", err)
 		}
 
+		// LLM: save assembled exchange after stream completes
+		if llmAssembler != nil {
+			resInfo := llmAssembler.Result()
+			ex := buildLLMExchange(reqCtx.llmProvider, reqCtx.llmReqInfo, resInfo, captured.CapturedAt)
+			saveLLMExchange(s.store, captured.ID, ex)
+		}
+
 		if s.onCapture != nil {
 			capturedMu.Lock()
 			s.onCapture(captured)
 			capturedMu.Unlock()
 		}
 	}()
+}
+
+// saveLLMCaptured handles synchronous save + LLM data extraction for non-streamed LLM responses.
+func (s *Server) saveLLMCaptured(captured *models.CapturedRequest, reqCtx *requestContext) {
+	// Synchronous save to get the ID immediately
+	id, err := s.store.Save(captured)
+	if err != nil {
+		slog.Warn("proxy: LLM save failed", "url", captured.URL, "error", err)
+		return
+	}
+	captured.ID = id
+
+	// Parse response body as LLM response
+	resInfo := processLLMResponse(reqCtx.llmProvider, captured.ResBody)
+	ex := buildLLMExchange(reqCtx.llmProvider, reqCtx.llmReqInfo, resInfo, captured.CapturedAt)
+	saveLLMExchange(s.store, id, ex)
+
+	if s.onCapture != nil {
+		s.onCapture(captured)
+	}
 }
