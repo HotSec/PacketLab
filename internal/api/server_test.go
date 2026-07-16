@@ -23,7 +23,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, nil, false)
+	return New(st, nil, false, nil)
 }
 
 // helper: execute HTTP request against server

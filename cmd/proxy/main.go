@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +41,7 @@ func main() {
 	captureStreamTimeout := flag.Int("capture-stream-timeout", config.DefaultStreamTimeoutMin, "网卡抓包流空闲超时（分钟，0=默认2）")
 	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
 	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")
+	apiAllowOrigins := flag.String("api-allow-origins", "", "逗号分隔的 CORS/WebSocket 允许 Origin 列表（默认仅 localhost）")
 	flag.Parse()
 
 	// 结构化日志
@@ -53,6 +55,17 @@ func main() {
 	if err != nil {
 		slog.Error("配置加载失败", "error", err)
 		os.Exit(1)
+	}
+	// 解析 --api-allow-origins 为白名单（空 = 仅 localhost/回环）
+	if *apiAllowOrigins != "" {
+		var allowList []string
+		for _, o := range strings.Split(*apiAllowOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				allowList = append(allowList, o)
+			}
+		}
+		cfg.AllowOrigins = allowList
 	}
 	slog.Info("配置已加载", "proxy_port", cfg.ProxyPort, "api_port", cfg.APIPort,
 		"db", cfg.DBPath, "no_proxy", cfg.NoProxy, "no_mitm", cfg.NoMitm, "insecure", cfg.Insecure,
@@ -71,7 +84,7 @@ func main() {
 	frontendHandler := loadFrontend()
 
 	// 创建 API 服务器
-	apiSrv := api.New(st, frontendHandler, cfg.Insecure)
+	apiSrv := api.New(st, frontendHandler, cfg.Insecure, cfg.AllowOrigins)
 
 	// 创建拦截控制器
 	interceptMode, _ := st.GetSetting("intercept_mode")

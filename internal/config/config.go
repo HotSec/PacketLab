@@ -23,6 +23,7 @@ type Config struct {
 	CaptureStreamTimeoutMin int // 网卡抓包：流空闲超时（分钟），0=使用默认值
 	MaxReqBodyKB   int // 请求体最大 KB，0=使用默认值
 	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
+	AllowOrigins []string // CORS/WebSocket 允许的 Origin 白名单（空 = 仅 localhost）
 }
 
 // Default validated default values

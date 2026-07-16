@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"packetlab/internal/capture"
@@ -26,6 +27,8 @@ type Server struct {
 	resendSvc     *ResendService
 	harSvc        *HARService
 	rateLimiter   *rateLimiter
+	allowOrigins  []string
+	upgrader      websocket.Upgrader
 	captureEngine interface {
 		IsRunning() bool
 		Start() error
@@ -41,17 +44,24 @@ type Server struct {
 	}
 }
 
-func New(st *store.Store, frontendHandler http.Handler, insecure bool) *Server {
+func New(st *store.Store, frontendHandler http.Handler, insecure bool, allowOrigins []string) *Server {
 	hub := newWSHub()
 	go hub.run()
 
 	s := &Server{
-		store:       st,
-		hub:         hub,
-		frontend:    frontendHandler,
-		resendSvc:   NewResendService(st, hub, insecure),
-		harSvc:      NewHARService(st),
-		rateLimiter: newRateLimiter(120, time.Minute),
+		store:        st,
+		hub:          hub,
+		frontend:     frontendHandler,
+		resendSvc:    NewResendService(st, hub, insecure),
+		harSvc:       NewHARService(st),
+		rateLimiter:  newRateLimiter(120, time.Minute),
+		allowOrigins: allowOrigins,
+	}
+	s.upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return isAllowedOrigin(origin, s.allowOrigins)
+		},
 	}
 
 	s.setupRoutes()
@@ -92,6 +102,9 @@ func (s *Server) setupRoutes() {
 
 	mux.HandleFunc("/api/export/har", s.handleExportHAR)
 
+	mux.HandleFunc("/api/llm", s.handleLLMList)
+	mux.HandleFunc("/api/llm/", s.handleLLMByID)
+
 	mux.HandleFunc("/api/maintenance/cleanup", s.handleMaintenanceCleanup)
 
 	mux.HandleFunc("/api/metrics", s.handleMetrics)
@@ -106,7 +119,7 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) Handler() http.Handler {
-	h := securityHeadersMiddleware(corsMiddleware(recoveryMiddleware(requestIDMiddleware(requestIDInjectorMiddleware(s.mux)))))
+	h := securityHeadersMiddleware(corsMiddleware(s.allowOrigins)(recoveryMiddleware(requestIDMiddleware(requestIDInjectorMiddleware(s.mux)))))
 	return rateLimitMiddleware(s.rateLimiter)(h)
 }
 
@@ -821,15 +834,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // WebSocket
 // ========================================
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		return isAllowedOrigin(origin)
-	},
-}
-
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Warn("ws upgrade failed", "error", err)
 		http.Error(w, "WebSocket upgrade failed", http.StatusBadRequest)
@@ -874,4 +880,66 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(body)
+}
+
+// ========================================
+// LLM Exchange Handlers
+// ========================================
+
+func (s *Server) handleLLMList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAppError(w, ErrMethodNotAllowed())
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	items, total, err := s.store.ListLLM(limit, offset)
+	if err != nil {
+		slog.Error("list llm failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to list LLM exchanges"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"data":  items,
+		"total": total,
+		"limit": limit,
+	})
+}
+
+func (s *Server) handleLLMByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAppError(w, ErrMethodNotAllowed())
+		return
+	}
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/llm/")
+	if idStr == "" {
+		writeAppError(w, ErrValidation("Missing LLM exchange ID"))
+		return
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeAppError(w, ErrValidation("Invalid ID format"))
+		return
+	}
+	llmDataJSON, err := s.store.GetLLMData(id)
+	if err != nil {
+		writeAppError(w, ErrNotFound("LLM exchange", idStr))
+		return
+	}
+	if llmDataJSON == "" {
+		writeAppError(w, ErrNotFound("LLM exchange", idStr))
+		return
+	}
+	// Return the raw JSON directly (already a valid LLMExchange)
+	var raw json.RawMessage = json.RawMessage(llmDataJSON)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"data": raw,
+		"id":   id,
+	})
 }

@@ -69,7 +69,7 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	}
 	defer st.Close()
 
-	srv := New(st, nil, false)
+	srv := New(st, nil, false, nil)
 	handler := srv.Handler()
 	client := newE2EClient(t, handler, "http://localhost:9090")
 
@@ -329,7 +329,7 @@ func TestE2E_MultipleHostsFiltering(t *testing.T) {
 	st, _ := store.New(dir + "/multi.db")
 	defer st.Close()
 
-	srv := New(st, nil, false)
+	srv := New(st, nil, false, nil)
 	client := newE2EClient(t, srv.Handler(), "")
 
 	hosts := []string{"api.a.com", "api.b.com", "api.c.com"}
@@ -358,7 +358,7 @@ func TestE2E_InterceptLogsLifecycle(t *testing.T) {
 	st, _ := store.New(dir + "/intercept.db")
 	defer st.Close()
 
-	srv := New(st, nil, false)
+	srv := New(st, nil, false, nil)
 	client := newE2EClient(t, srv.Handler(), "")
 
 	st.SaveInterceptLog(&models.InterceptLog{

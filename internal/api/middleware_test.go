@@ -57,7 +57,7 @@ func TestIsAllowedOrigin(t *testing.T) {
 		origin   string
 		expected bool
 	}{
-		{"", true},
+		{"", false},
 		{"http://localhost", true},
 		{"http://localhost:8080", true},
 		{"http://localhost:3001", true},
@@ -74,10 +74,35 @@ func TestIsAllowedOrigin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.origin, func(t *testing.T) {
-			if got := isAllowedOrigin(tt.origin); got != tt.expected {
+			if got := isAllowedOrigin(tt.origin, nil); got != tt.expected {
 				t.Errorf("isAllowedOrigin(%q) = %v, want %v", tt.origin, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestIsAllowedOrigin_EmptyRejected(t *testing.T) {
+	if isAllowedOrigin("", nil) {
+		t.Fatal("empty origin should be rejected")
+	}
+}
+
+func TestIsAllowedOrigin_CustomWhitelist(t *testing.T) {
+	allowed := []string{"https://my.app"}
+	if !isAllowedOrigin("https://my.app", allowed) {
+		t.Fatal("custom whitelist should allow")
+	}
+	if isAllowedOrigin("https://evil.com", allowed) {
+		t.Fatal("non-whitelisted should reject")
+	}
+}
+
+func TestIsAllowedOrigin_LocalhostDefault(t *testing.T) {
+	if !isAllowedOrigin("http://localhost:9090", nil) {
+		t.Fatal("localhost default should allow")
+	}
+	if !isAllowedOrigin("http://127.0.0.1:8080", nil) {
+		t.Fatal("127.0.0.1 default should allow")
 	}
 }
 
@@ -85,7 +110,7 @@ func TestCORSMiddlewareAllowedOrigin(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := corsMiddleware(inner)
+	handler := corsMiddleware(nil)(inner)
 
 	req := httptest.NewRequest("GET", "/api/test", nil)
 	req.Header.Set("Origin", "http://localhost:8080")
@@ -104,7 +129,7 @@ func TestCORSMiddlewareDisallowedOrigin(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := corsMiddleware(inner)
+	handler := corsMiddleware(nil)(inner)
 
 	req := httptest.NewRequest("GET", "/api/test", nil)
 	req.Header.Set("Origin", "http://evil.com")
@@ -120,7 +145,7 @@ func TestCORSMiddlewareOptions(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("OPTIONS should not reach handler")
 	})
-	handler := corsMiddleware(inner)
+	handler := corsMiddleware(nil)(inner)
 
 	req := httptest.NewRequest("OPTIONS", "/api/test", nil)
 	w := httptest.NewRecorder()

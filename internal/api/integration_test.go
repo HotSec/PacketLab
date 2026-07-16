@@ -24,7 +24,7 @@ func newIntegrationServer(t *testing.T) *Server {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, nil, false)
+	return New(st, nil, false, nil)
 }
 
 func integrationRequest(t *testing.T, s *Server, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -496,7 +496,7 @@ func TestIntegration_PanicRecovery(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/test-panic", panicHandler)
-	wrapped := securityHeadersMiddleware(corsMiddleware(recoveryMiddleware(requestIDMiddleware(mux))))
+	wrapped := securityHeadersMiddleware(corsMiddleware(nil)(recoveryMiddleware(requestIDMiddleware(mux))))
 
 	req := httptest.NewRequest("GET", "/test-panic", nil)
 	w := httptest.NewRecorder()

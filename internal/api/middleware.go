@@ -36,45 +36,51 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if isAllowedOrigin(origin) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+func corsMiddleware(allowOrigins []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if isAllowedOrigin(origin, allowOrigins) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
-func isAllowedOrigin(origin string) bool {
+// isAllowedOrigin 检查 Origin 是否允许
+// 允许规则（按优先级）：
+//   1. 显式白名单（allowList）
+//   2. localhost / 127.0.0.1 / ::1 任意端口（默认）
+//   3. 空 Origin → 拒绝（防止 curl/脚本订阅）
+func isAllowedOrigin(origin string, allowList []string) bool {
 	if origin == "" {
-		return true
+		return false
 	}
+	// 显式白名单
+	for _, a := range allowList {
+		if a == origin {
+			return true
+		}
+	}
+	// localhost 默认
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
 	}
-	// 仅允许 http/https 本地源（localhost / 回环地址任意端口）
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
-	}
 	host := u.Hostname()
-	switch host {
-	case "localhost", "127.0.0.1", "::1", "localhost.localdomain":
-		return true
-	}
-	return false
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func securityHeadersMiddleware(next http.Handler) http.Handler {
