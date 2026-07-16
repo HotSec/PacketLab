@@ -202,6 +202,16 @@ func (p *AsyncWriterPool) loop() {
 	}
 }
 
+// flushBackoffs SaveBatch 失败重试的指数退避间隔。
+// slice 长度 = 重试次数（3 次）；最后一次失败不退避，直接进入 sync 兜底，
+// 因此最后一个元素 200ms 不会被等待，实际退避总和 = 50 + 100 = 150ms。
+// SQLite busy 时 3 次重试瞬间打满会加剧锁竞争，退避让锁有机会释放。
+var flushBackoffs = []time.Duration{
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+}
+
 func (p *AsyncWriterPool) flushAll() {
 	batch := p.buf.PopBatch()
 	if len(batch) == 0 {
@@ -219,7 +229,8 @@ func (p *AsyncWriterPool) flushAll() {
 		}
 		saved := false
 		chunk := reqs[i:end]
-		for attempt := 1; attempt <= 3; attempt++ {
+		var lastErr error
+		for attempt := 0; attempt < len(flushBackoffs); attempt++ {
 			ids, err := p.store.SaveBatch(chunk)
 			if err == nil {
 				for j, id := range ids {
@@ -231,10 +242,25 @@ func (p *AsyncWriterPool) flushAll() {
 				saved = true
 				break
 			}
-			slog.Warn("async writer batch failed, retrying", "attempt", attempt, "error", err, "count", len(chunk))
+			lastErr = err
+			slog.Warn("async writer batch failed, retrying",
+				"attempt", attempt+1, "error", err, "count", len(chunk))
+			// 最后一次不再退避，直接进入 sync 兜底
+			if attempt < len(flushBackoffs)-1 {
+				select {
+				case <-p.stopCh:
+					// Stop 信号到来：与规格计划代码的 return 不同，
+					// 这里进入 sync 兜底保存当前 chunk 数据（避免丢数据），
+					// 后续 chunk 也会立即 fallback。
+					goto fallback
+				case <-time.After(flushBackoffs[attempt]):
+				}
+			}
 		}
+	fallback:
 		if !saved {
-			slog.Error("async writer batch failed after 3 retries, falling back to sync", "count", len(chunk))
+			slog.Error("async writer batch failed after all retries, falling back to sync",
+				"error", lastErr, "count", len(chunk))
 			for _, req := range chunk {
 				if id, err := p.store.Save(req); err == nil {
 					req.ID = id
