@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -8,6 +9,9 @@ import (
 
 	"packetlab/internal/models"
 	"packetlab/internal/store"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 )
 
 func TestDetermineDirection(t *testing.T) {
@@ -682,4 +686,306 @@ func panics(fn func()) (panicked bool) {
 	}()
 	fn()
 	return
+}
+
+// ---- Task 19: --capture-max-streams CLI with LRU eviction ----
+
+// TestEngine_SetMaxStreams 验证 Engine.SetMaxStreams setter 行为：
+//   - 正数入参直接写入 maxStreams 字段
+//   - <=0 入参应被忽略，保持原值不变（默认值兜底逻辑放在 NewAssembler 中）
+//
+// 此测试在添加 SetMaxStreams 方法前会编译失败（method undefined）→ RED。
+// 与 Task 15 的 TestEngine_SetRingBufSize 模式一致。
+func TestEngine_SetMaxStreams(t *testing.T) {
+	e := &Engine{}
+	e.SetMaxStreams(1024)
+	if e.maxStreams != 1024 {
+		t.Fatalf("expected maxStreams=1024, got %d", e.maxStreams)
+	}
+	// 0 不应改变 / 0 should be ignored
+	e.SetMaxStreams(0)
+	if e.maxStreams != 1024 {
+		t.Fatalf("expected maxStreams unchanged=1024, got %d", e.maxStreams)
+	}
+	// 负数也应被忽略 / negative should also be ignored
+	e.SetMaxStreams(-1)
+	if e.maxStreams != 1024 {
+		t.Fatalf("expected maxStreams unchanged=1024 after negative, got %d", e.maxStreams)
+	}
+}
+
+// TestEngine_MaxStreamsEviction 验证 evictOldestIdleStream 按 lastActive 升序淘汰最老流。
+//
+// 修改前：evictOldestIdleStream 方法不存在 → 编译失败 → RED。
+// 修改后：调用两次后剩余 10 条，最老的 2 条被删除，第 3 老及以后保留。
+//
+// 不构造真实 gopacket.Packet（构造复杂），直接测 evictOldestIdleStream 单元行为，
+// 与 TestFlushOlderThanRemovesExpiredStreams 的测试模式一致（手动填充 a.streams）。
+func TestEngine_MaxStreamsEviction(t *testing.T) {
+	e := &Engine{
+		procCache: make(map[string]*models.ProcessInfo),
+	}
+	e.SetMaxStreams(10)
+	pool := NewTCPStreamPool(e)
+	a := NewAssembler(pool)
+
+	// NewAssembler 必须从 pool.engine.maxStreams 读取并填充 a.maxStreams
+	if a.maxStreams != 10 {
+		t.Fatalf("expected assembler.maxStreams=10 (from engine), got %d", a.maxStreams)
+	}
+
+	// 添加 12 个流，每个流有不同的 lastActive 时间（升序）
+	// Add 12 streams with distinct lastActive (ascending)
+	baseTime := time.Now()
+	keys := make([]string, 12)
+	for i := 0; i < 12; i++ {
+		keys[i] = fmt.Sprintf("10.0.0.%d:80-192.168.1.100:543%d", i, i)
+		stream := pool.New(net.ParseIP(fmt.Sprintf("10.0.0.%d", i)), uint16(54300+i), 80)
+		stream.mu.Lock()
+		stream.lastActive = baseTime.Add(time.Duration(i) * time.Second)
+		stream.mu.Unlock()
+		a.streams[keys[i]] = stream
+	}
+
+	if len(a.streams) != 12 {
+		t.Fatalf("expected 12 streams after setup, got %d", len(a.streams))
+	}
+
+	// 淘汰最老的 2 个流 / evict 2 oldest streams
+	a.mu.Lock()
+	a.evictOldestIdleStream()
+	a.evictOldestIdleStream()
+	a.mu.Unlock()
+
+	if len(a.streams) != 10 {
+		t.Fatalf("expected 10 streams after 2 evictions, got %d", len(a.streams))
+	}
+
+	// 最老的 2 个（lastActive 最早）应被删除
+	// Oldest 2 (earliest lastActive) should be removed
+	if _, ok := a.streams[keys[0]]; ok {
+		t.Errorf("expected oldest stream %q to be evicted, but still present", keys[0])
+	}
+	if _, ok := a.streams[keys[1]]; ok {
+		t.Errorf("expected 2nd oldest stream %q to be evicted, but still present", keys[1])
+	}
+
+	// 第 3 老及以后应保留 / 3rd oldest onward should remain
+	if _, ok := a.streams[keys[2]]; !ok {
+		t.Errorf("expected 3rd oldest stream %q to still be present, but was evicted", keys[2])
+	}
+	if _, ok := a.streams[keys[11]]; !ok {
+		t.Errorf("expected newest stream %q to still be present, but was evicted", keys[11])
+	}
+
+	// 验证 StreamsEvicted 计数（Assembler 上的淘汰逻辑不应直接计数，
+	// 计数在 Assemble 调用路径中由 engine.stats.StreamsEvicted 完成；此处直接调用
+	// evictOldestIdleStream 不应增加计数）。
+	// Verify StreamsEvicted stat: eviction-only method should not increment;
+	// counting happens at Assemble call site.
+	if got := e.stats.StreamsEvicted.Load(); got != 0 {
+		t.Errorf("expected StreamsEvicted=0 (direct evict call should not count), got %d", got)
+	}
+}
+
+// TestEngine_NewAssembler_ReadsMaxStreamsFromEngine 验证 NewAssembler
+// 从 pool.engine.maxStreams 读取上限，并在 engine.maxStreams<=0 时用默认值 1000 兜底。
+//
+// 修改前：Assembler 无 maxStreams 字段 → 编译失败 → RED。
+// 修改后：maxStreams=0 时 a.maxStreams=1000；maxStreams=64 时 a.maxStreams=64。
+func TestEngine_NewAssembler_ReadsMaxStreamsFromEngine(t *testing.T) {
+	// 默认兜底：engine.maxStreams=0 → a.maxStreams=1000
+	e0 := &Engine{procCache: make(map[string]*models.ProcessInfo)}
+	pool0 := NewTCPStreamPool(e0)
+	a0 := NewAssembler(pool0)
+	if a0.maxStreams != 1000 {
+		t.Fatalf("default fallback: expected a.maxStreams=1000, got %d", a0.maxStreams)
+	}
+
+	// 显式设置：engine.maxStreams=64 → a.maxStreams=64
+	e1 := &Engine{procCache: make(map[string]*models.ProcessInfo)}
+	e1.SetMaxStreams(64)
+	pool1 := NewTCPStreamPool(e1)
+	a1 := NewAssembler(pool1)
+	if a1.maxStreams != 64 {
+		t.Fatalf("explicit set: expected a.maxStreams=64, got %d", a1.maxStreams)
+	}
+}
+
+// TestEngine_GetMetrics_IncludesStreamsEvicted 验证 GetMetrics 暴露 streams_evicted。
+//
+// 修改前：GetMetrics 无 streams_evicted 字段 → 测试 FAIL。
+// 修改后：GetMetrics 返回 streams_evicted 计数。
+func TestEngine_GetMetrics_IncludesStreamsEvicted(t *testing.T) {
+	e := &Engine{}
+	e.stats.StreamsEvicted.Add(7)
+	m := e.GetMetrics()
+	v, ok := m["streams_evicted"]
+	if !ok {
+		t.Fatal("expected streams_evicted key in metrics, missing")
+	}
+	got, ok := v.(int64)
+	if !ok {
+		t.Fatalf("expected streams_evicted to be int64, got %T", v)
+	}
+	if got != 7 {
+		t.Errorf("expected streams_evicted=7, got %d", got)
+	}
+}
+
+// newTestTCPPacket 构造一个 IPv4+TCP 的 gopacket.Packet，用于测试 Assemble。
+// 由 gopacket.SerializeLayers 生成 raw bytes，再用 LayerTypeEthernet decoder 解码，
+// 确保 packet.Layer(LayerTypeTCP) / packet.Layer(LayerTypeIPv4) 可正常返回。
+//
+// Build a IPv4+TCP gopacket.Packet for testing Assemble. Serializes layers to
+// raw bytes and decodes them back so Layer() lookups work as expected.
+func newTestTCPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte, fin, rst bool) gopacket.Packet {
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{ComputeChecksums: true, FixLengths: true}
+
+	tcp := &layers.TCP{
+		SrcPort: layers.TCPPort(srcPort),
+		DstPort: layers.TCPPort(dstPort),
+		Seq:     1000,
+		Window:  65535,
+		FIN:     fin,
+		RST:     rst,
+	}
+	ip := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: layers.IPProtocolTCP,
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
+	}
+	// TCP checksum 计算需要网络层信息 / TCP checksum requires network layer info
+	tcp.SetNetworkLayerForChecksum(ip)
+	eth := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
+		DstMAC:       net.HardwareAddr{0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb},
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip, tcp, gopacket.Payload(payload)); err != nil {
+		panic(err)
+	}
+	return gopacket.NewPacket(buf.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+}
+
+// TestEngine_Assemble_EvictsAndCounts 验证 Assemble 在容量满时触发 LRU 淘汰 +
+// StreamsEvicted 计数，并在释放 a.mu 后 flush 被淘汰流的残留数据（pendingReq 被
+// emit 到 DB）。
+//
+// Bug（Important #1）：修改前 evictOldestIdleStream 直接 delete 不 flush，被淘汰
+// 流的 pendingReq / sseBuf / clientBuf / serverBuf 全部丢失；且注释错误地声称
+// "GC ticker 兜底"，但 FlushOlderThan（GC ticker）只遍历 a.streams，被 delete 的
+// 流已不在 map 中，永远不会被处理。
+//
+// 修改后：evictOldestIdleStream 返回被淘汰流指针，Assemble 在释放 a.mu 后调用
+// flushEvictedStream flush 残留数据。
+//
+// 本测试构造真实 gopacket.Packet（IPv4+TCP）端到端验证 Assemble 路径：
+//  1. 填充 2 条流达到 maxStreams=2 上限，第 1 条流留下 pending 请求 + 部分响应
+//  2. 发送第 3 条流的 packet → 触发淘汰第 1 条流（lastActive 最老）
+//  3. 断言 StreamsEvicted == 1，且第 1 条流的 pending 请求被 flush 到 DB
+func TestEngine_Assemble_EvictsAndCounts(t *testing.T) {
+	e, st := newTestEngine(t)
+	e.SetMaxStreams(2)
+	pool := NewTCPStreamPool(e)
+	a := NewAssembler(pool)
+
+	if a.maxStreams != 2 {
+		t.Fatalf("expected a.maxStreams=2, got %d", a.maxStreams)
+	}
+
+	// Stream 1: client→server (HTTP request)，建立 pendingReq
+	// 注意：payload 含两个 header（Host + User-Agent），因为 parseHTTPRequest
+	// 的 indexDoubleCRLF 返回 \r\n\r\n 的起始位置，data[:headerEnd] 会漏掉最后
+	// 一个 header 行的 \r\n；若 Host 是最后一个 header，会因缺少 \n 而无法解析。
+	// 加一个 User-Agent 让 Host 不是最后一个 header，确保 Host 被正确解析。
+	// Stream 1: client→server (HTTP request), establishes pendingReq.
+	// Note: payload has two headers (Host + User-Agent) because parseHTTPRequest's
+	// indexDoubleCRLF returns the start of \r\n\r\n, and data[:headerEnd] misses
+	// the last header line's \r\n; if Host were the last header, it wouldn't be
+	// parsed due to missing \n. Adding User-Agent ensures Host is parsed.
+	pkt1Req := newTestTCPPacket(
+		net.ParseIP("10.0.0.1"), net.ParseIP("192.168.1.1"),
+		54321, 80,
+		[]byte("GET /api/evict HTTP/1.1\r\nHost: evict.test\r\nUser-Agent: test/1.0\r\n\r\n"),
+		false, false,
+	)
+	a.Assemble(pkt1Req)
+
+	// Stream 1: server→client (partial response，无 Content-Length)，
+	// tryExtractHTTP 不会 emit（等待连接关闭），pendingReq + serverBuf 残留
+	// Stream 1: server→client (partial response, no Content-Length);
+	// tryExtractHTTP won't emit (waits for close), pendingReq + serverBuf remain
+	pkt1Resp := newTestTCPPacket(
+		net.ParseIP("192.168.1.1"), net.ParseIP("10.0.0.1"),
+		80, 54321,
+		[]byte("HTTP/1.1 200 OK\r\n\r\npartial-body-no-content-length"),
+		false, false,
+	)
+	a.Assemble(pkt1Resp)
+
+	// Stream 2: 不同五元组，填满容量 / Different 5-tuple, fill capacity
+	pkt2 := newTestTCPPacket(
+		net.ParseIP("10.0.0.2"), net.ParseIP("192.168.1.1"),
+		54322, 80,
+		[]byte("GET /api/other HTTP/1.1\r\nHost: other.test\r\n\r\n"),
+		false, false,
+	)
+	a.Assemble(pkt2)
+
+	if len(a.streams) != 2 {
+		t.Fatalf("expected 2 streams after setup, got %d", len(a.streams))
+	}
+
+	beforeEvicted := e.stats.StreamsEvicted.Load()
+
+	// 触发淘汰：第 3 条流（新 streamKey）→ 应淘汰 stream 1（lastActive 最老）
+	// Trigger eviction: 3rd stream (new streamKey) → should evict stream 1 (oldest)
+	pkt3 := newTestTCPPacket(
+		net.ParseIP("10.0.0.3"), net.ParseIP("192.168.1.1"),
+		54323, 80,
+		[]byte("GET /api/third HTTP/1.1\r\nHost: third.test\r\n\r\n"),
+		false, false,
+	)
+	a.Assemble(pkt3)
+
+	afterEvicted := e.stats.StreamsEvicted.Load()
+	if afterEvicted != beforeEvicted+1 {
+		t.Errorf("expected StreamsEvicted=%d, got %d", beforeEvicted+1, afterEvicted)
+	}
+
+	if len(a.streams) > 2 {
+		t.Errorf("expected len(streams)<=2 after eviction, got %d", len(a.streams))
+	}
+
+	// 验证被淘汰的 stream 1 的 pending 数据已 flush 到 DB（修复 #1 的核心断言）
+	// Verify evicted stream 1's pending data was flushed to DB (core assertion for fix #1)
+	e.writer.Stop()
+
+	items, total, _ := st.List("", "", "", false, 50, 0)
+	if total == 0 {
+		t.Fatal("expected evicted stream's pending request to be flushed to DB, got 0 records")
+	}
+
+	foundEvictedReq := false
+	for _, item := range items {
+		req, _ := st.Get(item.ID)
+		if req == nil {
+			continue
+		}
+		if req.URL == "http://evict.test/api/evict" {
+			foundEvictedReq = true
+			if req.StatusCode != 200 {
+				t.Errorf("expected evicted req StatusCode=200, got %d", req.StatusCode)
+			}
+			break
+		}
+	}
+	if !foundEvictedReq {
+		t.Errorf("evicted stream's request (http://evict.test/api/evict) not found in DB; flushEvictedStream did not emit pendingReq")
+	}
 }

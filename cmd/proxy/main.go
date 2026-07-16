@@ -40,6 +40,7 @@ func main() {
 	captureNoProc := flag.Bool("capture-no-proc", false, "禁用进程关联")
 	captureStreamTimeout := flag.Int("capture-stream-timeout", config.DefaultStreamTimeoutMin, "网卡抓包流空闲超时（分钟，0=默认2）")
 	captureRingEntries := flag.Int("capture-ring-entries", config.DefaultCaptureRingEntries, "网卡抓包环形缓冲区条目数（向上取 2 的幂，0=默认262144）")
+	captureMaxStreams := flag.Int("capture-max-streams", config.DefaultMaxStreams, "max concurrent TCP streams for NIC capture (LRU eviction when exceeded, min 64)")
 	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
 	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")
 	apiAllowOrigins := flag.String("api-allow-origins", "", "逗号分隔的 CORS/WebSocket 允许 Origin 列表（默认仅 localhost）")
@@ -52,7 +53,7 @@ func main() {
 	// 集中化配置 fail-fast 校验
 	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure,
 		*captureFlag, *captureIFace, *captureBPF, *captureNoProc,
-		*captureStreamTimeout, *maxReqBodyKB, *maxResBodyKB, *captureRingEntries)
+		*captureStreamTimeout, *maxReqBodyKB, *maxResBodyKB, *captureRingEntries, *captureMaxStreams)
 	if err != nil {
 		slog.Error("配置加载失败", "error", err)
 		os.Exit(1)
@@ -112,6 +113,7 @@ func main() {
 		capEngine.SetStreamTimeout(time.Duration(cfg.CaptureStreamTimeoutMin) * time.Minute)
 		capEngine.SetMaxResBytes(int64(cfg.MaxResBodyKB) * 1024)
 		capEngine.SetRingBufSize(cfg.CaptureRingEntries)
+		capEngine.SetMaxStreams(cfg.MaxStreams)
 		if err := capEngine.Start(); err != nil {
 			slog.Warn("抓包引擎启动失败（可能需要 sudo 权限）",
 				"iface", iface, "error", err,

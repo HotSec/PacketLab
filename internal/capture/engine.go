@@ -33,6 +33,7 @@ type Engine struct {
 	streamTimeout time.Duration // 流空闲超时（超过则 GC 清理并 emit）
 	maxResBytes   int64         // 单个响应体最大保留字节（截断阈值，与代理侧 config 统一）
 	ringBufSize   int           // 网卡抓包环形缓冲区条目数（<=0 时在 Start 路径用默认值兜底）
+	maxStreams    int           // 单个 worker Assembler 的最大并发流数（<=0 时 NewAssembler 用默认值 1000 兜底）
 
 	streamPool  *TCPStreamPool
 	assembler   *Assembler
@@ -68,10 +69,11 @@ type pcapHandle interface {
 
 // Stats 抓包统计
 type Stats struct {
-	PacketsRecv  atomic.Int64
-	HTTPFound    atomic.Int64
-	PacketsDrop  atomic.Int64
-	StreamsDrop  atomic.Int64
+	PacketsRecv   atomic.Int64
+	HTTPFound     atomic.Int64
+	PacketsDrop   atomic.Int64
+	StreamsDrop   atomic.Int64
+	StreamsEvicted atomic.Int64 // 因超过 maxStreams 而 LRU 淘汰的流数
 }
 
 // New 创建抓包引擎
@@ -119,6 +121,17 @@ func (e *Engine) SetMaxResBytes(n int64) {
 func (e *Engine) SetRingBufSize(n int) {
 	if n > 0 {
 		e.ringBufSize = n
+	}
+}
+
+// SetMaxStreams 设置最大并发 TCP 流数（超限 LRU 淘汰）。
+// 必须在 Start / NewAssembler 之前调用；<=0 时忽略，由 NewAssembler 用默认值 1000 兜底。
+// Set max concurrent TCP streams (LRU eviction on overflow).
+// Must be called before Start / NewAssembler; <=0 is ignored and
+// NewAssembler falls back to default 1000.
+func (e *Engine) SetMaxStreams(n int) {
+	if n > 0 {
+		e.maxStreams = n
 	}
 }
 
@@ -219,9 +232,10 @@ func (e *Engine) GetStats() (int64, int64) {
 // GetMetrics 获取运行指标
 func (e *Engine) GetMetrics() map[string]interface{} {
 	m := map[string]interface{}{
-		"packets":  e.stats.PacketsRecv.Load(),
-		"http":     e.stats.HTTPFound.Load(),
-		"running":  e.running.Load(),
+		"packets":          e.stats.PacketsRecv.Load(),
+		"http":             e.stats.HTTPFound.Load(),
+		"running":          e.running.Load(),
+		"streams_evicted":  e.stats.StreamsEvicted.Load(),
 	}
 	if e.ringBuf != nil {
 		m["ring_usage"] = e.ringBuf.Usage()
@@ -433,18 +447,29 @@ func (e *Engine) flushEmitBuf() {
 //  1. Assembler.mu
 //  2. TCPStream.mu
 //
-// 参考实现：FlushOlderThan / HandleClose 均遵循此顺序。
+// 参考实现：FlushOlderThan / HandleClose / evictOldestIdleStream 均遵循此顺序。
 type Assembler struct {
-	pool    *TCPStreamPool
-	streams map[string]*TCPStream
-	mu      sync.Mutex
+	pool       *TCPStreamPool
+	streams    map[string]*TCPStream
+	mu         sync.Mutex
+	maxStreams int // 单 worker 最大并发流数（NewAssembler 从 pool.engine 读取，默认 1000）
 }
 
 // NewAssembler 创建重组器
+//
+// maxStreams 从 pool.engine.maxStreams 读取（带默认值 1000 兜底），
+// 这样 workerLoop 创建 assembler 时无需修改 NewAssembler 签名。
+// maxStreams is read from pool.engine.maxStreams (with default fallback 1000),
+// so workerLoop can create assemblers without changing NewAssembler signature.
 func NewAssembler(pool *TCPStreamPool) *Assembler {
+	maxStreams := 1000
+	if pool != nil && pool.engine != nil && pool.engine.maxStreams > 0 {
+		maxStreams = pool.engine.maxStreams
+	}
 	return &Assembler{
-		pool:    pool,
-		streams: make(map[string]*TCPStream),
+		pool:       pool,
+		streams:    make(map[string]*TCPStream),
+		maxStreams: maxStreams,
 	}
 }
 
@@ -510,18 +535,40 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	}
 	streamKey := fmt.Sprintf("%s:%d-%s:%d", keyA, portA, keyB, portB)
 
+	var evictedStream *TCPStream
 	a.mu.Lock()
 	stream, ok := a.streams[streamKey]
 	if !ok {
-		if len(a.streams) >= 10000 {
-			a.mu.Unlock()
-			a.pool.engine.stats.StreamsDrop.Add(1)
-			return
+		if len(a.streams) >= a.maxStreams {
+			// 容量超限：LRU 淘汰 lastActive 最老的流。evictOldestIdleStream 在持
+			// a.mu 时 delete 并返回 stream 指针；flush 必须在释放 a.mu 后执行
+			// （tryExtractHTTPOnClose / flushSSEEvents 可能做 I/O: store.Save /
+			// hub.Broadcast），由 flushEvictedStream 完成。
+			// Capacity exceeded: LRU-evict the oldest lastActive stream.
+			// evictOldestIdleStream deletes under a.mu and returns the pointer;
+			// flush runs after a.mu is released (tryExtractHTTPOnClose /
+			// flushSSEEvents may do I/O: store.Save / hub.Broadcast).
+			evictedStream = a.evictOldestIdleStream()
+			if evictedStream != nil {
+				a.pool.engine.stats.StreamsEvicted.Add(1)
+			}
+			if len(a.streams) >= a.maxStreams {
+				// 淘汰后仍满（理论上不应发生，evictOldestIdleStream 必删一条）→ 丢弃新流
+				// Still full after eviction (shouldn't happen) → drop the new flow
+				a.mu.Unlock()
+				flushEvictedStream(evictedStream)
+				a.pool.engine.stats.StreamsDrop.Add(1)
+				return
+			}
 		}
 		stream = a.pool.New(clientIP, clientPort, serverPort)
 		a.streams[streamKey] = stream
 	}
 	a.mu.Unlock()
+
+	// 锁外 flush 被淘汰流的残留数据（pendingReq / SSE 事件）。
+	// Flush the evicted stream's residual data outside a.mu.
+	flushEvictedStream(evictedStream)
 
 	if len(tcp.Payload) > 0 {
 		stream.Feed(tcp.Payload, isClientToServer)
@@ -595,6 +642,73 @@ func (a *Assembler) FlushAllWithPending(engine *Engine) {
 		s.mu.Unlock()
 	}
 	a.streams = make(map[string]*TCPStream)
+}
+
+// evictOldestIdleStream 淘汰 lastActive 最老的流（LRU），从 a.streams 中 delete
+// 并返回被淘汰流指针。
+//
+// 调用方负责在释放 a.mu 后对返回的 stream 调用 flushEvictedStream 以 flush 残留
+// 数据（pendingReq / SSE 事件）。不能依赖 GC ticker 兜底：FlushOlderThan（GC
+// ticker）只遍历 a.streams，被 delete 的流已不在 map 中，永远不会被 GC 处理。
+//
+// 调用前必须已持有 a.mu；本方法在持有 a.mu 期间内获取 stream.mu 读 lastActive，
+// 符合锁顺序约定（Assembler.mu → TCPStream.mu）。
+//
+// Evict the stream with the oldest lastActive (LRU): deletes it from a.streams
+// and returns the stream pointer. Caller MUST flush the returned stream after
+// releasing a.mu (via flushEvictedStream); GC ticker cannot be relied on
+// because FlushOlderThan only iterates a.streams, and the evicted stream is
+// already removed from the map.
+//
+// Caller MUST already hold a.mu; this method acquires stream.mu while
+// holding a.mu, consistent with lock order (Assembler.mu → TCPStream.mu).
+func (a *Assembler) evictOldestIdleStream() *TCPStream {
+	var oldestKey string
+	var oldestTime time.Time
+	for k, stream := range a.streams {
+		stream.mu.Lock()
+		t := stream.lastActive
+		stream.mu.Unlock()
+		if oldestTime.IsZero() || t.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = t
+		}
+	}
+	if oldestKey == "" {
+		return nil
+	}
+	stream := a.streams[oldestKey]
+	delete(a.streams, oldestKey)
+	return stream
+}
+
+// flushEvictedStream 在锁外 flush 被淘汰流的残留数据（pendingReq / SSE 事件）。
+//
+// 必须在释放 a.mu 后调用：tryExtractHTTPOnClose / flushSSEEvents 可能做 I/O
+// （store.Save / hub.Broadcast），不应持 a.mu。本函数自身获取 stream.mu
+// （Assembler.mu 已释放，仅持 stream.mu，无锁序冲突）。
+//
+// s 为 nil 时为 no-op（调用方无需做 nil 检查）。
+//
+// Flush residual data (pendingReq / SSE events) of an evicted stream outside
+// a.mu. Must be called after releasing a.mu: tryExtractHTTPOnClose /
+// flushSSEEvents may do I/O (store.Save / hub.Broadcast) and must not hold
+// a.mu. This function acquires stream.mu (a.mu already released, no
+// lock-order conflict). No-op when s is nil.
+func flushEvictedStream(s *TCPStream) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nonHTTP {
+		return
+	}
+	if s.ssePending {
+		s.flushSSEEvents()
+	} else {
+		s.tryExtractHTTPOnClose()
+	}
 }
 
 // ========================================

@@ -22,6 +22,7 @@ type Config struct {
 	CaptureNoProc  bool
 	CaptureStreamTimeoutMin int // 网卡抓包：流空闲超时（分钟），0=使用默认值
 	CaptureRingEntries int // 网卡抓包：环形缓冲区条目数（向上取 2 的幂），0=使用默认值
+	MaxStreams int // 网卡抓包：最大并发 TCP 流数（超限 LRU 淘汰），0=使用默认值，最小 64
 	MaxReqBodyKB   int // 请求体最大 KB，0=使用默认值
 	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
 	AllowOrigins []string // CORS/WebSocket 允许的 Origin 白名单（空 = 仅 localhost）
@@ -36,13 +37,14 @@ const (
 	DefaultMaxResBodyKB = 4096  // 4MB
 	DefaultStreamTimeoutMin = 2 // 网卡抓包流空闲超时默认 2 分钟
 	DefaultCaptureRingEntries = 262144 // 网卡抓包环形缓冲区默认条目数（256K，向上取 2 的幂）
+	DefaultMaxStreams = 1000 // 网卡抓包最大并发 TCP 流数默认值（超限 LRU 淘汰）
 	defaultOrg          = "PacketLab"
 )
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
 func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	capture bool, captureIface, captureBPF string, captureNoProc bool,
-	streamTimeoutMin, maxReqBodyKB, maxResBodyKB, captureRingEntries int) (*Config, error) {
+	streamTimeoutMin, maxReqBodyKB, maxResBodyKB, captureRingEntries, maxStreams int) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -91,6 +93,17 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	if captureRingEntries == 0 {
 		captureRingEntries = DefaultCaptureRingEntries
 	}
+	// maxStreams：负数非法；0 用默认值；正数但 < 64 非法（计划要求 >= 64）
+	// maxStreams: negative invalid; 0 uses default; positive but < 64 invalid (plan requires >= 64)
+	if maxStreams < 0 {
+		return nil, fmt.Errorf("config: capture-max-streams must be >= 0, got %d", maxStreams)
+	}
+	if maxStreams == 0 {
+		maxStreams = DefaultMaxStreams
+	}
+	if maxStreams > 0 && maxStreams < 64 {
+		return nil, fmt.Errorf("config: capture-max-streams must be >= 64, got %d", maxStreams)
+	}
 
 	cfg := &Config{
 		ProxyPort:              proxyPort,
@@ -107,6 +120,7 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		CaptureNoProc:          captureNoProc,
 		CaptureStreamTimeoutMin: streamTimeoutMin,
 		CaptureRingEntries:     captureRingEntries,
+		MaxStreams:             maxStreams,
 		MaxReqBodyKB:           maxReqBodyKB,
 		MaxResBodyKB:           maxResBodyKB,
 	}
