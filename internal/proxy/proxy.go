@@ -178,17 +178,18 @@ func (s *Server) setupHandlers() {
 		// 普通响应：读取响应体（完整转发，捕获最多 maxResBodyKB）
 		maxResBytes := int64(s.maxResBodyKB) * 1024
 		if resp.Body != nil {
-			bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResBytes+1))
-			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // 始终恢复 body
+			// 全量读取响应体：转发侧需要完整 body，存储侧再取截断
+			fullBody, err := io.ReadAll(resp.Body)
+			resp.Body = io.NopCloser(bytes.NewReader(fullBody)) // 始终恢复完整 body
 			if err != nil {
 				slog.Warn("proxy: read response body failed", "url", captured.URL, "error", err)
-			} else if len(bodyBytes) > 0 {
-				captured.SizeBytes = int64(len(bodyBytes))
-				if len(bodyBytes) > int(maxResBytes) {
-					captured.ResBody = string(bodyBytes[:maxResBytes])
-				} else {
-					captured.ResBody = string(bodyBytes)
+			} else if len(fullBody) > 0 {
+				captured.SizeBytes = int64(len(fullBody))
+				storeBody := fullBody
+				if int64(len(storeBody)) > maxResBytes {
+					storeBody = storeBody[:maxResBytes]
 				}
+				captured.ResBody = string(storeBody)
 			}
 		}
 

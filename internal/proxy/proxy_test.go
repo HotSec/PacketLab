@@ -88,3 +88,61 @@ func TestProxy_ForwardsFullRequestBody(t *testing.T) {
 			received, int64(bodySize))
 	}
 }
+
+// TestProxy_ForwardsFullResponseBody 验证代理转发完整的响应体给客户端，
+// 即使响应体超过 maxResBodyKB 也不应被截断（仅存储侧截断）。
+//
+// Bug 1 响应侧复现：旧实现用 io.LimitReader(resp.Body, maxResBytes+1)
+// 读取后用截断的 bodyBytes 替换 resp.Body 转发，导致 10MB 响应只到 4MB。
+func TestProxy_ForwardsFullResponseBody(t *testing.T) {
+	// 1. 上游服务器：返回 10MB body
+	bodySize := 10 * 1024 * 1024
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", bodySize))
+		w.WriteHeader(http.StatusOK)
+		// 不能依赖 Write 后的 Content-Length 校验，直接写完整 body
+		if _, err := w.Write(bytes.Repeat([]byte("a"), bodySize)); err != nil {
+			t.Logf("upstream write: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	// 2. 创建代理（maxResBodyKB=4，即 4MB；10MB body 远超此阈值）
+	dir := t.TempDir()
+	st, err := store.New(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	s := New(0, st, nil, nil, nil, nil, 64, 4)
+	proxySrv := httptest.NewServer(s.proxy)
+	defer proxySrv.Close()
+	defer s.Stop()
+
+	// 3. 配置走代理的 HTTP 客户端
+	proxyURL, _ := url.Parse(proxySrv.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	// 4. 发起请求并读取响应体
+	resp, err := client.Get(upstream.URL)
+	if err != nil {
+		t.Fatalf("client.Get: %v", err)
+	}
+	defer resp.Body.Close()
+	received, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	// 5. 断言客户端收到完整 10MB（而非被截断为 maxResBytes+1）
+	if len(received) != bodySize {
+		t.Errorf("client received %d bytes, want %d (response body was truncated by proxy)",
+			len(received), bodySize)
+	}
+}
