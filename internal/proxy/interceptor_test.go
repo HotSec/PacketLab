@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -267,6 +268,81 @@ func TestHandleManualPending(t *testing.T) {
 		t.Errorf("expected 0 pending after resolve, got %d", len(pending))
 	}
 	mu.Unlock()
+}
+
+// ========================================
+// Handle — manual mode, pending request carries body
+// Bug 4: readBody 在 GetBody 为 nil 时（未走 OnRequest 路径）应 fallback 到 req.Body
+// ========================================
+
+func TestInterceptor_ManualMode_PendingBody(t *testing.T) {
+	var mu sync.Mutex
+	var notified *models.PendingRequest
+
+	it := NewInterceptor(2, func(req *models.PendingRequest) {
+		mu.Lock()
+		notified = req
+		mu.Unlock()
+	}, nil)
+	it.SetMode("manual")
+
+	// 直接构造 POST req with body —— 不经过 proxy.go 的 OnRequest，因此 GetBody 为 nil。
+	// 这模拟了直接调用 Interceptor.Handle 的场景。
+	req := httptest.NewRequest("POST", "https://httpbin.org/post", strings.NewReader("hello world"))
+	req.Header.Set("Content-Type", "text/plain")
+
+	// 在 goroutine 中调用 Handle（manual 模式会阻塞等待 Resolve）
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		it.Handle(req, nil, func(r *http.Request) {})
+	}()
+
+	// 等待 onNotify 回调
+	waitForNotify := func() *models.PendingRequest {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			n := notified
+			mu.Unlock()
+			if n != nil {
+				return n
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil
+	}
+
+	n := waitForNotify()
+	if n == nil {
+		t.Fatal("expected notification within 2s")
+	}
+
+	// 断言 Body 非空且等于 "hello world"
+	if n.Body != "hello world" {
+		t.Errorf("expected Body=\"hello world\", got %q", n.Body)
+	}
+
+	// 同时验证 GetPending 返回的 Body 也非空
+	pending := it.GetPending()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending, got %d", len(pending))
+	}
+	if pending[0].Body != "hello world" {
+		t.Errorf("GetPending Body: expected \"hello world\", got %q", pending[0].Body)
+	}
+
+	// Resolve 以解除 Handle 阻塞
+	if err := it.Resolve(n.ID, models.InterceptResult{Action: "allow", RequestID: n.ID}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	select {
+	case <-done:
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handle did not return after resolve")
+	}
 }
 
 // ========================================

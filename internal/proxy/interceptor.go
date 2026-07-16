@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -307,15 +308,27 @@ func readBody(req *http.Request) string {
 	if req.Body == nil {
 		return ""
 	}
+	// 优先 GetBody（OnRequest 已设置，可重复读）
 	if req.GetBody != nil {
 		if body, err := req.GetBody(); err == nil {
 			defer body.Close()
 			raw, err := io.ReadAll(io.LimitReader(body, 64*1024))
-			if err != nil || len(raw) == 0 {
-				return ""
+			if err == nil && len(raw) > 0 {
+				return string(raw)
 			}
-			return string(raw)
 		}
 	}
-	return ""
+	// fallback：直接读 req.Body（会消费，仅在未走 GetBody 路径时，例如直接构造 req 调用 interceptor）
+	raw, err := io.ReadAll(io.LimitReader(req.Body, 64*1024))
+	if err != nil || len(raw) == 0 {
+		return ""
+	}
+	// 缓存为 GetBody 并恢复 req.Body，使后续 readBody 调用（GetPending 会再次读取）
+	// 与请求转发都能重复读取 body
+	bodyBytes := raw
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+	}
+	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	return string(raw)
 }
