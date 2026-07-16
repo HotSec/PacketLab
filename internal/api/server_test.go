@@ -467,3 +467,20 @@ func TestGetRequestAfterSave(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 }
+
+func TestHandleListRequests_LimitClamp(t *testing.T) {
+	cases := []struct{ in, want int }{
+		{0, 50},    // 0 → 默认 50
+		{1, 1},
+		{200, 200}, // 上限
+		{201, 200}, // 超过 → clamp 200
+		{1000, 200},
+		{-1, 50},
+	}
+	for _, c := range cases {
+		got := clampLimit(c.in)
+		if got != c.want {
+			t.Errorf("clampLimit(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}

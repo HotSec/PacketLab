@@ -188,6 +188,18 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 // Handlers
 // ========================================
 
+// clampLimit 将 limit 钳制到 [1, 200] 范围。
+// limit <= 0 时返回默认值 50；limit > 200 时钳制到 200。
+func clampLimit(limit int) int {
+	if limit <= 0 {
+		return 50
+	}
+	if limit > 200 {
+		return 200
+	}
+	return limit
+}
+
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeAppError(w, ErrMethodNotAllowed())
@@ -201,9 +213,7 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = clampLimit(limit)
 	if offset < 0 {
 		offset = 0
 	}
@@ -642,9 +652,7 @@ func (s *Server) handleInterceptLogs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = clampLimit(limit)
 	if offset < 0 {
 		offset = 0
 	}
