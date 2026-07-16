@@ -845,8 +845,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		// gorilla/websocket 在 Upgrade 失败时已写 HTTP 响应，不应再次写入
 		slog.Warn("ws upgrade failed", "error", err)
-		http.Error(w, "WebSocket upgrade failed", http.StatusBadRequest)
 		return
 	}
 

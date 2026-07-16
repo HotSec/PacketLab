@@ -484,3 +484,48 @@ func TestHandleListRequests_LimitClamp(t *testing.T) {
 		}
 	}
 }
+
+// ========================================
+// WebSocket Upgrade 失败处理 / WebSocket Upgrade failure handling
+// ========================================
+
+// TestHandleWebSocket_UpgradeFailure_NoDoubleWrite 验证：当 gorilla/websocket
+// 的 Upgrade 失败时（此处通过未设置 Origin 头触发 s.upgrader.CheckOrigin 拒绝——
+// isAllowedOrigin 对空 Origin 返回 false），handleWebSocket 不应再次调用 http.Error
+// 写响应——因为 gorilla/websocket 在 CheckOrigin 失败时已通过 returnError →
+// http.Error 写入 403 响应，再次写入会导致 superfluous WriteHeader 警告并产生重复响应体。
+func TestHandleWebSocket_UpgradeFailure_NoDoubleWrite(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+
+	rr := httptest.NewRecorder()
+
+	// 未设置 Origin 头，s.upgrader.CheckOrigin 调用 isAllowedOrigin("", nil) 返回 false，
+	// gorilla/websocket 在 CheckOrigin 失败时已通过 returnError → http.Error 写入 403 响应。
+	// 调用不应 panic。
+	srv.handleWebSocket(rr, req)
+
+	// Upgrade 失败时应已写入错误响应（Code != 0）
+	if rr.Code == 0 {
+		t.Fatalf("expected Upgrade to have written an error response, got Code=0")
+	}
+
+	// gorilla/websocket CheckOrigin 失败时写入 403；
+	// 若 handleWebSocket 误再次调用 WriteHeader，会覆盖状态码导致回归。
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected status %d from Upgrade's returnError, got %d", http.StatusForbidden, rr.Code)
+	}
+
+	// 修复后：handleWebSocket 不应再调用 http.Error，因此 body 不应包含
+	// "WebSocket upgrade failed"（http.Error 写入的冗余消息）。
+	body := rr.Body.String()
+	if strings.Contains(body, "WebSocket upgrade failed") {
+		t.Errorf("response body should not contain redundant http.Error message "+
+			"(Upgrade already wrote the response), got: %q", body)
+	}
+}
