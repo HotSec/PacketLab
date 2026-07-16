@@ -32,6 +32,7 @@ type Engine struct {
 	stats   Stats
 	streamTimeout time.Duration // 流空闲超时（超过则 GC 清理并 emit）
 	maxResBytes   int64         // 单个响应体最大保留字节（截断阈值，与代理侧 config 统一）
+	ringBufSize   int           // 网卡抓包环形缓冲区条目数（<=0 时在 Start 路径用默认值兜底）
 
 	streamPool  *TCPStreamPool
 	assembler   *Assembler
@@ -110,6 +111,14 @@ func (e *Engine) SetStreamTimeout(d time.Duration) {
 func (e *Engine) SetMaxResBytes(n int64) {
 	if n > 0 {
 		e.maxResBytes = n
+	}
+}
+
+// SetRingBufSize 设置网卡抓包环形缓冲区条目数（向上取 2 的幂）。
+// 必须在 Start 之前调用；<=0 时忽略，由 Start 路径用默认值兜底。
+func (e *Engine) SetRingBufSize(n int) {
+	if n > 0 {
+		e.ringBufSize = n
 	}
 }
 

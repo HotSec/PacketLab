@@ -29,8 +29,6 @@ type Record struct {
 	Timestamp time.Time
 }
 
-const ringSize = 128 * 1024 * 1024 // 128MB
-
 // NewMemRingBuffer 创建环形缓冲区。size 向上取 2 的幂。
 func NewMemRingBuffer(entryCount int) *MemRingBuffer {
 	if entryCount <= 0 {

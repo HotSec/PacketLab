@@ -170,6 +170,38 @@ func TestAsyncWriterPool_FlushAll_BackoffBetweenRetries(t *testing.T) {
 	}
 }
 
+// TestMemRingBuffer_CustomSize 验证 NewMemRingBuffer(entryCount) 会向上取 2 的幂。
+// 100 → 128；回归保护：若未来有人误改为固定大小，此测试 FAIL。
+func TestMemRingBuffer_CustomSize(t *testing.T) {
+	ring := NewMemRingBuffer(100) // 会向上取 128
+	if cap(ring.buf) != 128 {
+		t.Fatalf("expected size 128, got %d", cap(ring.buf))
+	}
+}
+
+// TestEngine_SetRingBufSize 验证 Engine.SetRingBufSize setter 行为：
+//   - 正数入参直接写入 ringBufSize 字段
+//   - <=0 入参应被忽略，保持原值不变（默认值兜底逻辑放在 Start 路径中）
+//
+// 此测试在添加 SetRingBufSize 方法前会编译失败（method undefined）→ RED。
+func TestEngine_SetRingBufSize(t *testing.T) {
+	e := &Engine{}
+	e.SetRingBufSize(1024)
+	if e.ringBufSize != 1024 {
+		t.Fatalf("expected ringBufSize=1024, got %d", e.ringBufSize)
+	}
+	// <=0 不应改变
+	e.SetRingBufSize(0)
+	if e.ringBufSize != 1024 {
+		t.Fatalf("expected ringBufSize unchanged=1024, got %d", e.ringBufSize)
+	}
+	// 负数也应被忽略
+	e.SetRingBufSize(-1)
+	if e.ringBufSize != 1024 {
+		t.Fatalf("expected ringBufSize unchanged=1024 after negative, got %d", e.ringBufSize)
+	}
+}
+
 // TestAsyncWriterPool_FlushAll_StopChEarlyExit 验证 stopCh 关闭时
 // flushAll 不会在退避上阻塞过久（应 < 100ms，远小于完整退避 150ms）。
 //

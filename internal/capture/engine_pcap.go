@@ -100,7 +100,7 @@ func (e *Engine) Start() error {
 
 	e.running.Store(true)
 
-	e.ringBuf = NewMemRingBuffer(262144)
+	e.ringBuf = NewMemRingBuffer(e.ringBufSize)
 	e.writer = NewAsyncWriterPool(e.store, e.ringBuf, 4, 30*time.Millisecond)
 	e.writer.engine = e
 	e.writer.Start()

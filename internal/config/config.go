@@ -21,6 +21,7 @@ type Config struct {
 	CaptureBPF     string
 	CaptureNoProc  bool
 	CaptureStreamTimeoutMin int // 网卡抓包：流空闲超时（分钟），0=使用默认值
+	CaptureRingEntries int // 网卡抓包：环形缓冲区条目数（向上取 2 的幂），0=使用默认值
 	MaxReqBodyKB   int // 请求体最大 KB，0=使用默认值
 	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
 	AllowOrigins []string // CORS/WebSocket 允许的 Origin 白名单（空 = 仅 localhost）
@@ -34,13 +35,14 @@ const (
 	DefaultMaxReqBodyKB = 2048  // 2MB
 	DefaultMaxResBodyKB = 4096  // 4MB
 	DefaultStreamTimeoutMin = 2 // 网卡抓包流空闲超时默认 2 分钟
+	DefaultCaptureRingEntries = 262144 // 网卡抓包环形缓冲区默认条目数（256K，向上取 2 的幂）
 	defaultOrg          = "PacketLab"
 )
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
 func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	capture bool, captureIface, captureBPF string, captureNoProc bool,
-	streamTimeoutMin, maxReqBodyKB, maxResBodyKB int) (*Config, error) {
+	streamTimeoutMin, maxReqBodyKB, maxResBodyKB, captureRingEntries int) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -83,6 +85,12 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	if streamTimeoutMin == 0 {
 		streamTimeoutMin = DefaultStreamTimeoutMin
 	}
+	if captureRingEntries < 0 {
+		return nil, fmt.Errorf("config: capture-ring-entries must be >= 0, got %d", captureRingEntries)
+	}
+	if captureRingEntries == 0 {
+		captureRingEntries = DefaultCaptureRingEntries
+	}
 
 	cfg := &Config{
 		ProxyPort:              proxyPort,
@@ -98,6 +106,7 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		CaptureBPF:             captureBPF,
 		CaptureNoProc:          captureNoProc,
 		CaptureStreamTimeoutMin: streamTimeoutMin,
+		CaptureRingEntries:     captureRingEntries,
 		MaxReqBodyKB:           maxReqBodyKB,
 		MaxResBodyKB:           maxResBodyKB,
 	}
