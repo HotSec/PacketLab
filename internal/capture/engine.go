@@ -411,6 +411,12 @@ func (e *Engine) flushEmitBuf() {
 // ========================================
 
 // Assembler TCP 流重组器
+//
+// 锁顺序约定（跨 Assembler.mu 与 TCPStream.mu 时务必按此顺序获取，避免死锁）：
+//  1. Assembler.mu
+//  2. TCPStream.mu
+//
+// 参考实现：FlushOlderThan / HandleClose 均遵循此顺序。
 type Assembler struct {
 	pool    *TCPStreamPool
 	streams map[string]*TCPStream
@@ -743,46 +749,44 @@ func looksLikeHTTP(data []byte) bool {
 var httpMethodPrefixes = []string{"GET ", "POST", "PUT ", "DELE", "PATC", "HEAD", "OPTI", "CONN", "TRAC"}
 
 // HandleClose 处理 TCP 连接关闭（FIN/RST），先尝试提取残留数据再 emit
+// 锁顺序：先 Assembler.mu，再 TCPStream.mu（与 FlushOlderThan 一致，避免死锁）
 func (s *TCPStream) HandleClose(a *Assembler) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.nonHTTP {
-		a.mu.Lock()
 		for key, stream := range a.streams {
 			if stream == s {
 				delete(a.streams, key)
 				break
 			}
 		}
-		a.mu.Unlock()
 		return
 	}
 
 	// SSE 流关闭，最终 flush
 	if s.ssePending {
 		s.flushSSEEvents()
-		a.mu.Lock()
 		for key, stream := range a.streams {
 			if stream == s {
 				delete(a.streams, key)
 				break
 			}
 		}
-		a.mu.Unlock()
 		return
 	}
 
 	s.tryExtractHTTPOnClose()
 
-	a.mu.Lock()
 	for key, stream := range a.streams {
 		if stream == s {
 			delete(a.streams, key)
 			break
 		}
 	}
-	a.mu.Unlock()
 }
 
 // tryExtractHTTP 从双缓冲区中提取 HTTP 请求/响应并消费
