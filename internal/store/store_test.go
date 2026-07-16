@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -886,4 +887,47 @@ func TestCloseCleanup(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	_ = entries
 	// The file should be closeable without error — we already verified.
+}
+
+// ========================================
+// ListHosts — 缓存 + 强制分页
+// ========================================
+
+func TestListHosts_Pagination(t *testing.T) {
+	st := newTestStore(t)
+
+	for i := 0; i < 200; i++ {
+		host := fmt.Sprintf("host%d.com", i)
+		_, _ = st.Save(&models.CapturedRequest{
+			Method: "GET", URL: "http://" + host, Host: host, CapturedAt: time.Now(),
+		})
+	}
+
+	hosts, total, err := st.ListHosts("", 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 50 {
+		t.Fatalf("expected 50 hosts, got %d", len(hosts))
+	}
+	if total != 200 {
+		t.Fatalf("expected total=200, got %d", total)
+	}
+}
+
+func TestListHosts_CacheHit(t *testing.T) {
+	st := newTestStore(t)
+
+	// 第一次调用前插入 1 个 host
+	_, _ = st.Save(&models.CapturedRequest{Host: "a.com", CapturedAt: time.Now()})
+	_, _, _ = st.ListHosts("", 100, 0) // 填充缓存
+
+	// 调用后插入新 host（不应被缓存看到）
+	_, _ = st.Save(&models.CapturedRequest{Host: "b.com", CapturedAt: time.Now()})
+
+	// 第二次调用（应命中缓存，只看到 a.com，看不到 b.com）
+	hosts2, _, _ := st.ListHosts("", 100, 0)
+	if len(hosts2) != 1 {
+		t.Fatalf("expected 1 host from cache (a.com only), got %d (cache miss)", len(hosts2))
+	}
 }

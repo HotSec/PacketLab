@@ -20,6 +20,16 @@ type Store struct {
 	db    *sql.DB
 	dbRO  *sql.DB // 只读连接，支持 WAL 并发读
 	mu    sync.RWMutex
+
+	// ListHosts 缓存（仅 search="" 时缓存）
+	hostCache    hostCacheEntry
+	hostCacheTTL time.Duration
+}
+
+type hostCacheEntry struct {
+	hosts []string
+	total int
+	at    time.Time
 }
 
 // New 创建存储实例
@@ -52,6 +62,8 @@ func New(dbPath string) (*Store, error) {
 
 	// 初始化只读连接（利用 WAL 并发读）
 	s.initReadConn(dbPath)
+
+	s.hostCacheTTL = 5 * time.Minute
 
 	return s, nil
 }
@@ -745,10 +757,28 @@ func aggregateNodeStats(node *APIMapNode) {
 	}
 }
 
-// ListHosts 获取捕获过的 host 列表（支持搜索 + 分页）
+// ListHosts 获取捕获过的 host 列表（支持搜索 + 分页 + 缓存）
 func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, error) {
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 200 {
 		limit = 100
+	}
+
+	// 缓存命中（仅 search 为空时缓存）
+	if search == "" {
+		s.mu.RLock()
+		entry := s.hostCache
+		ttl := s.hostCacheTTL
+		s.mu.RUnlock()
+		if ttl > 0 && entry.total > 0 && time.Since(entry.at) < ttl {
+			end := offset + limit
+			if end > len(entry.hosts) {
+				end = len(entry.hosts)
+			}
+			if offset > len(entry.hosts) {
+				return nil, entry.total, nil
+			}
+			return entry.hosts[offset:end], entry.total, nil
+		}
 	}
 
 	where := "WHERE host != ''"
@@ -758,34 +788,18 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		args = append(args, "%"+search+"%")
 	}
 
-	// 先查所有 host 去端口后去重，得到总数（distinctTotal）
-	totalRows, err := s.readDB().Query(fmt.Sprintf("SELECT host FROM requests %s", where), args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	totalSet := make(map[string]struct{})
-	for totalRows.Next() {
-		var h string
-		if err := totalRows.Scan(&h); err != nil {
-			continue
-		}
-		totalSet[stripPort(h)] = struct{}{}
-	}
-	totalRows.Close()
-	distinctTotal := len(totalSet)
-
-	// 分页 — 按请求数降序
-	args = append(args, limit, offset)
-	rows, err := s.readDB().Query(
-		fmt.Sprintf("SELECT host, COUNT(*) as cnt FROM requests %s GROUP BY host ORDER BY cnt DESC LIMIT ? OFFSET ?", where),
-		args...,
+	// 单次查询拿 host + count（按 count 降序）
+	query := fmt.Sprintf(
+		"SELECT host, COUNT(*) as cnt FROM requests %s GROUP BY host ORDER BY cnt DESC",
+		where,
 	)
+	rows, err := s.readDB().Query(query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 
-	// 去端口后合并: httpbin.org + httpbin.org:443 → httpbin.org (7)
+	// 在内存中合并去端口（httpbin.org + httpbin.org:443 → httpbin.org）
 	hostCounts := make(map[string]int)
 	var hostOrder []string
 	for rows.Next() {
@@ -801,11 +815,29 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		hostCounts[baseHost] += cnt
 	}
 
-	var hosts []string
+	// 转换为 []string（格式 "host (count)"）
+	allHosts := make([]string, 0, len(hostOrder))
 	for _, h := range hostOrder {
-		hosts = append(hosts, fmt.Sprintf("%s (%d)", h, hostCounts[h]))
+		allHosts = append(allHosts, fmt.Sprintf("%s (%d)", h, hostCounts[h]))
 	}
-	return hosts, distinctTotal, nil
+	total := len(allHosts)
+
+	// 缓存（仅 search 为空时）
+	if search == "" {
+		s.mu.Lock()
+		s.hostCache = hostCacheEntry{hosts: allHosts, total: total, at: time.Now()}
+		s.mu.Unlock()
+	}
+
+	// 分页切片
+	end := offset + limit
+	if end > len(allHosts) {
+		end = len(allHosts)
+	}
+	if offset > len(allHosts) {
+		return nil, total, nil
+	}
+	return allHosts[offset:end], total, nil
 }
 
 func insertPath(node *APIMapNode, parts []string, fullPath string, methods map[string]*methodInfo, notesMap map[string]models.APINote) {
