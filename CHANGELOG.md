@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.1.0 (2026-07-17) — 稳定性、安全、V3 完整交付
+
+v0.0.2 → v0.1.0 是稳定性延续版本，无破坏性变更，可直接替换二进制升级。
+
+### 🔴 Bug 修复（数据正确性 P0）
+
+- **代理转发请求体被截断**：`io.LimitReader` 截断后替换 `req.Body` 转发，10MB POST 只到 2MB。改为 ReadAll 全量转发 + 截断存储，设置 `req.GetBody`。(`internal/proxy/proxy.go`)
+- **代理转发响应体被截断**：响应侧同理，ReadAll 全量转发，存储侧截断。(`internal/proxy/proxy.go`)
+- **SaveBatch 部分失败时 ids 误用**：tx.Rollback 后仍返回 ids，调用方触发 onSave 推送无效 ID。失败时返回 nil ids，调用方不调用 onSave。(`internal/store/store.go`, `internal/proxy/batch.go`)
+- **shouldMITM 端口后缀匹配失效**：`host:443` 永远不匹配 `.wns.windows.com`。先 `net.SplitHostPort` 去端口再匹配。(`internal/proxy/proxy.go`)
+- **manual 模式 readBody 返回空字符串**：`NopCloser` 无 `GetBody`，readBody 走 false 分支返回 `""`。OnRequest 设置 `req.GetBody`，readBody 优先使用。(`internal/proxy/interceptor.go`, `internal/proxy/proxy.go`)
+
+### 🟠 Bug 修复（稳定性与安全 P1）
+
+- **MemRingBuffer 数据竞争**：lock-free 设计在多生产者场景存在 race。改用 `sync.Mutex` + `sync.Cond`。(`internal/capture/memring.go`)
+- **HandleClose / FlushOlderThan 锁顺序相反**：跨 worker 并发死锁。统一锁顺序为 `assembler.mu → streamPool.mu → TCPStream.mu`。(`internal/capture/engine.go`)
+- **Interceptor logCh goroutine 泄漏**：`for range it.logCh` 永远阻塞。新增 `Stop()` 用 `sync.Once` 保护，先 `close(logCh)` 再 `wg.Wait()`。(`internal/proxy/interceptor.go`, `cmd/proxy/main.go`)
+- **ListHosts 全表扫描两次**：合并为单次 GROUP BY + 强制分页 + 5 分钟 TTL 缓存。(`internal/store/store.go`)
+- **WebSocket 空 Origin 被允许**：`isAllowedOrigin("")` 返回 true。改为 false，新增 `--api-allow-origins` CLI。(`internal/api/middleware.go`)
+- **handleWebSocket Upgrade 失败重复写**：gorilla/websocket Upgrade 失败时已写 HTTP 响应，不应再 `http.Error`。(`internal/api/server.go`)
+- **AsyncWriterPool.flushAll 无重试退避**：SaveBatch 失败立即重试，雪崩式重试。新增 50/100/200ms 指数退避 + stopCh 早退。(`internal/capture/memring.go`)
+- **emitNonBlocking HTTPFound 统计不一致**：ring buffer drop 或 save 失败导致漏计。入口立即计数，bulkEmit 不再重复。(`internal/capture/engine.go`)
+- **packetLoop / Stop 并发安全**：Stop 期间 packetLoop 可能 panic。改为 defer 清理 + workerChs 快照 + 锁释放后阻塞操作。(`internal/capture/engine_pcap.go`, `internal/capture/engine.go`)
+
+### 🟢 V3 功能补齐
+
+- **`--capture-max-streams` CLI + LRU 淘汰**：默认 1000，超限 LRU 淘汰 + flushEvictedStream 数据保全，新增 `streams_evicted` 指标。(`internal/capture/engine.go`, `internal/config/config.go`)
+- **`--capture-ring-entries` CLI**：环形缓冲区条目数参数化（默认 262144，向上取 2 的幂）。(`internal/capture/memring.go`, `internal/config/config.go`)
+- **拦截规则前端 UI**：顶栏盾牌按钮打开模态面板，支持增/删/改/启用切换 + 拦截日志查看。(`cmd/proxy/web/*`)
+- **待审请求 Headers 批量编辑器**：resend 标签 kv-editor-row，支持新增/删除/编辑 header 行。(`cmd/proxy/web/*`)
+- **`--intercept-pending-timeout` CLI**：原 15s 硬编码，改为 Go duration 格式可配（1s~10m）。NewInterceptor 签名改 `time.Duration`。(`internal/proxy/interceptor.go`, `internal/config/config.go`)
+- **`--cleanup-retention-days` / `--cleanup-interval` CLI**：暴露 retention 与 interval 为 CLI，首次启动写入 settings。(`cmd/proxy/main.go`, `internal/config/config.go`)
+
+### 🔵 工程化
+
+- **CI 流水线**：新增 `.github/workflows/ci.yml`（push + PR 触发，lint + test -race + build + 覆盖率上报 codecov）。
+- **golangci-lint 规则**：新增 `.golangci.yml`（errcheck/govet/staticcheck/unused/misspell/gofmt/goimports）。
+- **release.yml 增强**：新增 Docker image 推送 ghcr（多平台 build → Docker buildx）。
+- **测试覆盖**：新增 6 个测试函数覆盖 `mitm.go`（CA 生成/加载）、`batch.go`（ID 回填）、`ws.go`（多客户端广播/缓冲满/Stop 关闭）盲区。
+
+### 🟣 重构
+
+- **MemRingBuffer 容量参数化**：`--capture-ring-entries` CLI，向上取 2 的幂次。
+- **handleListRequests limit clamp**：`limit > 200` 时 clamp 到 200（而非重置为 50）。
+- **NewInterceptor 签名现代化**：`timeoutSec int` → `timeout time.Duration`。
+- **startAutoCleanup 参数化**：接受 `retentionDays + interval` 而非硬编码。
+
+### 迁移
+
+无新增 schema（v0.0.2 已到 v21）。
+
+---
+
 ## v0.0.2 (2026-06-14) — 稳定性、功能完善与性能优化
 
 ### 🔴 Bug 修复（数据正确性）
