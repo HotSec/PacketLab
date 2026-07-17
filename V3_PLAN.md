@@ -1,7 +1,7 @@
 # PacketLab V3 开发计划
 
-> 状态：V2 ✅ | 拦截模式 ✅ | 网卡抓包 ✅ | 前端UI ✅ | curl导出 ✅ | JSON格式化 ✅
-> 最后更新：2026-05-23
+> 状态：V3 ✅ 全部完成（v0.1.0）
+> 最后更新：2026-07-17
 
 ---
 
@@ -77,18 +77,23 @@ process_name TEXT DEFAULT ''
 ### 1.5 新增 CLI
 
 ```
---capture              启用网卡抓包
---capture-iface en0    指定网卡（默认自动检测）
---capture-bpf "..."    BPF 过滤（默认 tcp port 80 or tcp port 443）
---capture-max-streams  最大并发流数（默认 1000）
---capture-no-proc      禁用进程关联
+--capture                       启用网卡抓包
+--capture-iface en0             指定网卡（默认自动检测）
+--capture-bpf "..."             BPF 过滤（默认 tcp port 80 or tcp port 443）
+--capture-max-streams           最大并发流数（默认 1000，超限 LRU 淘汰，最小 64）
+--capture-ring-entries          网卡抓包环形缓冲区条目数（默认 262144，向上取 2 的幂）
+--capture-stream-timeout        流空闲超时（分钟，默认 2）
+--capture-no-proc               禁用进程关联
+--intercept-pending-timeout     拦截器 pending 请求超时（Go duration，默认 15s，范围 1s~10m）
+--cleanup-retention-days        自动清理保留天数（默认 7，0=用默认值）
+--cleanup-interval              自动清理间隔（Go duration，默认 6h，最小 1m）
 ```
 
 ### 1.6 新增 API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/capture/status` | 运行状态 + 统计 |
+| `GET` | `/api/capture/status` | 运行状态 + 统计（含 `packets`、`http`、`streams_evicted`、`ring_usage`、`ring_dropped`） |
 | `GET` | `/api/capture/interfaces` | 可用网卡列表 |
 | `POST` | `/api/capture/start` | 启动抓包 |
 | `POST` | `/api/capture/stop` | 停止抓包 |
@@ -124,10 +129,10 @@ process_name TEXT DEFAULT ''
 | 自动/手动切换 | ✅ | — |
 | 待审入请求列表 | ✅ 黄色边框 + PENDING | — |
 | Allow/Drop | ✅ | — |
-| 修改后放过 | ✅ 预填编辑器 | 前端编辑面板更友好（Headers 批量编辑） |
-| 规则引擎 | ✅ 通配匹配 | 增加 method 维度匹配 |
-| 规则管理 UI | ❌ 无前端界面 | 添加规则管理面板 |
-| 拦截日志 | ❌ 不记录操作 | 记录 allow/drop/modify 操作到数据库 |
+| 修改后放过 | ✅ | Headers 批量编辑（resend 标签 kv-editor-row） |
+| 规则引擎 | ✅ | 通配匹配 + method 维度匹配 |
+| 规则管理 UI | ✅ | 拦截规则面板（增/删/改/启用切换 + 拦截日志查看） |
+| 拦截日志 | ✅ | allow/drop/modify 操作记录到数据库 |
 
 ---
 
@@ -138,17 +143,17 @@ process_name TEXT DEFAULT ''
 - JSON 响应体自动美化（`JSON.parse` + `JSON.stringify(obj, null, 2)`）
 - 请求体同步美化
 
-### 3.2 导出功能 (部分完成)
+### 3.2 导出功能 ✅
 
 - ✅ 单请求导出为 curl 命令（"copy as curl" 按钮）
-- ❌ 批量导出为 HAR 文件
-- ❌ 复制为 fetch / python-requests 格式
+- ✅ 批量导出为 HAR 文件
+- ✅ 复制为 fetch / python-requests 格式
 
-### 3.3 其他待完成
+### 3.3 其他已完成
 
-- 请求列表虚拟滚动（>1000 条时）
-- 数据库定期清理（保留最近 N 天）
-- BPF 编译缓存
+- ✅ 请求列表虚拟滚动（>1000 条时）
+- ✅ 数据库定期清理（保留最近 N 天，`--cleanup-retention-days` / `--cleanup-interval` CLI）
+- ✅ BPF 编译缓存
 
 ---
 
@@ -163,3 +168,39 @@ process_name TEXT DEFAULT ''
 | P4 | 拦截规则管理 UI | — | ✅ |
 | P5 | 导出 (curl/HAR) | — | ✅ curl + HAR |
 | P6 | 响应体格式化 | — | ✅ |
+
+---
+
+## V3 完成总结（v0.1.0, 2026-07-17）
+
+V3 计划全部交付：
+
+- ✅ 网卡抓包引擎（gopacket + TCP 重组 + IPv6 + 4 worker 分流）
+- ✅ 进程关联（macOS lsof / Linux proc / Windows netstat）
+- ✅ 拦截规则前端 UI（V3-2A：增/删/改/启用切换 + 拦截日志查看）
+- ✅ 待审请求 Headers 批量编辑器（V3-2B：resend 标签 kv-editor-row）
+- ✅ `--capture-max-streams` CLI + LRU 淘汰（V3-1，默认 1000，最小 64）
+- ✅ `--capture-ring-entries` CLI（环形缓冲区条目数，默认 262144）
+- ✅ `--intercept-pending-timeout` CLI（V3-3，Go duration 格式，默认 15s，范围 1s~10m）
+- ✅ `--cleanup-retention-days` / `--cleanup-interval` CLI（V3-4，首次启动写入 settings）
+- ✅ 批量导出 HAR
+- ✅ 复制为 fetch / python-requests
+- ✅ 响应体 JSON 格式化
+- ✅ 请求列表虚拟滚动
+- ✅ 数据库定期清理
+- ✅ BPF 编译缓存
+
+### v0.1.0 稳定性增强（PR-2 + PR-3）
+
+PR-2 修复 5 个 P1 稳定性 bug：
+- MemRingBuffer 数据竞争（sync.Mutex + sync.Cond 替代 lock-free atomic）
+- 锁顺序反转（统一 assembler.mu → streamPool.mu → TCPStream.mu）
+- Interceptor goroutine 泄漏（sync.Once + sync.WaitGroup + sync.RWMutex）
+- ListHosts 全表扫描（SQLite 查询缓存 + 分页 clamp）
+- WebSocket Origin 校验（CORS 白名单 + CheckOrigin 闭包化）
+
+PR-3 V3 功能补齐：
+- `--capture-max-streams` CLI + Assembler LRU 淘汰 + flushEvictedStream 数据保全
+- `--intercept-pending-timeout` CLI（NewInterceptor 改 time.Duration）
+- `--cleanup-retention-days` / `--cleanup-interval` CLI
+- 拦截规则管理面板 + Headers 批量编辑器（已在计划前实现，验收确认完整）
