@@ -581,6 +581,13 @@ function fillContent(r, isPending) {
   } else {
     addHeaderRow('Host', r.host || '');
   }
+
+  // LLM tab: show/hide based on detection
+  const llmTabBtn = document.getElementById('tabBtnLLM');
+  const isLLM = isLLMRequest(r);
+  if (llmTabBtn) llmTabBtn.style.display = isLLM ? '' : 'none';
+  // If switching away and LLM tab was active, go back to request tab
+  if (!isLLM && activeTab === 'llm') switchTab('request');
 }
 
 // ── 骨架屏 (Skeleton Loading) ────────────────
@@ -669,6 +676,7 @@ function switchTab(tab) {
     ind.style.width = bt.offsetWidth + 'px';
   }
   if (tab === 'apimap') loadAPIMapHosts();
+  if (tab === 'llm' && selectedRequestId) loadLLMDetail(selectedRequestId);
 }
 
 function syncAPIMapHost(host) {
@@ -1351,3 +1359,124 @@ function renderInterceptLogs(logs) {
     }, 400);
   });
 })();
+
+// =============================================
+// LLM AI 对话视图
+// =============================================
+
+const LLM_HOST_PATTERNS = [
+  { host: 'openai.com', provider: 'openai' },
+  { host: 'api.openai.com', provider: 'openai' },
+  { host: 'anthropic.com', provider: 'anthropic' },
+  { host: 'generativelanguage.googleapis.com', provider: 'gemini' },
+  { host: 'aiplatform.googleapis.com', provider: 'gemini' },
+];
+const LLM_PATH_PATTERNS = ['/chat/completions', '/v1/messages', '/generateContent', '/streamGenerateContent'];
+
+// 检测请求是否为 LLM API 调用
+function isLLMRequest(r) {
+  if (!r) return false;
+  const host = (r.host || '').toLowerCase();
+  const url = (r.url || '').toLowerCase();
+  for (const p of LLM_HOST_PATTERNS) {
+    if (host.includes(p.host)) return true;
+  }
+  for (const p of LLM_PATH_PATTERNS) {
+    if (url.includes(p)) return true;
+  }
+  return false;
+}
+
+// 渲染 LLM 对话内容
+function renderLLMContent(exchange) {
+  const container = document.getElementById('llmContent');
+  if (!exchange) {
+    container.innerHTML = '<div class="llm-empty">暂无 LLM 数据</div>';
+    return;
+  }
+
+  const provider = exchange.provider || 'unknown';
+  const model = exchange.model || '';
+  const usage = exchange.usage || {};
+  const messages = exchange.messages || [];
+  const system = exchange.system || '';
+  const response = exchange.response || '';
+
+  let html = '<div class="llm-exchange">';
+
+  // Header: provider badge + model
+  html += '<div class="llm-header">';
+  html += `<span class="llm-badge ${provider}">${provider.toUpperCase()}</span>`;
+  if (model) html += `<span class="llm-model">${escapeHTML(model)}</span>`;
+  if (exchange.stream) html += '<span class="llm-model">stream</span>';
+  html += '</div>';
+
+  // Usage stats
+  if (usage.prompt_tokens || usage.completion_tokens || usage.total_tokens) {
+    html += '<div class="llm-usage">';
+    if (usage.prompt_tokens) html += `<div class="llm-usage-item"><span>Prompt Tokens</span><span class="llm-usage-val">${usage.prompt_tokens}</span></div>`;
+    if (usage.completion_tokens) html += `<div class="llm-usage-item"><span>Completion Tokens</span><span class="llm-usage-val">${usage.completion_tokens}</span></div>`;
+    if (usage.total_tokens) html += `<div class="llm-usage-item"><span>Total Tokens</span><span class="llm-usage-val">${usage.total_tokens}</span></div>`;
+    html += '</div>';
+  }
+
+  // System prompt (if separate, Anthropic style)
+  if (system) {
+    html += `<div class="llm-message system"><div class="llm-message-role">System</div>${escapeHTML(system)}</div>`;
+  }
+
+  // Conversation messages
+  for (const msg of messages) {
+    const role = msg.role || 'user';
+    const cssClass = role === 'system' ? 'system' : (role === 'assistant' || role === 'model' ? 'assistant' : 'user');
+    const roleLabel = role === 'assistant' ? 'Assistant' : (role === 'model' ? 'Model' : role.charAt(0).toUpperCase() + role.slice(1));
+    html += `<div class="llm-message ${cssClass}"><div class="llm-message-role">${escapeHTML(roleLabel)}</div>${escapeHTML(msg.content || '')}</div>`;
+  }
+
+  // Model response
+  if (response) {
+    html += `<div class="llm-response"><div class="llm-message-role">Response</div>${escapeHTML(response)}</div>`;
+  }
+
+  // Copy prompt button
+  html += '<button class="mini-btn llm-copy-btn" onclick="copyLLMPrompt()">📋 复制提示词</button>';
+
+  html += '</div>';
+  container.innerHTML = html;
+
+  // Store exchange data for copy
+  window._currentLLMExchange = exchange;
+}
+
+function escapeHTML(s) {
+  if (!s) return '';
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function copyLLMPrompt() {
+  const ex = window._currentLLMExchange;
+  if (!ex) return;
+  let text = '';
+  if (ex.system) text += `[System]\n${ex.system}\n\n`;
+  for (const msg of (ex.messages || [])) {
+    text += `[${msg.role}]\n${msg.content}\n\n`;
+  }
+  navigator.clipboard.writeText(text).then(() => showToast('success', t('copied')));
+}
+
+// 异步加载并渲染 LLM 详情
+async function loadLLMDetail(id) {
+  try {
+    const result = await apiGet('/api/llm/' + id);
+    if (result && result.data) {
+      // data is a raw JSON (RawMessage), ensure it's parsed
+      const exchange = typeof result.data === 'string' ? JSON.parse(result.data) : result.data;
+      renderLLMContent(exchange);
+    } else {
+      renderLLMContent(null);
+    }
+  } catch (e) {
+    console.warn('loadLLMDetail failed', e);
+    renderLLMContent(null);
+  }
+}

@@ -94,6 +94,7 @@
 <button class="detail-tab" data-tab="response" onclick="switchTab('response')" data-i18n="tab_response">响应</button>
 <button class="detail-tab" data-tab="resend" onclick="switchTab('resend')" data-i18n="tab_resend">重发</button>
 <button class="detail-tab" data-tab="apimap" onclick="switchTab('apimap')" data-i18n="tab_apimap">API地图</button>
+<button class="detail-tab" data-tab="llm" onclick="switchTab('llm')" id="tabBtnLLM" style="display:none">🤖 AI对话</button>
 <div class="tab-indicator" id="tabIndicator"></div>
 </div>
 <div class="detail-body">
@@ -143,6 +144,9 @@
 <button class="mini-btn primary" onclick="loadAPIMap()" data-i18n="refresh">刷新</button></div>
 <div class="method-legend"><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--green)"></span>GET</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--blue)"></span>POST</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--yellow)"></span>PUT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--purple)"></span>PATCH</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--red)"></span>DELETE</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--teal)"></span>HEAD</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--cyan)"></span>OPTIONS</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--orange)"></span>CONNECT</span><span class="method-legend-item"><span class="method-legend-dot" style="background:var(--pink)"></span>TRACE</span></div>
 <div class="api-map-tree" id="apimapTree"></div></div>
+</div>
+<div class="tab-panel" id="tab-llm">
+<div id="llmContent"></div>
 </div>
 </div></div></section></div>
 <footer class="statusbar"><div class="statusbar-left"><div class="status-indicator"><span class="status-dot recording" id="statusDot"></span><span id="statusText" data-i18n="recording">录制中</span></div><span id="totalRequests">0</span><span id="totalSize">0 KB</span></div><div class="statusbar-right"><span id="errorCount">0</span><span>PacketLab v2.0</span></div></footer></div>
