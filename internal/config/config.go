@@ -28,6 +28,8 @@ type Config struct {
 	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
 	AllowOrigins []string // CORS/WebSocket 允许的 Origin 白名单（空 = 仅 localhost）
 	InterceptPendingTimeout time.Duration // 拦截器 pending 请求超时（默认 15s，范围 1s~10m）
+	CleanupRetentionDays int           // 自动清理：保留 N 天的请求数据（0=禁用自动清理，默认 7）
+	CleanupInterval      time.Duration // 自动清理：执行间隔（默认 6h）
 }
 
 // Default validated default values
@@ -41,6 +43,8 @@ const (
 	DefaultCaptureRingEntries = 262144 // 网卡抓包环形缓冲区默认条目数（256K，向上取 2 的幂）
 	DefaultMaxStreams = 1000 // 网卡抓包最大并发 TCP 流数默认值（超限 LRU 淘汰）
 	DefaultInterceptPendingTimeout = 15 * time.Second // 拦截器 pending 请求默认超时
+	DefaultCleanupRetentionDays = 7               // 自动清理默认保留 7 天
+	DefaultCleanupInterval      = 6 * time.Hour    // 自动清理默认间隔 6 小时
 	defaultOrg          = "PacketLab"
 )
 
@@ -48,7 +52,8 @@ const (
 func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	capture bool, captureIface, captureBPF string, captureNoProc bool,
 	streamTimeoutMin, maxReqBodyKB, maxResBodyKB, captureRingEntries, maxStreams int,
-	interceptPendingTimeout time.Duration) (*Config, error) {
+	interceptPendingTimeout time.Duration,
+	cleanupRetentionDays int, cleanupInterval time.Duration) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -116,6 +121,22 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	if interceptPendingTimeout < time.Second || interceptPendingTimeout > 10*time.Minute {
 		return nil, fmt.Errorf("config: intercept-pending-timeout must be between 1s and 10m, got %v", interceptPendingTimeout)
 	}
+	// cleanupRetentionDays: 负数非法；0=禁用自动清理
+	// cleanupRetentionDays: negative invalid; 0 disables auto cleanup
+	if cleanupRetentionDays < 0 {
+		return nil, fmt.Errorf("config: cleanup-retention-days must be >= 0, got %d", cleanupRetentionDays)
+	}
+	if cleanupRetentionDays == 0 {
+		cleanupRetentionDays = DefaultCleanupRetentionDays
+	}
+	// cleanupInterval: 0 用默认值；< 1m 非法（避免过于频繁清理）
+	// cleanupInterval: 0 uses default; < 1m invalid (avoid overly frequent cleanup)
+	if cleanupInterval == 0 {
+		cleanupInterval = DefaultCleanupInterval
+	}
+	if cleanupInterval < time.Minute {
+		return nil, fmt.Errorf("config: cleanup-interval must be >= 1m, got %v", cleanupInterval)
+	}
 
 	cfg := &Config{
 		ProxyPort:              proxyPort,
@@ -136,6 +157,8 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		MaxReqBodyKB:           maxReqBodyKB,
 		MaxResBodyKB:           maxResBodyKB,
 		InterceptPendingTimeout: interceptPendingTimeout,
+		CleanupRetentionDays:   cleanupRetentionDays,
+		CleanupInterval:        cleanupInterval,
 	}
 	return cfg, nil
 }

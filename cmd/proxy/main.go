@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -43,6 +44,10 @@ func main() {
 	captureMaxStreams := flag.Int("capture-max-streams", config.DefaultMaxStreams, "max concurrent TCP streams for NIC capture (LRU eviction when exceeded, min 64)")
 	interceptPendingTimeout := flag.Duration("intercept-pending-timeout", config.DefaultInterceptPendingTimeout,
 		"interceptor pending request timeout (Go duration, e.g. 30s, 2m; range 1s~10m)")
+	cleanupRetentionDays := flag.Int("cleanup-retention-days", config.DefaultCleanupRetentionDays,
+		"auto cleanup: delete requests/logs older than N days (0=use setting or default 7)")
+	cleanupInterval := flag.Duration("cleanup-interval", config.DefaultCleanupInterval,
+		"auto cleanup interval (Go duration, e.g. 6h, 30m; min 1m)")
 	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
 	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")
 	apiAllowOrigins := flag.String("api-allow-origins", "", "逗号分隔的 CORS/WebSocket 允许 Origin 列表（默认仅 localhost）")
@@ -56,7 +61,8 @@ func main() {
 	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure,
 		*captureFlag, *captureIFace, *captureBPF, *captureNoProc,
 		*captureStreamTimeout, *maxReqBodyKB, *maxResBodyKB, *captureRingEntries, *captureMaxStreams,
-		*interceptPendingTimeout)
+		*interceptPendingTimeout,
+		*cleanupRetentionDays, *cleanupInterval)
 	if err != nil {
 		slog.Error("配置加载失败", "error", err)
 		os.Exit(1)
@@ -173,8 +179,8 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// 后台定期清理：每 6 小时执行一次，retention_days 由 settings 表控制（<=0 表示禁用）
-	cleanupStop := startAutoCleanup(st, 6*time.Hour)
+	// 后台定期清理：每 N 小时执行一次，retention_days 由 settings 表控制（<=0 表示禁用）
+	cleanupStop := startAutoCleanup(st, cfg.CleanupRetentionDays, cfg.CleanupInterval)
 
 	// 优雅关闭
 	shutdownCh := make(chan os.Signal, 1)
@@ -248,15 +254,27 @@ func loadFrontend() http.Handler {
 }
 
 // startAutoCleanup 启动后台定期清理 goroutine，返回停止函数。
-// retention_days 由 settings 表控制：<=0（含缺失）时 Cleanup 为 no-op。
-func startAutoCleanup(st *store.Store, interval time.Duration) func() {
-	ticker := time.NewTicker(interval)
+// retentionDays 首次启动时若 settings 表无 'retention_days' 则写入；若已有则尊重已存在的 settings 值。
+// cleanupInterval 决定执行间隔（必须 >= 1m）。
+// retentionDays <= 0 时 Cleanup 内部直接返回，零成本。
+// startAutoCleanup starts the background cleanup goroutine, returns a stop function.
+// On first start, writes retentionDays to settings if 'retention_days' is unset;
+// if already set, the existing setting is respected.
+func startAutoCleanup(st *store.Store, retentionDays int, cleanupInterval time.Duration) func() {
+	// 首次启动写入 settings（如未设置）；已存在则尊重 settings 中的值
+	// Write default to settings on first start (if unset); respect existing value otherwise
+	if existing, err := st.GetSetting("retention_days"); err == nil && existing == "" {
+		_ = st.SetSetting("retention_days", strconv.Itoa(retentionDays))
+	}
+
+	ticker := time.NewTicker(cleanupInterval)
 	stopCh := make(chan struct{})
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
 				// retention_days<=0 时 Cleanup 内部直接返回，零成本
+				// When retention_days<=0, Cleanup is a no-op
 				dr, dl, days, err := st.Cleanup(0)
 				if err != nil {
 					slog.Warn("auto cleanup failed", "error", err)

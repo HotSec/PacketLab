@@ -931,3 +931,112 @@ func TestListHosts_CacheHit(t *testing.T) {
 		t.Fatalf("expected 1 host from cache (a.com only), got %d (cache miss)", len(hosts2))
 	}
 }
+
+// ========================================
+// Cleanup — V3-4 retention_days
+// ========================================
+
+// TestCleanup_WithRetentionDays 验证 Cleanup 按 retentionDays 删除过期数据。
+// V3-4：暴露 retention_days 为 CLI，但底层 Cleanup 行为不变。
+func TestCleanup_WithRetentionDays(t *testing.T) {
+	st := newTestStore(t)
+
+	now := time.Now()
+	oldReq := &models.CapturedRequest{Method: "GET", URL: "http://x.example/old", CapturedAt: now.AddDate(0, 0, -10)}
+	newReq := &models.CapturedRequest{Method: "GET", URL: "http://y.example/new", CapturedAt: now.AddDate(0, 0, -3)}
+	if _, err := st.Save(oldReq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Save(newReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// retentionDays=7：oldReq (10天前) 应被删除，newReq (3天前) 应保留
+	// retentionDays=7: oldReq (10d ago) deleted, newReq (3d ago) retained
+	dr, dl, days, err := st.Cleanup(7)
+	if err != nil {
+		t.Fatalf("Cleanup(7): %v", err)
+	}
+	if days != 7 {
+		t.Errorf("appliedDays = %d, want 7", days)
+	}
+	if dr != 1 {
+		t.Errorf("deletedRequests = %d, want 1", dr)
+	}
+	if dl != 0 {
+		t.Errorf("deletedLogs = %d, want 0 (no intercept logs inserted)", dl)
+	}
+
+	reqs, _, err := st.List("", "", "", false, 100, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 remaining request, got %d", len(reqs))
+	}
+	if reqs[0].URL != "http://y.example/new" {
+		t.Errorf("remaining URL = %q, want http://y.example/new", reqs[0].URL)
+	}
+}
+
+// TestCleanup_ZeroRetentionDays_NoOp 验证 retentionDays=0 且 settings 无值时 Cleanup 为 no-op。
+func TestCleanup_ZeroRetentionDays_NoOp(t *testing.T) {
+	st := newTestStore(t)
+
+	now := time.Now()
+	oldReq := &models.CapturedRequest{Method: "GET", URL: "http://x.example/old", CapturedAt: now.AddDate(0, 0, -30)}
+	if _, err := st.Save(oldReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// retentionDays=0 且 settings 表无 'retention_days' → Cleanup 应为 no-op
+	// retentionDays=0 and no 'retention_days' setting → Cleanup should be no-op
+	dr, dl, days, err := st.Cleanup(0)
+	if err != nil {
+		t.Fatalf("Cleanup(0): %v", err)
+	}
+	if days != 0 {
+		t.Errorf("appliedDays = %d, want 0 (no-op)", days)
+	}
+	if dr != 0 || dl != 0 {
+		t.Errorf("deleted = (%d, %d), want (0, 0) for no-op", dr, dl)
+	}
+
+	// 验证数据未删除
+	reqs, _, _ := st.List("", "", "", false, 100, 0)
+	if len(reqs) != 1 {
+		t.Errorf("expected 1 remaining request (no-op), got %d", len(reqs))
+	}
+}
+
+// TestCleanup_ReadsRetentionDaysFromSettings 验证 retentionDays=0 时从 settings 表读取 'retention_days'。
+func TestCleanup_ReadsRetentionDaysFromSettings(t *testing.T) {
+	st := newTestStore(t)
+
+	// 设置 retention_days=5
+	if err := st.SetSetting("retention_days", "5"); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	oldReq := &models.CapturedRequest{Method: "GET", URL: "http://x.example/old", CapturedAt: now.AddDate(0, 0, -10)}
+	newReq := &models.CapturedRequest{Method: "GET", URL: "http://y.example/new", CapturedAt: now.AddDate(0, 0, -2)}
+	if _, err := st.Save(oldReq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Save(newReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// retentionDays=0 → 从 settings 读到 5 → oldReq (10天前) 删除，newReq (2天前) 保留
+	dr, _, days, err := st.Cleanup(0)
+	if err != nil {
+		t.Fatalf("Cleanup(0): %v", err)
+	}
+	if days != 5 {
+		t.Errorf("appliedDays = %d, want 5 (from settings)", days)
+	}
+	if dr != 1 {
+		t.Errorf("deletedRequests = %d, want 1", dr)
+	}
+}
