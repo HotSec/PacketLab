@@ -226,3 +226,154 @@ func TestStreamAssemblerGemini(t *testing.T) {
 		t.Errorf("content = %q, want 'Hello world'", result.Content)
 	}
 }
+
+func TestParseOpenAIRequestWithTools(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4",
+		"messages": [{"role": "user", "content": "What's the weather?"}],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "get_weather",
+				"description": "Get weather for a city",
+				"parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+			}
+		}],
+		"tool_choice": "auto"
+	}`)
+	info := ParseRequest(ProviderOpenAI, body)
+	if info == nil {
+		t.Fatal("ParseRequest returned nil")
+	}
+	if len(info.Tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(info.Tools))
+	}
+	if info.Tools[0].Name != "get_weather" {
+		t.Errorf("tool name = %q, want get_weather", info.Tools[0].Name)
+	}
+	if info.Tools[0].Description != "Get weather for a city" {
+		t.Errorf("tool desc = %q", info.Tools[0].Description)
+	}
+	if len(info.ToolChoice) == 0 {
+		t.Error("expected tool_choice to be set")
+	}
+}
+
+func TestParseOpenAIResponseWithToolCalls(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4",
+		"choices": [{
+			"message": {
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [{
+					"id": "call_abc",
+					"type": "function",
+					"function": {
+						"name": "get_weather",
+						"arguments": "{\"city\":\"SF\"}"
+					}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}]
+	}`)
+	info := ParseResponse(ProviderOpenAI, body)
+	if info == nil {
+		t.Fatal("ParseResponse returned nil")
+	}
+	if len(info.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(info.ToolCalls))
+	}
+	tc := info.ToolCalls[0]
+	if tc.ID != "call_abc" {
+		t.Errorf("id = %q, want call_abc", tc.ID)
+	}
+	if tc.Name != "get_weather" {
+		t.Errorf("name = %q, want get_weather", tc.Name)
+	}
+	if tc.Arguments != `{"city":"SF"}` {
+		t.Errorf("arguments = %q", tc.Arguments)
+	}
+	if info.FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", info.FinishReason)
+	}
+}
+
+func TestParseAnthropicRequestWithTools(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3",
+		"max_tokens": 1024,
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{
+			"name": "search",
+			"description": "Search the web",
+			"input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}
+		}]
+	}`)
+	info := ParseRequest(ProviderAnthropic, body)
+	if info == nil {
+		t.Fatal("ParseRequest returned nil")
+	}
+	if len(info.Tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(info.Tools))
+	}
+	if info.Tools[0].Name != "search" {
+		t.Errorf("tool name = %q, want search", info.Tools[0].Name)
+	}
+}
+
+func TestParseAnthropicResponseWithToolUse(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3",
+		"content": [
+			{"type": "text", "text": "Let me search."},
+			{"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "Go 1.25"}}
+		],
+		"stop_reason": "tool_use"
+	}`)
+	info := ParseResponse(ProviderAnthropic, body)
+	if info == nil {
+		t.Fatal("ParseResponse returned nil")
+	}
+	if info.Content != "Let me search." {
+		t.Errorf("content = %q", info.Content)
+	}
+	if len(info.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(info.ToolCalls))
+	}
+	if info.ToolCalls[0].ID != "tool_1" {
+		t.Errorf("id = %q", info.ToolCalls[0].ID)
+	}
+	if info.ToolCalls[0].Name != "search" {
+		t.Errorf("name = %q", info.ToolCalls[0].Name)
+	}
+	if info.ToolCalls[0].Arguments == "" {
+		t.Error("expected non-empty arguments")
+	}
+}
+
+func TestStreamAssemblerOpenAIToolCalls(t *testing.T) {
+	a := NewStreamAssembler(ProviderOpenAI)
+	// 第一个 chunk：含 id 和 name
+	a.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`))
+	// 第二个 chunk：arguments 增量
+	a.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`))
+	// 第三个 chunk：arguments 增量
+	a.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"SF\"}"}}]}}]}`))
+	a.Feed([]byte("[DONE]"))
+
+	result := a.Result()
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].ID != "call_1" {
+		t.Errorf("id = %q, want call_1", result.ToolCalls[0].ID)
+	}
+	if result.ToolCalls[0].Name != "get_weather" {
+		t.Errorf("name = %q, want get_weather", result.ToolCalls[0].Name)
+	}
+	if result.ToolCalls[0].Arguments != `{"city":"SF"}` {
+		t.Errorf("arguments = %q, want {\"city\":\"SF\"}", result.ToolCalls[0].Arguments)
+	}
+}

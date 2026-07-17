@@ -46,6 +46,17 @@ func buildLLMExchange(provider llm.Provider, reqInfo *llm.RequestInfo, resInfo *
 				Content: m.Content,
 			})
 		}
+		// 转换 tools
+		for _, t := range reqInfo.Tools {
+			ex.Tools = append(ex.Tools, models.LLMToolDefinition{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.Parameters,
+			})
+		}
+		if len(reqInfo.ToolChoice) > 0 {
+			ex.ToolChoice = reqInfo.ToolChoice
+		}
 	}
 	if resInfo != nil {
 		if ex.Model == "" {
@@ -58,6 +69,14 @@ func buildLLMExchange(provider llm.Provider, reqInfo *llm.RequestInfo, resInfo *
 				CompletionTokens: resInfo.CompletionTokens,
 				TotalTokens:      resInfo.TotalTokens,
 			}
+		}
+		// 转换 tool_calls
+		for _, tc := range resInfo.ToolCalls {
+			ex.ToolCalls = append(ex.ToolCalls, models.LLMToolCall{
+				ID:        tc.ID,
+				Name:      tc.Name,
+				Arguments: tc.Arguments,
+			})
 		}
 	}
 	return ex

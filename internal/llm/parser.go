@@ -17,6 +17,21 @@ type Message struct {
 	Name    string `json:"name,omitempty"`    // tool name (OpenAI function calls)
 }
 
+// ToolDefinition 表示一个工具/函数定义（OpenAI tools 数组项的 function 部分）。
+// 跨 provider 统一格式：Anthropic schema 与 OpenAI 不同，但在此抽象为统一结构。
+type ToolDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema 参数定义（原样保留）
+}
+
+// ToolCall 表示一次工具调用（assistant 消息的 tool_calls 数组项）。
+type ToolCall struct {
+	ID        string `json:"id,omitempty"`        // OpenAI 调用 ID（tool 角色消息需引用）
+	Name      string `json:"name"`                // 函数名
+	Arguments string `json:"arguments,omitempty"` // 参数 JSON 字符串（原样保留，便于调试）
+}
+
 // RequestInfo holds extracted data from an LLM API request body.
 type RequestInfo struct {
 	Provider Provider  `json:"provider"`
@@ -27,6 +42,10 @@ type RequestInfo struct {
 	// Usage hints from the request side (optional)
 	MaxTokens   int     `json:"max_tokens,omitempty"`
 	Temperature float64 `json:"temperature,omitempty"`
+	// Tools 字段：请求中声明的工具定义（OpenAI tools / Anthropic tools / Gemini functionDeclarations）
+	Tools []ToolDefinition `json:"tools,omitempty"`
+	// ToolChoice 请求指定的工具选择策略（"auto"/"none"/"required"/具体对象）
+	ToolChoice json.RawMessage `json:"tool_choice,omitempty"`
 }
 
 // ResponseInfo holds extracted data from an LLM API response.
@@ -38,6 +57,8 @@ type ResponseInfo struct {
 	PromptTokens     int `json:"prompt_tokens,omitempty"`
 	CompletionTokens int `json:"completion_tokens,omitempty"`
 	TotalTokens      int `json:"total_tokens,omitempty"`
+	// ToolCalls 工具调用列表（assistant 调用工具时填充）
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ── Request parsing ───────────────────────────────────────────
@@ -66,6 +87,15 @@ func parseOpenAIRequest(body []byte) *RequestInfo {
 		Stream      bool              `json:"stream"`
 		MaxTokens   int               `json:"max_tokens"`
 		Temperature float64           `json:"temperature"`
+		Tools       []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+		ToolChoice json.RawMessage `json:"tool_choice"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
@@ -93,17 +123,36 @@ func parseOpenAIRequest(body []byte) *RequestInfo {
 			Name:    msg.Name,
 		})
 	}
+	// 解析 tools
+	for _, t := range raw.Tools {
+		if t.Type == "function" || t.Type == "" {
+			info.Tools = append(info.Tools, ToolDefinition{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  t.Function.Parameters,
+			})
+		}
+	}
+	if len(raw.ToolChoice) > 0 {
+		info.ToolChoice = raw.ToolChoice
+	}
 	return info
 }
 
 func parseAnthropicRequest(body []byte) *RequestInfo {
 	var raw struct {
-		Model       string          `json:"model"`
-		System      json.RawMessage `json:"system"`
+		Model       string            `json:"model"`
+		System      json.RawMessage   `json:"system"`
 		Messages    []json.RawMessage `json:"messages"`
-		Stream      bool            `json:"stream"`
-		MaxTokens   int             `json:"max_tokens"`
-		Temperature float64         `json:"temperature"`
+		Stream      bool              `json:"stream"`
+		MaxTokens   int               `json:"max_tokens"`
+		Temperature float64           `json:"temperature"`
+		Tools       []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+		ToolChoice json.RawMessage `json:"tool_choice"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
@@ -130,6 +179,16 @@ func parseAnthropicRequest(body []byte) *RequestInfo {
 			Content: content,
 		})
 	}
+	for _, t := range raw.Tools {
+		info.Tools = append(info.Tools, ToolDefinition{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  t.InputSchema,
+		})
+	}
+	if len(raw.ToolChoice) > 0 {
+		info.ToolChoice = raw.ToolChoice
+	}
 	return info
 }
 
@@ -150,6 +209,18 @@ func parseGeminiRequest(body []byte) *RequestInfo {
 			MaxOutputTokens int     `json:"maxOutputTokens"`
 			Temperature     float64 `json:"temperature"`
 		} `json:"generationConfig"`
+		Tools []struct {
+			FunctionDeclarations []struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			} `json:"functionDeclarations"`
+		} `json:"tools"`
+		ToolConfig *struct {
+			FunctionCallingConfig *struct {
+				Mode string `json:"mode"`
+			} `json:"functionCallingConfig"`
+		} `json:"toolConfig"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
@@ -184,6 +255,19 @@ func parseGeminiRequest(body []byte) *RequestInfo {
 	if raw.GenerationConfig != nil {
 		info.MaxTokens = raw.GenerationConfig.MaxOutputTokens
 		info.Temperature = raw.GenerationConfig.Temperature
+	}
+	for _, t := range raw.Tools {
+		for _, fd := range t.FunctionDeclarations {
+			info.Tools = append(info.Tools, ToolDefinition{
+				Name:        fd.Name,
+				Description: fd.Description,
+				Parameters:  fd.Parameters,
+			})
+		}
+	}
+	if raw.ToolConfig != nil && raw.ToolConfig.FunctionCallingConfig != nil {
+		// Gemini 模式：BLOCK_ONLY / ANY / NONE / AUTO → 简单转字符串
+		info.ToolChoice = json.RawMessage(`"` + raw.ToolConfig.FunctionCallingConfig.Mode + `"`)
 	}
 	return info
 }
@@ -242,7 +326,15 @@ func parseOpenAIResponse(body []byte) *ResponseInfo {
 		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -259,6 +351,13 @@ func parseOpenAIResponse(body []byte) *ResponseInfo {
 	if len(raw.Choices) > 0 {
 		info.Content = raw.Choices[0].Message.Content
 		info.FinishReason = raw.Choices[0].FinishReason
+		for _, tc := range raw.Choices[0].Message.ToolCalls {
+			info.ToolCalls = append(info.ToolCalls, ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			})
+		}
 	}
 	if raw.Usage != nil {
 		info.PromptTokens = raw.Usage.PromptTokens
@@ -272,8 +371,11 @@ func parseAnthropicResponse(body []byte) *ResponseInfo {
 	var raw struct {
 		Model    string `json:"model"`
 		Content  []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      *struct {
@@ -292,6 +394,12 @@ func parseAnthropicResponse(body []byte) *ResponseInfo {
 	for _, b := range raw.Content {
 		if b.Type == "text" || b.Type == "" {
 			sb.WriteString(b.Text)
+		} else if b.Type == "tool_use" {
+			info.ToolCalls = append(info.ToolCalls, ToolCall{
+				ID:        b.ID,
+				Name:      b.Name,
+				Arguments: string(b.Input),
+			})
 		}
 	}
 	info.Content = sb.String()
@@ -309,6 +417,10 @@ func parseGeminiResponse(body []byte) *ResponseInfo {
 			Content struct {
 				Parts []struct {
 					Text string `json:"text"`
+					FunctionCall *struct {
+						Name string          `json:"name"`
+						Args json.RawMessage `json:"args"`
+					} `json:"functionCall"`
 				} `json:"parts"`
 			} `json:"content"`
 			FinishReason string `json:"finishReason"`
@@ -326,7 +438,14 @@ func parseGeminiResponse(body []byte) *ResponseInfo {
 	if len(raw.Candidates) > 0 {
 		var sb strings.Builder
 		for _, p := range raw.Candidates[0].Content.Parts {
-			sb.WriteString(p.Text)
+			if p.FunctionCall != nil {
+				info.ToolCalls = append(info.ToolCalls, ToolCall{
+					Name:      p.FunctionCall.Name,
+					Arguments: string(p.FunctionCall.Args),
+				})
+			} else if p.Text != "" {
+				sb.WriteString(p.Text)
+			}
 		}
 		info.Content = sb.String()
 		info.FinishReason = raw.Candidates[0].FinishReason
@@ -344,12 +463,13 @@ func parseGeminiResponse(body []byte) *ResponseInfo {
 // StreamAssembler incrementally assembles streamed LLM responses from SSE chunks.
 // It auto-detects the streaming format from the first chunk and delegates accordingly.
 type StreamAssembler struct {
-	provider Provider
-	model    string
-	content  strings.Builder
-	finish   string
-	usage    *ResponseInfo
-	detected bool
+	provider  Provider
+	model     string
+	content   strings.Builder
+	finish    string
+	usage     *ResponseInfo
+	detected  bool
+	toolCalls []ToolCall
 }
 
 // NewStreamAssembler creates a new assembler for the given provider.
@@ -379,7 +499,16 @@ func (a *StreamAssembler) feedOpenAI(data []byte) bool {
 		Model string `json:"model"`
 		Choices []struct {
 			Delta struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index   int    `json:"index"`
+					ID      string `json:"id"`
+					Type    string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"delta"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -393,6 +522,20 @@ func (a *StreamAssembler) feedOpenAI(data []byte) bool {
 	if len(chunk.Choices) > 0 {
 		c := chunk.Choices[0]
 		a.content.WriteString(c.Delta.Content)
+		for _, tc := range c.Delta.ToolCalls {
+			// OpenAI 流式：第一个 chunk 含 id 和 name，后续 chunk 仅含 arguments 增量
+			idx := tc.Index
+			for len(a.toolCalls) <= idx {
+				a.toolCalls = append(a.toolCalls, ToolCall{})
+			}
+			if tc.ID != "" {
+				a.toolCalls[idx].ID = tc.ID
+			}
+			if tc.Function.Name != "" {
+				a.toolCalls[idx].Name = tc.Function.Name
+			}
+			a.toolCalls[idx].Arguments += tc.Function.Arguments
+		}
 		if c.FinishReason != "" {
 			a.finish = c.FinishReason
 		}
@@ -425,13 +568,34 @@ func (a *StreamAssembler) feedAnthropic(data []byte) bool {
 			}
 			a.usage.PromptTokens = msg.Message.Usage.InputTokens
 		}
+	case "content_block_start":
+		var delta struct {
+			Index int `json:"index"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"content_block"`
+		}
+		if err := json.Unmarshal(event.Delta, &delta); err == nil && delta.ContentBlock.Type == "tool_use" {
+			a.toolCalls = append(a.toolCalls, ToolCall{
+				ID:   delta.ContentBlock.ID,
+				Name: delta.ContentBlock.Name,
+			})
+		}
 	case "content_block_delta":
 		var delta struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type    string          `json:"type"`
+			Text    string          `json:"text"`
+			Partial json.RawMessage `json:"partial_json"`
 		}
-		if err := json.Unmarshal(event.Delta, &delta); err == nil && delta.Type == "text_delta" {
-			a.content.WriteString(delta.Text)
+		if err := json.Unmarshal(event.Delta, &delta); err == nil {
+			if delta.Type == "text_delta" {
+				a.content.WriteString(delta.Text)
+			} else if delta.Type == "input_json_delta" && len(a.toolCalls) > 0 {
+				// 追加到最后一个 toolCall 的 arguments
+				a.toolCalls[len(a.toolCalls)-1].Arguments += string(delta.Partial)
+			}
 		}
 	case "message_delta":
 		var delta struct {
@@ -511,6 +675,7 @@ func (a *StreamAssembler) Result() *ResponseInfo {
 		Model:        a.model,
 		Content:      a.content.String(),
 		FinishReason: a.finish,
+		ToolCalls:    a.toolCalls,
 	}
 	if a.usage != nil {
 		info.PromptTokens = a.usage.PromptTokens
