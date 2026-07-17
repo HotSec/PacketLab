@@ -36,6 +36,7 @@ var providerPatterns = map[Provider]providerPattern{
 }
 
 // DetectProvider attempts to identify the LLM provider from host and path.
+// 先匹配内置 3 大厂模式；未命中则查自定义端点注册表，命中视为 openai 兼容。
 func DetectProvider(host, path string) Provider {
 	host = strings.ToLower(host)
 	path = strings.ToLower(path)
@@ -50,6 +51,11 @@ func DetectProvider(host, path string) Provider {
 				return provider
 			}
 		}
+	}
+	// 自定义端点匹配（OpenAI 兼容）
+	// Custom endpoint match (OpenAI-compatible)
+	if _, ok := matchCustomEndpoint(host, path); ok {
+		return ProviderOpenAI
 	}
 	return ProviderUnknown
 }
