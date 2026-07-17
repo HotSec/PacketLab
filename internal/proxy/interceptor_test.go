@@ -19,14 +19,14 @@ import (
 // ========================================
 
 func TestNewInterceptorDefaultMode(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	if it.GetMode() != "auto" {
 		t.Errorf("expected mode=auto, got %s", it.GetMode())
 	}
 }
 
 func TestNewInterceptorTimeout(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	if it.timeout != 15*time.Second {
 		t.Errorf("expected timeout=15s, got %v", it.timeout)
 	}
@@ -44,7 +44,7 @@ func TestNewInterceptorZeroTimeout(t *testing.T) {
 // ========================================
 
 func TestSetGetMode(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	it.SetMode("manual")
 	if it.GetMode() != "manual" {
 		t.Errorf("expected mode=manual, got %s", it.GetMode())
@@ -119,7 +119,7 @@ func TestMatchRuleMethod(t *testing.T) {
 // ========================================
 
 func TestGetPendingEmpty(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	pending := it.GetPending()
 	if len(pending) != 0 {
 		t.Errorf("expected 0 pending, got %d", len(pending))
@@ -131,7 +131,7 @@ func TestGetPendingEmpty(t *testing.T) {
 // ========================================
 
 func TestResolveInvalidID(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	err := it.Resolve("nonexistent", models.InterceptResult{Action: "allow"})
 	if err == nil {
 		t.Error("expected error for invalid request id")
@@ -143,7 +143,7 @@ func TestResolveInvalidID(t *testing.T) {
 // ========================================
 
 func TestHandleAutoBlock(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	it.SetMode("auto")
 	it.SetRules([]models.InterceptRule{
 		{Pattern: "*.blocked.com", Action: "block", Enabled: true},
@@ -164,7 +164,7 @@ func TestHandleAutoBlock(t *testing.T) {
 // ========================================
 
 func TestHandleAutoAllow(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	it.SetMode("auto")
 	it.SetRules([]models.InterceptRule{
 		{Pattern: "*.allowed.com", Action: "allow", Enabled: true},
@@ -186,7 +186,7 @@ func TestHandleAutoAllow(t *testing.T) {
 // ========================================
 
 func TestHandleAutoNoMatch(t *testing.T) {
-	it := NewInterceptor(15, nil, nil)
+	it := NewInterceptor(15*time.Second, nil, nil)
 	it.SetMode("auto")
 	it.SetRules([]models.InterceptRule{
 		{Pattern: "*.example.com", Action: "block", Enabled: true},
@@ -211,7 +211,7 @@ func TestHandleManualPending(t *testing.T) {
 	var mu sync.Mutex
 	var notified *models.PendingRequest
 
-	it := NewInterceptor(15, func(req *models.PendingRequest) {
+	it := NewInterceptor(15*time.Second, func(req *models.PendingRequest) {
 		mu.Lock()
 		notified = req
 		mu.Unlock()
@@ -281,7 +281,7 @@ func TestInterceptor_ManualMode_PendingBody(t *testing.T) {
 	var mu sync.Mutex
 	var notified *models.PendingRequest
 
-	it := NewInterceptor(2, func(req *models.PendingRequest) {
+	it := NewInterceptor(2*time.Second, func(req *models.PendingRequest) {
 		mu.Lock()
 		notified = req
 		mu.Unlock()
@@ -352,7 +352,7 @@ func TestInterceptor_ManualMode_PendingBody(t *testing.T) {
 // ========================================
 
 func TestHandleManualTimeout(t *testing.T) {
-	it := NewInterceptor(1, nil, nil) // 1 second timeout
+	it := NewInterceptor(1*time.Second, nil, nil) // 1 second timeout
 	it.SetMode("manual")
 
 	reqURL, _ := url.Parse("https://httpbin.org/get")
@@ -397,7 +397,7 @@ func newTestInterceptorStore(t *testing.T) *store.Store {
 func TestInterceptor_Stop_FlushesLogs(t *testing.T) {
 	st := newTestInterceptorStore(t)
 
-	it := NewInterceptor(1, func(*models.PendingRequest) {}, st)
+	it := NewInterceptor(1*time.Second, func(*models.PendingRequest) {}, st)
 	for i := 0; i < 100; i++ {
 		it.logCh <- &models.InterceptLog{
 			Action: "allow", RequestURL: "http://x", RequestHost: "x", Mode: "manual",
@@ -420,7 +420,7 @@ func TestInterceptor_Stop_FlushesLogs(t *testing.T) {
 
 func TestInterceptor_Stop_Idempotent(t *testing.T) {
 	st := newTestInterceptorStore(t)
-	it := NewInterceptor(1, func(*models.PendingRequest) {}, st)
+	it := NewInterceptor(1*time.Second, func(*models.PendingRequest) {}, st)
 	it.Stop()
 	it.Stop() // 不 panic
 }
@@ -429,7 +429,7 @@ func TestInterceptor_Stop_Idempotent(t *testing.T) {
 // 这是 Bug 7 修复的 critical 部分：writeLog 加 RWMutex 保护，避免 send on closed channel。
 func TestInterceptor_Stop_NoPanicOnConcurrentWriteLog(t *testing.T) {
 	st := newTestInterceptorStore(t)
-	it := NewInterceptor(1, func(*models.PendingRequest) {}, st)
+	it := NewInterceptor(1*time.Second, func(*models.PendingRequest) {}, st)
 
 	// 启动一个 goroutine 持续调用 writeLog
 	stop := make(chan struct{})
@@ -464,4 +464,25 @@ func TestInterceptor_Stop_NoPanicOnConcurrentWriteLog(t *testing.T) {
 
 	close(stop)
 	wg.Wait()
+}
+
+// TestInterceptor_PendingTimeout_Configurable 验证拦截器 pending 请求超时可通过 NewInterceptor 参数配置。
+// V3-3：原 15s 硬编码，改为 CLI 可配（1s~10m）。
+// 此测试用 100ms 短超时验证参数确实生效（非硬编码 15s）。
+func TestInterceptor_PendingTimeout_Configurable(t *testing.T) {
+	st := newTestInterceptorStore(t)
+
+	it := NewInterceptor(100*time.Millisecond, func(*models.PendingRequest) {}, st)
+	defer it.Stop()
+	it.SetMode("manual") // manual 模式下请求进入 pending 队列，触发超时路径
+
+	req, _ := http.NewRequest("POST", "http://x.example/", strings.NewReader("body"))
+	start := time.Now()
+	_, _ = it.Handle(req, nil, func(r *http.Request) {})
+	elapsed := time.Since(start)
+
+	// 100ms 超时允许 ±10ms 抖动；若硬编码 15s 则 elapsed 远大于 200ms
+	if elapsed < 90*time.Millisecond || elapsed > 200*time.Millisecond {
+		t.Fatalf("expected ~100ms timeout (configurable), got %v", elapsed)
+	}
 }

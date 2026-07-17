@@ -41,6 +41,8 @@ func main() {
 	captureStreamTimeout := flag.Int("capture-stream-timeout", config.DefaultStreamTimeoutMin, "网卡抓包流空闲超时（分钟，0=默认2）")
 	captureRingEntries := flag.Int("capture-ring-entries", config.DefaultCaptureRingEntries, "网卡抓包环形缓冲区条目数（向上取 2 的幂，0=默认262144）")
 	captureMaxStreams := flag.Int("capture-max-streams", config.DefaultMaxStreams, "max concurrent TCP streams for NIC capture (LRU eviction when exceeded, min 64)")
+	interceptPendingTimeout := flag.Duration("intercept-pending-timeout", config.DefaultInterceptPendingTimeout,
+		"interceptor pending request timeout (Go duration, e.g. 30s, 2m; range 1s~10m)")
 	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
 	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")
 	apiAllowOrigins := flag.String("api-allow-origins", "", "逗号分隔的 CORS/WebSocket 允许 Origin 列表（默认仅 localhost）")
@@ -53,7 +55,8 @@ func main() {
 	// 集中化配置 fail-fast 校验
 	cfg, err := config.Load(*proxyPort, *apiPort, *dbPath, *noProxy, *noMitm, *insecure,
 		*captureFlag, *captureIFace, *captureBPF, *captureNoProc,
-		*captureStreamTimeout, *maxReqBodyKB, *maxResBodyKB, *captureRingEntries, *captureMaxStreams)
+		*captureStreamTimeout, *maxReqBodyKB, *maxResBodyKB, *captureRingEntries, *captureMaxStreams,
+		*interceptPendingTimeout)
 	if err != nil {
 		slog.Error("配置加载失败", "error", err)
 		os.Exit(1)
@@ -93,7 +96,7 @@ func main() {
 	if interceptMode == "" {
 		interceptMode = "auto"
 	}
-	interceptor := proxy.NewInterceptor(15, func(req *models.PendingRequest) {
+	interceptor := proxy.NewInterceptor(cfg.InterceptPendingTimeout, func(req *models.PendingRequest) {
 		apiSrv.BroadcastIntercept(req)
 	}, st)
 	interceptor.SetMode(interceptMode)

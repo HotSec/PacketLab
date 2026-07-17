@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Config 集中化应用配置 (fail-fast on invalid values)
@@ -26,6 +27,7 @@ type Config struct {
 	MaxReqBodyKB   int // 请求体最大 KB，0=使用默认值
 	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
 	AllowOrigins []string // CORS/WebSocket 允许的 Origin 白名单（空 = 仅 localhost）
+	InterceptPendingTimeout time.Duration // 拦截器 pending 请求超时（默认 15s，范围 1s~10m）
 }
 
 // Default validated default values
@@ -38,13 +40,15 @@ const (
 	DefaultStreamTimeoutMin = 2 // 网卡抓包流空闲超时默认 2 分钟
 	DefaultCaptureRingEntries = 262144 // 网卡抓包环形缓冲区默认条目数（256K，向上取 2 的幂）
 	DefaultMaxStreams = 1000 // 网卡抓包最大并发 TCP 流数默认值（超限 LRU 淘汰）
+	DefaultInterceptPendingTimeout = 15 * time.Second // 拦截器 pending 请求默认超时
 	defaultOrg          = "PacketLab"
 )
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
 func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	capture bool, captureIface, captureBPF string, captureNoProc bool,
-	streamTimeoutMin, maxReqBodyKB, maxResBodyKB, captureRingEntries, maxStreams int) (*Config, error) {
+	streamTimeoutMin, maxReqBodyKB, maxResBodyKB, captureRingEntries, maxStreams int,
+	interceptPendingTimeout time.Duration) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -104,6 +108,14 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	if maxStreams > 0 && maxStreams < 64 {
 		return nil, fmt.Errorf("config: capture-max-streams must be >= 64, got %d", maxStreams)
 	}
+	// interceptPendingTimeout: 0 用默认值；超出 1s~10m 范围非法
+	// interceptPendingTimeout: 0 uses default; outside 1s~10m invalid
+	if interceptPendingTimeout == 0 {
+		interceptPendingTimeout = DefaultInterceptPendingTimeout
+	}
+	if interceptPendingTimeout < time.Second || interceptPendingTimeout > 10*time.Minute {
+		return nil, fmt.Errorf("config: intercept-pending-timeout must be between 1s and 10m, got %v", interceptPendingTimeout)
+	}
 
 	cfg := &Config{
 		ProxyPort:              proxyPort,
@@ -123,6 +135,7 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		MaxStreams:             maxStreams,
 		MaxReqBodyKB:           maxReqBodyKB,
 		MaxResBodyKB:           maxResBodyKB,
+		InterceptPendingTimeout: interceptPendingTimeout,
 	}
 	return cfg, nil
 }

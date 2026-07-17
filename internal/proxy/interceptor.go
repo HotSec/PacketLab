@@ -40,16 +40,19 @@ type pendingReq struct {
 	createdAt time.Time
 }
 
-// NewInterceptor 创建拦截控制器
-func NewInterceptor(timeoutSec int, onNotify func(req *models.PendingRequest), st *store.Store) *Interceptor {
-	if timeoutSec <= 0 {
-		timeoutSec = 15
+// NewInterceptor 创建拦截控制器。
+// timeout <= 0 时使用默认值 15s。建议通过 --intercept-pending-timeout CLI 配置。
+// NewInterceptor creates the interceptor. timeout <= 0 falls back to 15s default.
+// Configure via --intercept-pending-timeout CLI flag.
+func NewInterceptor(timeout time.Duration, onNotify func(req *models.PendingRequest), st *store.Store) *Interceptor {
+	if timeout <= 0 {
+		timeout = 15 * time.Second
 	}
 	it := &Interceptor{
 		mode:     "auto",
 		pending:  make(map[string]*pendingReq),
 		onNotify: onNotify,
-		timeout:  time.Duration(timeoutSec) * time.Second,
+		timeout:  timeout,
 		logCh:    make(chan *models.InterceptLog, 1024),
 	}
 	if st != nil {
