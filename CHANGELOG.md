@@ -33,6 +33,13 @@ v0.0.2 → v0.1.0 是稳定性延续版本，无破坏性变更，可直接替�
 - **`--intercept-pending-timeout` CLI**：原 15s 硬编码，改为 Go duration 格式可配（1s~10m）。NewInterceptor 签名改 `time.Duration`。(`internal/proxy/interceptor.go`, `internal/config/config.go`)
 - **`--cleanup-retention-days` / `--cleanup-interval` CLI**：暴露 retention 与 interval 为 CLI，首次启动写入 settings。(`cmd/proxy/main.go`, `internal/config/config.go`)
 
+### 🟢 LLM 增强（阶段三）
+
+- **LLM AI 对话视图**：捕获到 LLM API 调用时自动显示 🤖 AI对话 tab，渲染对话消息（system/user/assistant 角色）+ provider badge（OpenAI/Anthropic/Gemini）+ token usage + 复制提示词按钮。(`cmd/proxy/web/*`)
+- **自定义 OpenAI 兼容端点识别**：新增 `RegisterCustomEndpoint`/`UnregisterCustomEndpoint`/`ListCustomEndpoints` API，支持 host 完全/后缀匹配 + path 前缀匹配。可识别 DeepSeek/Moonshot/本地 vLLM 等 OpenAI 兼容端点。(`internal/llm/custom_endpoints.go`)
+- **Tool/Function Calling 提取**：解析请求 `tools` 定义（OpenAI/Anthropic/Gemini 三家）+ 响应 `tool_calls`/`tool_use`/`functionCall`，支持 OpenAI 流式 tool_calls 增量拼接（index 索引）和 Anthropic 流式 `content_block_start`/`input_json_delta` 拼接。(`internal/llm/parser.go`)
+- **LLM 成本估算**：内置 19 个模型定价表（OpenAI 9 + Anthropic 5 + Gemini 4），按 token 用量估算 USD 成本，最长前缀匹配（`gpt-4o-mini` 优先于 `gpt-4o`），大小写不敏感，未命中返回 0。前端显示 `Cost $x.xxxx`。(`internal/llm/pricing.go`)
+
 ### 🔵 工程化
 
 - **CI 流水线**：新增 `.github/workflows/ci.yml`（push + PR 触发，lint + test -race + build + 覆盖率上报 codecov）。
