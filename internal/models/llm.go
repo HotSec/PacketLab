@@ -49,4 +49,6 @@ type LLMUsage struct {
 	PromptTokens     int `json:"prompt_tokens,omitempty"`
 	CompletionTokens int `json:"completion_tokens,omitempty"`
 	TotalTokens      int `json:"total_tokens,omitempty"`
+	// CostUSD 估算成本（美元）。模型未在定价表中时为 0。
+	CostUSD          float64 `json:"cost_usd,omitempty"`
 }

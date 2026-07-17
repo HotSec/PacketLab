@@ -64,10 +64,15 @@ func buildLLMExchange(provider llm.Provider, reqInfo *llm.RequestInfo, resInfo *
 		}
 		ex.Response = resInfo.Content
 		if resInfo.PromptTokens > 0 || resInfo.CompletionTokens > 0 || resInfo.TotalTokens > 0 {
+			// 优先使用 resInfo 的 token 数计算成本
+			promptTok := resInfo.PromptTokens
+			compTok := resInfo.CompletionTokens
+			cost := llm.EstimateCost(ex.Model, promptTok, compTok)
 			ex.Usage = &models.LLMUsage{
-				PromptTokens:     resInfo.PromptTokens,
-				CompletionTokens: resInfo.CompletionTokens,
+				PromptTokens:     promptTok,
+				CompletionTokens: compTok,
 				TotalTokens:      resInfo.TotalTokens,
+				CostUSD:          cost,
 			}
 		}
 		// 转换 tool_calls

@@ -1417,6 +1417,7 @@ function renderLLMContent(exchange) {
     if (usage.prompt_tokens) html += `<div class="llm-usage-item"><span>Prompt Tokens</span><span class="llm-usage-val">${usage.prompt_tokens}</span></div>`;
     if (usage.completion_tokens) html += `<div class="llm-usage-item"><span>Completion Tokens</span><span class="llm-usage-val">${usage.completion_tokens}</span></div>`;
     if (usage.total_tokens) html += `<div class="llm-usage-item"><span>Total Tokens</span><span class="llm-usage-val">${usage.total_tokens}</span></div>`;
+    if (usage.cost_usd) html += `<div class="llm-usage-item"><span>Cost</span><span class="llm-usage-val">$${usage.cost_usd.toFixed(4)}</span></div>`;
     html += '</div>';
   }
 
