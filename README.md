@@ -7,6 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://go.dev"><img src="https://img.shields.io/badge/go-1.25+-00ADD8.svg" alt="Go"></a>
+  <a href="https://github.com/user/packetlab/actions/workflows/ci.yml"><img src="https://github.com/user/packetlab/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
 ---
@@ -99,6 +100,12 @@ sudo update-ca-certificates
 | `--capture-bpf` | `tcp` | BPF 过滤器 |
 | `--capture-no-proc` | `false` | 禁用进程关联 |
 | `--capture-stream-timeout` | `2` | 网卡抓包流空闲超时（分钟） |
+| `--capture-ring-entries` | `262144` | 网卡抓包 ring buffer 条目数（向上取 2 的幂） |
+| `--capture-max-streams` | `1000` | 最大并发 TCP 流数（超限 LRU 淘汰，最小 64） |
+| `--intercept-pending-timeout` | `15s` | 待审请求超时（Go duration 格式，1s~10m） |
+| `--cleanup-retention-days` | `7` | 自动清理保留天数 |
+| `--cleanup-interval` | `6h` | 自动清理间隔（最小 1m） |
+| `--api-allow-origins` | 空 | CORS/WebSocket 允许的 Origin（逗号分隔，默认仅 localhost） |
 | `--max-req-body-kb` | `2048` | 请求体最大 KB |
 | `--max-res-body-kb` | `4096` | 响应体最大 KB |
 
@@ -174,16 +181,24 @@ internal/
     proxy.go               # HTTP/HTTPS 代理 + MITM
     mitm.go                # CA 证书生成
     batch.go               # 批量写入器
-    interceptor.go         # 拦截控制器（channel 阻塞）
+    interceptor.go         # 拦截控制器
   api/                     # REST API
     server.go              # 路由与处理器
+    middleware.go          # CORS / 限流
     ws.go                  # WebSocket Hub
+  capture/                 # 网卡抓包引擎
+    engine.go              # CaptureEngine + TCP Assembler
+    engine_pcap.go         # libpcap 封装
+    memring.go             # 内存环形缓冲 + 异步写入
+    proc_unix.go           # 进程关联 (macOS/Linux)
+    proc_windows.go        # 进程关联 (Windows)
   store/                   # SQLite 持久化
     store.go               # CRUD + API 地图 + 规则
   models/                  # 数据模型
     models.go              # CapturedRequest, InterceptRule, etc.
   config/                  # 配置管理
     config.go              # 环境变量 + 命令行参数
+  llm/                     # LLM 流量解析（OpenAI/Anthropic/Gemini）
 ```
 
 ## 技术栈
@@ -205,6 +220,7 @@ internal/
 | `Cmd/Ctrl + K` | 聚焦搜索框 |
 | `Cmd/Ctrl + 1/2/3/4` | 切换请求/响应/重发/API地图 |
 | `Cmd/Ctrl + Enter` | 发送重发请求 |
+| `R` | 打开拦截规则面板 |
 | 中键点击搜索框 | 清空搜索与过滤 |
 | 右键 API 地图节点 | 上下文菜单 |
 
