@@ -377,3 +377,47 @@ func TestStreamAssemblerOpenAIToolCalls(t *testing.T) {
 		t.Errorf("arguments = %q, want {\"city\":\"SF\"}", result.ToolCalls[0].Arguments)
 	}
 }
+
+// TestStreamAssemblerAnthropicToolCalls 验证 Anthropic 流式 tool_use 增量拼接。
+// 原始 bug：partial_json 字段定义为 json.RawMessage，导致追加时保留 JSON 外层引号，
+// 最终 arguments 不是合法 JSON。修复：改为 string 类型，让 Go 自动 unmarshal。
+func TestStreamAssemblerAnthropicToolCalls(t *testing.T) {
+	a := NewStreamAssembler(ProviderAnthropic)
+	// content_block_start: tool_use 块开始（含 id 和 name）
+	a.Feed([]byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"get_weather"}}`))
+	// input_json_delta: arguments 增量（partial_json 是 string，值含内部转义）
+	a.Feed([]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}`))
+	a.Feed([]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"SF\"}"}}`))
+
+	result := a.Result()
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].ID != "toolu_01" {
+		t.Errorf("id = %q, want toolu_01", result.ToolCalls[0].ID)
+	}
+	if result.ToolCalls[0].Name != "get_weather" {
+		t.Errorf("name = %q, want get_weather", result.ToolCalls[0].Name)
+	}
+	// 期望拼接后的 arguments 是合法 JSON 字符串 {"city":"SF"}
+	// bug 行为：partial_json 作为 RawMessage 时 string() 转换会保留外层引号，
+	// 得到 "\"{\\\"city\\\":\"\"\\\"SF\\\"}\"，无法 JSON 解析
+	if result.ToolCalls[0].Arguments != `{"city":"SF"}` {
+		t.Errorf("arguments = %q, want {\"city\":\"SF\"}", result.ToolCalls[0].Arguments)
+	}
+}
+
+// TestStreamAssemblerOpenAIToolCalls_NegativeIndex 验证 OpenAI 流式 tool_calls 中
+// index 为负数时不会导致无限循环或越界。
+func TestStreamAssemblerOpenAIToolCalls_NegativeIndex(t *testing.T) {
+	a := NewStreamAssembler(ProviderOpenAI)
+	// 异常 chunk：index 为负数
+	a.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":-1,"id":"x","function":{"name":"f","arguments":""}}]}}]}`))
+	a.Feed([]byte("[DONE]"))
+
+	result := a.Result()
+	// 负 index 的 tool_call 应被忽略，不应导致 panic 或无限循环
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("expected 0 tool calls (negative index ignored), got %d", len(result.ToolCalls))
+	}
+}

@@ -525,6 +525,11 @@ func (a *StreamAssembler) feedOpenAI(data []byte) bool {
 		for _, tc := range c.Delta.ToolCalls {
 			// OpenAI 流式：第一个 chunk 含 id 和 name，后续 chunk 仅含 arguments 增量
 			idx := tc.Index
+			// 防御：负数 index 直接忽略，避免越界 panic
+			// Defensive: skip negative index to avoid out-of-bounds panic
+			if idx < 0 {
+				continue
+			}
 			for len(a.toolCalls) <= idx {
 				a.toolCalls = append(a.toolCalls, ToolCall{})
 			}
@@ -569,32 +574,44 @@ func (a *StreamAssembler) feedAnthropic(data []byte) bool {
 			a.usage.PromptTokens = msg.Message.Usage.InputTokens
 		}
 	case "content_block_start":
-		var delta struct {
-			Index int `json:"index"`
+		// content_block_start 事件的 content_block 字段在顶层（不在 delta 中），
+		// 需要直接从 data 解析。修复：原代码错误使用 event.Delta，导致解析失败。
+		// content_block_start event has content_block at the top level (not inside delta),
+		// so we must parse from data directly. Fix: original code incorrectly used event.Delta.
+		var ev struct {
+			Type  string `json:"type"`
+			Index int    `json:"index"`
 			ContentBlock struct {
 				Type string `json:"type"`
 				ID   string `json:"id"`
 				Name string `json:"name"`
 			} `json:"content_block"`
 		}
-		if err := json.Unmarshal(event.Delta, &delta); err == nil && delta.ContentBlock.Type == "tool_use" {
+		if err := json.Unmarshal(data, &ev); err == nil && ev.ContentBlock.Type == "tool_use" {
 			a.toolCalls = append(a.toolCalls, ToolCall{
-				ID:   delta.ContentBlock.ID,
-				Name: delta.ContentBlock.Name,
+				ID:   ev.ContentBlock.ID,
+				Name: ev.ContentBlock.Name,
 			})
 		}
 	case "content_block_delta":
 		var delta struct {
-			Type    string          `json:"type"`
-			Text    string          `json:"text"`
-			Partial json.RawMessage `json:"partial_json"`
+			Type    string `json:"type"`
+			Text    string `json:"text"`
+			Partial string `json:"partial_json"`
 		}
 		if err := json.Unmarshal(event.Delta, &delta); err == nil {
 			if delta.Type == "text_delta" {
 				a.content.WriteString(delta.Text)
 			} else if delta.Type == "input_json_delta" && len(a.toolCalls) > 0 {
-				// 追加到最后一个 toolCall 的 arguments
-				a.toolCalls[len(a.toolCalls)-1].Arguments += string(delta.Partial)
+				// partial_json 是字符串类型（Anthropic SSE 规范），
+				// Go 自动 unmarshal 去除 JSON 外层引号。
+				// 修复：原代码定义为 json.RawMessage 导致 string() 转换保留引号，
+				// 最终 arguments 不是合法 JSON。
+				// partial_json is a string type (Anthropic SSE spec);
+				// Go auto-unmarshals and strips JSON outer quotes.
+				// Fix: original code defined it as json.RawMessage, causing string()
+				// conversion to keep quotes, making final arguments invalid JSON.
+				a.toolCalls[len(a.toolCalls)-1].Arguments += delta.Partial
 			}
 		}
 	case "message_delta":
