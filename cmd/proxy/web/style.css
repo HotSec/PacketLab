@@ -88,6 +88,14 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
   animation: tooltipIn .18s ease;
 }
 @keyframes tooltipIn{from{opacity:0;transform:translateX(-50%) translateY(3px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+/* topbar 内按钮 tooltip 显示在下方，避免被浏览器窗口顶部裁切 */
+.topbar .icon-btn[data-tooltip]:hover::after,
+.topbar .mini-btn[data-tooltip]:hover::after{
+  top: calc(100% + 6px);
+  bottom: auto;
+  animation: tooltipInBelow .18s ease;
+}
+@keyframes tooltipInBelow{from{opacity:0;transform:translateX(-50%) translateY(-3px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 /* Main */
 .main-content{display:flex;flex:1;overflow:hidden;position:relative}
 .request-panel{width:390px;min-width:260px;display:flex;flex-direction:column;background:var(--bg-surface);border-right:1px solid var(--border-subtle);flex-shrink:0;transition:width .25s}
