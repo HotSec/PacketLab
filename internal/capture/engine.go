@@ -41,6 +41,15 @@ type Engine struct {
 	workerChs   []chan gopacket.Packet // per-worker packet channels
 	workerSg    sync.WaitGroup
 
+	// packetLoopDone 在 packetLoop 退出时 close，Stop 通过 <-packetLoopDone 等待
+	// packetLoop 完成 workerSg.Wait() 与 worker channel 关闭，避免快速 Stop→Start
+	// 循环时 WaitGroup panic 与数据竞争。
+	// packetLoopDone is closed when packetLoop exits; Stop waits on it so that
+	// packetLoop's deferred workerSg.Wait() and worker channel closes complete
+	// before flushEmitBuf / writer.Stop, preventing WaitGroup panic and data
+	// races during rapid Stop→Start cycles.
+	packetLoopDone chan struct{}
+
 	// 进程缓存
 	procCache     map[string]*models.ProcessInfo
 	procCacheTS   map[string]time.Time // 每条缓存写入时间，用于 TTL 淘汰
@@ -170,11 +179,20 @@ func (e *Engine) resolveProcessCached(srcIP string, srcPort uint16, buildFn func
 		e.procCacheTTL = 30 * time.Second
 	}
 
-	// 容量上限淘汰：超过 maxProcCache 时整体过期重建（简单且避免热点 eviction 开销）
+	// 容量上限淘汰：超过 maxProcCache 时优先淘汰已过期条目，避免全量清空
+	// 丢失热数据。若淘汰后仍满（极少见，所有条目都在 TTL 内），则全量重建。
 	const maxProcCache = 10000
 	if len(e.procCache) >= maxProcCache {
-		e.procCache = make(map[string]*models.ProcessInfo, len(table))
-		e.procCacheTS = make(map[string]time.Time, len(table))
+		for k, ts := range e.procCacheTS {
+			if now.Sub(ts) >= e.procCacheTTL {
+				delete(e.procCache, k)
+				delete(e.procCacheTS, k)
+			}
+		}
+		if len(e.procCache) >= maxProcCache {
+			e.procCache = make(map[string]*models.ProcessInfo, len(table))
+			e.procCacheTS = make(map[string]time.Time, len(table))
+		}
 	}
 
 	for k, v := range table {
@@ -205,6 +223,15 @@ func (e *Engine) Stop() {
 	case <-e.stopCh:
 	default:
 		close(e.stopCh)
+	}
+
+	// 等待 packetLoop 退出：其 defer 会关闭 worker channels 并 workerSg.Wait()，
+	// 避免 Stop 后 Start 时 worker/WaitGroup 仍在使用导致 panic 与数据竞争。
+	// Wait for packetLoop to exit: its defer closes worker channels and calls
+	// workerSg.Wait(), so workers fully drain before we touch flushEmitBuf /
+	// writer below. nil when Start was never called (stub or test path).
+	if e.packetLoopDone != nil {
+		<-e.packetLoopDone
 	}
 
 	// flush 剩余 emit 数据（可能阻塞，不持锁）
@@ -308,7 +335,6 @@ func (e *Engine) workerLoop(id int) {
 	}
 	gcTicker := time.NewTicker(gcInterval)
 	defer gcTicker.Stop()
-	flushDeadline := time.Now().Add(e.streamTimeout)
 	for {
 		select {
 		case packet, ok := <-ch:
@@ -318,8 +344,10 @@ func (e *Engine) workerLoop(id int) {
 			}
 			assembler.Assemble(packet)
 		case <-gcTicker.C:
-			assembler.FlushOlderThan(flushDeadline, e)
-			flushDeadline = time.Now().Add(e.streamTimeout)
+			// flush 超过 streamTimeout 未活跃的流：cutoff = now - streamTimeout
+			// 修复：原代码用 now + streamTimeout（未来时间），导致所有流每次 GC 都被强制 flush
+			cutoff := time.Now().Add(-e.streamTimeout)
+			assembler.FlushOlderThan(cutoff, e)
 		}
 	}
 }
@@ -969,7 +997,6 @@ func (s *TCPStream) tryExtractHTTP() {
 			resp := parseHTTPResponse(msgData)
 			if resp != nil && resp.StatusCode >= 200 {
 				req := s.pendingReq
-				s.pendingReq = nil
 				req.StatusCode = resp.StatusCode
 				req.ResHeaders = resp.Headers
 				req.ResBody = resp.Body
@@ -980,9 +1007,28 @@ func (s *TCPStream) tryExtractHTTP() {
 				// 同步 Save 以确保拿到真实 ID，SSE 响应头很小，开销可忽略
 				id, err := s.engine.store.Save(req)
 				if err != nil {
-					slog.Warn("capture: SSE initial save failed", "url", req.URL, "error", err)
+					// save 失败时不能仅 continue：pendingReq 已在上方准备就绪，
+					// 但 ssePending 未设为 true，下次循环 pendingReq!=nil 而
+					// serverBuf 已被消费 → tryExtractHTTP 直接 return，后续 SSE
+					// 数据走 serverBuf 累积直至被 truncateBuffer 截断。
+					// 标记 nonHTTP 终止该流的后续处理，避免数据堆积与误判。
+					// On save failure we must not just continue: pendingReq is
+					// ready but ssePending is not set, so the next loop iteration
+					// sees pendingReq!=nil with consumed serverBuf and returns,
+					// leaving subsequent SSE data to accumulate in serverBuf until
+					// truncateBuffer truncates it. Mark nonHTTP to terminate the
+					// stream and drop further data cleanly.
+					slog.Warn("capture: SSE initial save failed, marking stream non-HTTP", "url", req.URL, "error", err)
+					s.pendingReq = nil
+					s.nonHTTP = true
+					s.clientBuf = nil
+					s.serverBuf = nil
 					continue
 				}
+				// save 成功后再清 pendingReq，确保失败路径不会留下半完成的 SSE 状态
+				// Clear pendingReq only after successful save so the failure path
+				// above can cleanly reset stream state.
+				s.pendingReq = nil
 				req.ID = id
 				s.ssePending = true
 				s.sseReqID = id
@@ -1244,12 +1290,14 @@ func parseHTTPResponseFromHeader(headerData []byte, body string) *struct {
 	Body       string
 } {
 	headerStr := string(headerData)
-	lines := strings.Split(headerStr, "\r\n")
+	// 同时支持 CRLF 与 LF：先按 \n 切分，再去除行尾 \r，与 parseHTTPRequest 保持一致
+	lines := strings.Split(headerStr, "\n")
 	if len(lines) < 1 {
 		return nil
 	}
 
-	parts := strings.SplitN(lines[0], " ", 3)
+	firstLine := strings.TrimSuffix(lines[0], "\r")
+	parts := strings.SplitN(firstLine, " ", 3)
 	if len(parts) < 2 {
 		return nil
 	}
@@ -1260,6 +1308,10 @@ func parseHTTPResponseFromHeader(headerData []byte, body string) *struct {
 
 	headers := make(map[string]string)
 	for _, line := range lines[1:] {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
+			break
+		}
 		if ci := strings.Index(line, ":"); ci > 0 {
 			headers[strings.TrimSpace(line[:ci])] = strings.TrimSpace(line[ci+1:])
 		}

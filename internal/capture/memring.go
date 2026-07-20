@@ -34,6 +34,11 @@ func NewMemRingBuffer(entryCount int) *MemRingBuffer {
 	if entryCount <= 0 {
 		entryCount = 262144
 	}
+	// 强制最小 2：环形缓冲区用 head==tail 判空，size=1 时 head==tail 恒成立，
+	// Push 永远命中淘汰分支，PopBatch 永远返回 nil。
+	if entryCount < 2 {
+		entryCount = 2
+	}
 	// 对齐到 2 的幂
 	size := 1
 	for size < entryCount {

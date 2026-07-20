@@ -50,6 +50,7 @@ func (e *Engine) Start() error {
 	}
 
 	e.stopCh = make(chan struct{})
+	e.packetLoopDone = make(chan struct{})
 
 	// 激活：优先尝试 promisc（混杂）模式；若失败（如非 root 用户、macOS 无权限），
 	// 回退到非 promisc 模式（对本机流量捕获完全足够）。
@@ -128,6 +129,13 @@ func (e *Engine) packetLoop() {
 			close(ch)
 		}
 		e.workerSg.Wait()
+		// 通知 Stop：packetLoop 已完成 worker channel 关闭与 workerSg.Wait()，
+		// 后续 flushEmitBuf / writer.Stop 可安全执行，且下一次 Start 不会与
+		// 本次 worker goroutine 产生 WaitGroup / 数据竞争。
+		// Notify Stop: packetLoop has finished closing worker channels and
+		// workerSg.Wait(); flushEmitBuf / writer.Stop below is now safe and
+		// the next Start won't race with this cycle's worker goroutines.
+		close(e.packetLoopDone)
 	}()
 
 	packetSource := gopacket.NewPacketSource(e.handle, e.handle.LinkType())
