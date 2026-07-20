@@ -106,7 +106,12 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 	if lastErr != nil {
 		return nil, ErrBadGateway(fmt.Sprintf("send request after 3 retries: %s", lastErr.Error()))
 	}
-	defer resp.Body.Close()
+	// 用闭包变量，重试后 resp = resp2，defer 时关最新的 resp.Body
+	defer func() {
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}()
 
 	if resp.StatusCode >= 500 && resp.StatusCode < 600 {
 		time.Sleep(200 * time.Millisecond)

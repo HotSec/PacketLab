@@ -162,8 +162,12 @@ func rateLimitMiddleware(limiter *rateLimiter) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			key := r.RemoteAddr
-			if !limiter.allow(key) {
+			// 用 host（不含端口）作为限流 key，避免同一客户端不同端口被算作不同访客
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil || host == "" {
+				host = r.RemoteAddr
+			}
+			if !limiter.allow(host) {
 				writeAppError(w, ErrRateLimited())
 				return
 			}

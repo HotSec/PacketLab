@@ -137,7 +137,10 @@ func (h *wsHub) run() {
 
 func (c *wsClient) readPump() {
 	defer func() {
-		c.hub.unregister <- c
+		select {
+		case c.hub.unregister <- c:
+		case <-c.hub.stopCh:
+		}
 		c.conn.Close()
 	}()
 
