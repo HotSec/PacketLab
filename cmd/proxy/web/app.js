@@ -275,7 +275,9 @@ function normalizeReq(r) {
     captured_at: r.captured_at, is_https: r.is_https,
     protocol: r.is_https ? 'HTTPS/1.1' : 'HTTP/1.1',
     reqHeaders: r.req_headers || {}, reqBody: r.req_body,
-    resHeaders: r.res_headers || {}, resBody: r.res_body
+    resHeaders: r.res_headers || {}, resBody: r.res_body,
+    // 保留 starred 字段，避免 loadStarred/loadRequests 后二次过滤丢失收藏项
+    starred: !!r.starred
   };
 }
 
@@ -318,7 +320,7 @@ function updateRequestInList(data) {
   // 若当前正查看该请求且 body 有更新，实时刷新响应体（SSE 场景）
   if (bodyChanged && String(selectedRequestId) === String(r.id)) {
     const bodyEl = document.getElementById('res-body-content');
-    if (bodyEl) bodyEl.textContent = formatJSONBody('res', r.resBody) || t('empty');
+    if (bodyEl) bodyEl.textContent = formatJSONBody(r.resBody) || t('empty');
     const sizeEl = document.getElementById('res-size');
     if (sizeEl && r.size) sizeEl.textContent = r.size;
     const timeEl = document.getElementById('res-time');
@@ -428,7 +430,7 @@ function renderRequestList() {
       const pendingExtra = r.is_pending ? '<span class="pending-tag">PENDING</span>' : '';
       const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
       return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
-        <span class="method-badge method-${r.method}">${r.method}</span>
+        <span class="method-badge method-${escAttr(r.method)}">${esc(r.method)}</span>
         <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
         <div class="request-info">
           <span class="request-url">${esc(r.url)}</span>
@@ -461,7 +463,7 @@ function renderItemHTML(r, i) {
     ? '<span class="star-btn starred" onclick="event.stopPropagation();toggleStar(' + r.id + ',true)" title="取消收藏">★</span>'
     : '<span class="star-btn" onclick="event.stopPropagation();toggleStar(' + r.id + ',false)" title="收藏">☆</span>';
   return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
-    <span class="method-badge method-${r.method}">${r.method}</span>
+    <span class="method-badge method-${escAttr(r.method)}">${esc(r.method)}</span>
     <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
     <div class="request-info">
       <span class="request-url">${esc(r.url)}</span>
@@ -565,7 +567,7 @@ function fillContent(r, isPending) {
   const rh = r.reqHeaders || {};
   document.getElementById('req-headers-content').textContent =
     Object.keys(rh).length > 0 ? Object.entries(rh).map(([k, v]) => `${k}: ${v}`).join('\n') : t('empty');
-  document.getElementById('req-body-content').textContent = formatJSONBody('req', r.reqBody) || t('empty');
+  document.getElementById('req-body-content').textContent = formatJSONBody(r.reqBody) || t('empty');
 
   // 响应 tab
   const sc = `status-${Math.floor(r.status / 100)}xx`;
@@ -575,7 +577,7 @@ function fillContent(r, isPending) {
   const rsh = r.resHeaders || {};
   document.getElementById('res-headers-content').textContent =
     Object.keys(rsh).length > 0 ? Object.entries(rsh).map(([k, v]) => `${k}: ${v}`).join('\n') : t('empty');
-  document.getElementById('res-body-content').textContent = formatJSONBody('res', r.resBody) || t('empty');
+  document.getElementById('res-body-content').textContent = formatJSONBody(r.resBody) || t('empty');
 
   // 重发 tab
   document.getElementById('resendMethod').value = r.method || 'GET';
@@ -829,7 +831,7 @@ function renderTreeNode(node, depth) {
         <span class="tree-node-toggle ${hasChildren ? 'open' : ''}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--yellow)"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <span class="tree-node-name">${esc(child.name)}</span><span class="tree-node-count">(${child.count || 0})</span>
-        <div class="tree-node-methods">${allMethods.map(m => `<span class="tree-method-tag method-${m}">${m}</span>`).join('')}</div>
+        <div class="tree-node-methods">${allMethods.map(m => `<span class="tree-method-tag method-${escAttr(m)}">${esc(m)}</span>`).join('')}</div>
       </div><div class="tree-node-children">${hasChildren ? renderTreeNode(child, depth + 1) : ''}</div></div>`;
     }
   });
@@ -845,7 +847,7 @@ function renderLeaf(node, depth) {
       .map(([s, c]) => { const cls = 's' + Math.floor(parseInt(s) / 100); return `<span class="${cls}">${s}</span>`; }).join('');
     const hasNote = node.note && node.note_id;
     html += `<div class="tree-leaf-row ${method}" onclick="leafClick('${escJS(node.full_path)}','${escJS(method)}')" oncontextmenu="leafContext(event,'${escJS(node.full_path)}','${escJS(method)}','${escJS(node.note || '')}',${node.note_id || 0})" title="点击过滤 | 右键更多">
-      <span class="tree-leaf-method method-${method}">${method}</span>
+      <span class="tree-leaf-method method-${escAttr(method)}">${esc(method)}</span>
       <span class="tree-leaf-path">${esc(node.full_path)}</span>
       <span class="tree-leaf-status">${statusHtml}</span>
       ${hasNote ? `<span class="tree-leaf-note">${esc((node.note || '').substring(0, 24))}</span>` : ''}
@@ -903,7 +905,7 @@ async function loadRules() {
     let html = rules.map(r => `
       <div class="rule-item">
         <span class="rule-item-pattern">${esc(r.pattern)}</span>
-        ${r.method ? `<span class="method-badge method-${r.method}" style="font-size:9px;padding:1px 5px">${esc(r.method)}</span>` : ''}
+        ${r.method ? `<span class="method-badge method-${escAttr(r.method)}" style="font-size:9px;padding:1px 5px">${esc(r.method)}</span>` : ''}
         <span class="rule-item-action ${r.action}">${r.action.toUpperCase()}</span>
         <div class="rule-item-actions">
           <button class="${r.enabled ? 'enabled' : 'disabled'}" onclick="toggleRule(${r.id},${!r.enabled})">${r.enabled ? 'ON' : 'OFF'}</button>
@@ -1012,7 +1014,9 @@ async function loadStarred() {
   try {
     const r = await apiGet('/api/starred?limit=1000');
     requestVersion++;
-    requests = (r.data || []).map(normalizeReq);
+    // 修复：normalizeReq 不保留 starred 字段，但 /api/starred 返回的必然是已收藏项
+    // 显式标记 starred=true，避免后续 renderRequestList 的二次过滤把它们全部丢掉
+    requests = (r.data || []).map(r => { const n = normalizeReq(r); n.starred = true; return n; });
     virtualScrollTop = 0;
     const listEl = document.getElementById('requestList');
     if (listEl) listEl.scrollTop = 0;
@@ -1075,8 +1079,12 @@ function removePending(id) {
 
 // ── Utilities ────────────────────────────────
 function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-function escAttr(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-function escJS(s) { return esc(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+function escAttr(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function escJS(s) { return esc(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+function shellQuote(s) {
+  // 单引号字符串中转义单引号：' -> '\''
+  return String(s).replace(/'/g, "'\\''");
+}
 function copyToClipboard(cid) {
   const el = document.getElementById(cid); const pre = el.querySelector('pre');
   if (!pre) return;
@@ -1102,11 +1110,11 @@ function copyAsCurl() {
   if (!selectedRequestId) { showToast('error', '请先选择一个请求'); return; }
   const req = requestDetailCache[selectedRequestId];
   if (!req) { showToast('error', '请求详情未加载'); return; }
-  let curl = `curl -X ${req.method} '${req.url}'`;
+  let curl = `curl -X '${shellQuote(req.method)}' '${shellQuote(req.url)}'`;
   if (req.req_headers) Object.entries(req.req_headers).forEach(([k, v]) => {
-    curl += ` -H '${k}: ${v}'`;
+    curl += ` -H '${shellQuote(k)}: ${shellQuote(v)}'`;
   });
-  if (req.req_body) curl += ` -d '${req.req_body.replace(/'/g, "\\'")}'`;
+  if (req.req_body) curl += ` -d '${shellQuote(req.req_body)}'`;
   navigator.clipboard.writeText(curl).then(() => showToast('success', 'curl 命令已复制')).catch(() => showToast('error', 'Copy failed'));
 }
 
@@ -1158,7 +1166,7 @@ function copyAsPython() {
   code += `\nprint(response.status_code)\nprint(response.text)`;
   navigator.clipboard.writeText(code).then(() => showToast('success', 'python 代码已复制')).catch(() => showToast('error', 'Copy failed'));
 }
-function formatJSONBody(el, text) {
+function formatJSONBody(text) {
   try { const obj = JSON.parse(text); return JSON.stringify(obj, null, 2); }
   catch { return text; }
 }
@@ -1303,7 +1311,7 @@ function renderInterceptLogs(logs) {
     const rule = l.rule_pattern ? `<span style="color:var(--accent);font-size:9px">${esc(l.rule_pattern)}</span>` : '';
     return `<div class="log-item">
       <span class="log-item-action ${l.action}">${actionLabel}</span>
-      <span class="log-item-url" title="${esc(l.request_url)}">${esc(l.request_method)} ${esc(l.request_url)}</span>
+      <span class="log-item-url" title="${escAttr(l.request_url)}">${esc(l.request_method)} ${esc(l.request_url)}</span>
       <span class="log-item-meta">
         ${rule}
         <span class="log-item-mode">${l.mode}</span>
@@ -1456,6 +1464,7 @@ function renderLLMContent(exchange) {
 
   // Store exchange data for copy
   window._currentLLMExchange = exchange;
+  window._currentLLMExchangeVersion = requestVersion;
 }
 
 function escapeHTML(s) {
@@ -1466,6 +1475,10 @@ function escapeHTML(s) {
 function copyLLMPrompt() {
   const ex = window._currentLLMExchange;
   if (!ex) return;
+  if (window._currentLLMExchangeVersion !== requestVersion) {
+    showToast('error', '请求已切换，请重新选择');
+    return;
+  }
   let text = '';
   if (ex.system) text += `[System]\n${ex.system}\n\n`;
   for (const msg of (ex.messages || [])) {
