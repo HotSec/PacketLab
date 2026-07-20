@@ -228,8 +228,10 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	}
 
 	// 阻塞等待用户决定或超时 — pr 在锁内赋值，后续只读取 pr 自身字段（结果 channel 和 timer 安全）
-	select {
-	case r := <-ch:
+	// handleResult 处理用户决定（allow/modify/drop），返回 goproxy 期望的 (req, resp)。
+	// 提取为闭包以便 timer.C 分支复用：当 timer.C 与 ch 同时就绪时，select 可能选中
+	// timer.C 分支，此时若不消费 ch 会丢失用户操作。
+	handleResult := func(r models.InterceptResult) (*http.Request, *http.Response) {
 		timer.Stop()
 		switch r.Action {
 		case "allow", "modify":
@@ -256,8 +258,24 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 		default:
 			return req, nil
 		}
+	}
+
+	select {
+	case r := <-ch:
+		return handleResult(r)
 	case <-timer.C:
-		// 超时自动放过 — 清理并放行
+		// 优先非阻塞检查 ch：用户 Resolve 与 timer.C 同时就绪时，timer.Stop() 返回 false
+		// 但 timer.C 可能被 select 选中，导致用户操作被丢弃。先消费 ch 避免丢操作。
+		// Prefer ch over timer.C: when both are ready, select may pick timer.C,
+		// discarding the user's Resolve. Non-blocking check of ch first prevents
+		// the loss. Resolve already deleted pending and wrote the log, so we
+		// just reuse handleResult to process the action.
+		select {
+		case r := <-ch:
+			return handleResult(r)
+		default:
+		}
+		// ch 无就绪 → 超时自动放过 — 清理并放行
 		it.mu.Lock()
 		if _, ok := it.pending[id]; ok {
 			delete(it.pending, id)

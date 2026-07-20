@@ -143,9 +143,40 @@ func (s *Server) setupHandlers() {
 
 		// 2. 拦截检查（manual 模式会阻塞等待）
 		if s.interceptor != nil {
-			return s.interceptor.Handle(req, ctx, func(r *http.Request) {
-				_ = r
-			})
+			// storeFunc 将 modify 后的请求同步回 captured，确保 OnResponse 持久化
+			// 的是用户修改后的最终请求（method/url/host/headers/body）。
+			storeFunc := func(r *http.Request) {
+				if r == nil {
+					return
+				}
+				captured.Method = r.Method
+				captured.URL = r.URL.String()
+				captured.Host = r.URL.Host
+				captured.Path = r.URL.Path
+				captured.ReqHeaders = api.FlattenHeaders(r.Header)
+				if r.Body != nil {
+					bodyBytes, err := io.ReadAll(r.Body)
+					if err != nil {
+						slog.Warn("proxy: storeFunc read modified body failed", "url", captured.URL, "error", err)
+						return
+					}
+					// 恢复 body 供后续转发消费
+					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					r.ContentLength = int64(len(bodyBytes))
+					if len(bodyBytes) > 0 {
+						storeBody := bodyBytes
+						if int64(len(storeBody)) > maxReqBytes {
+							storeBody = storeBody[:maxReqBytes]
+						}
+						captured.ReqBody = string(storeBody)
+					} else {
+						captured.ReqBody = ""
+					}
+				} else {
+					captured.ReqBody = ""
+				}
+			}
+			return s.interceptor.Handle(req, ctx, storeFunc)
 		}
 		return req, nil
 	})
@@ -240,7 +271,12 @@ func (s *Server) Start() error {
 
 // Stop 优雅停止代理服务器
 func (s *Server) Stop() {
-	s.batchWriter.Stop()
+	// 先 Shutdown HTTP 服务器：在途请求需要继续走 OnResponse → batchWriter.Enqueue
+	// 完成入队；若先 batchWriter.Stop()，Shutdown 期间的在途请求 OnResponse 调用
+	// Enqueue 会将 req 永久滞留 channel（无人消费）。
+	// Shutdown HTTP server first: in-flight requests still go through
+	// OnResponse → batchWriter.Enqueue; stopping batchWriter first would leave
+	// those enqueued reqs stranded with no consumer.
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -248,6 +284,7 @@ func (s *Server) Stop() {
 			slog.Warn("代理服务器关闭超时", "error", err)
 		}
 	}
+	s.batchWriter.Stop()
 	s.mu.Lock()
 	s.running = false
 	s.mu.Unlock()
@@ -346,6 +383,9 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 
 		var captureBuf strings.Builder
 		var totalSize int64
+		// sseDataBuf 累积同一 SSE 事件内的多行 data，遇空行（事件边界）再 Feed。
+		// SSE 规范允许一个事件包含多个 data: 行，应用 \n 连接后作为单个 payload。
+		var sseDataBuf strings.Builder
 		scanner := bufio.NewScanner(originalBody)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -369,10 +409,25 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 				captureBuf.WriteByte('\n')
 			}
 
-			// LLM: feed data lines to assembler
+			// LLM: 累积同一事件的 data 行，遇空行（事件边界）再 Feed。
+			// 支持 SSE 多行 data（Anthropic 等协议可能使用），单行 data
+			// 行为与原 parseSSEDataLine 一致（每个事件一个 data 行时仍逐条 Feed）。
 			if llmAssembler != nil {
-				if data := parseSSEDataLine(line); data != nil {
-					llmAssembler.Feed(data)
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "data:") {
+					data := strings.TrimSpace(trimmed[5:])
+					if data != "" && data != "[DONE]" {
+						if sseDataBuf.Len() > 0 {
+							sseDataBuf.WriteString("\n")
+						}
+						sseDataBuf.WriteString(data)
+					}
+				} else if trimmed == "" {
+					// 事件边界：Feed 累积的 data
+					if sseDataBuf.Len() > 0 {
+						llmAssembler.Feed([]byte(sseDataBuf.String()))
+						sseDataBuf.Reset()
+					}
 				}
 			}
 
@@ -419,6 +474,11 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 
 		// LLM: save assembled exchange after stream completes
 		if llmAssembler != nil {
+			// flush 残留 sseDataBuf：流末尾未以空行收尾时，最后一条事件可能尚未 Feed
+			if sseDataBuf.Len() > 0 {
+				llmAssembler.Feed([]byte(sseDataBuf.String()))
+				sseDataBuf.Reset()
+			}
 			resInfo := llmAssembler.Result()
 			ex := buildLLMExchange(reqCtx.llmProvider, reqCtx.llmReqInfo, resInfo, captured.CapturedAt)
 			saveLLMExchange(s.store, captured.ID, ex)

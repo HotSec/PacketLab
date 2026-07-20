@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -58,16 +59,19 @@ func LoadOrGenerateCA(certDir string) (certPEM, keyPEM []byte, err error) {
 	certPath := filepath.Join(certDir, "ca.crt")
 	keyPath := filepath.Join(certDir, "ca.key")
 
+	// cert 与 key 都存在且可读时直接复用；任一缺失/读取失败则 fall through
+	// 重新生成（避免 cert 在但 key 缺失时返回错误，导致代理无法启动 MITM）。
 	if _, err := os.Stat(certPath); err == nil {
-		certPEM, err = os.ReadFile(certPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("read cert: %w", err)
+		cert, certErr := os.ReadFile(certPath)
+		if certErr == nil {
+			key, keyErr := os.ReadFile(keyPath)
+			if keyErr == nil {
+				return cert, key, nil
+			}
+			slog.Warn("mitm: CA key 缺失或读取失败，重新生成 CA", "keyPath", keyPath, "error", keyErr)
+		} else {
+			slog.Warn("mitm: CA cert 读取失败，重新生成 CA", "certPath", certPath, "error", certErr)
 		}
-		keyPEM, err = os.ReadFile(keyPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("read key: %w", err)
-		}
-		return certPEM, keyPEM, nil
 	}
 
 	if err := os.MkdirAll(certDir, 0700); err != nil {
