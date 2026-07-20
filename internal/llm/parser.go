@@ -637,12 +637,18 @@ func (a *StreamAssembler) feedAnthropic(data []byte) bool {
 }
 
 func (a *StreamAssembler) feedGemini(data []byte) bool {
-	// Gemini streaming returns array of candidates objects
+	// Gemini streaming returns array of candidates objects.
+	// Parts 中可能含 text 或 functionCall（与非流式 parseGeminiResponse 保持一致）。
+	// Parts may contain text or functionCall (consistent with non-streaming parseGeminiResponse).
 	var chunks []struct {
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
 					Text string `json:"text"`
+					FunctionCall *struct {
+						Name string          `json:"name"`
+						Args json.RawMessage `json:"args"`
+					} `json:"functionCall"`
 				} `json:"parts"`
 			} `json:"content"`
 			FinishReason string `json:"finishReason"`
@@ -655,6 +661,10 @@ func (a *StreamAssembler) feedGemini(data []byte) bool {
 				Content struct {
 					Parts []struct {
 						Text string `json:"text"`
+						FunctionCall *struct {
+							Name string          `json:"name"`
+							Args json.RawMessage `json:"args"`
+						} `json:"functionCall"`
 					} `json:"parts"`
 				} `json:"content"`
 				FinishReason string `json:"finishReason"`
@@ -665,7 +675,14 @@ func (a *StreamAssembler) feedGemini(data []byte) bool {
 		}
 		for _, c := range single.Candidates {
 			for _, p := range c.Content.Parts {
-				a.content.WriteString(p.Text)
+				if p.FunctionCall != nil {
+					a.toolCalls = append(a.toolCalls, ToolCall{
+						Name:      p.FunctionCall.Name,
+						Arguments: string(p.FunctionCall.Args),
+					})
+				} else if p.Text != "" {
+					a.content.WriteString(p.Text)
+				}
 			}
 			if c.FinishReason != "" {
 				a.finish = c.FinishReason
@@ -676,7 +693,14 @@ func (a *StreamAssembler) feedGemini(data []byte) bool {
 	for _, chunk := range chunks {
 		for _, c := range chunk.Candidates {
 			for _, p := range c.Content.Parts {
-				a.content.WriteString(p.Text)
+				if p.FunctionCall != nil {
+					a.toolCalls = append(a.toolCalls, ToolCall{
+						Name:      p.FunctionCall.Name,
+						Arguments: string(p.FunctionCall.Args),
+					})
+				} else if p.Text != "" {
+					a.content.WriteString(p.Text)
+				}
 			}
 			if c.FinishReason != "" {
 				a.finish = c.FinishReason

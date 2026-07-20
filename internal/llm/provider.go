@@ -36,18 +36,18 @@ var providerPatterns = map[Provider]providerPattern{
 }
 
 // DetectProvider attempts to identify the LLM provider from host and path.
-// 先匹配内置 3 大厂模式；未命中则查自定义端点注册表，命中视为 openai 兼容。
+// 先匹配内置 3 大厂模式（仅按 host 子串匹配，path 单独匹配容易误判）；
+// 未命中则查自定义端点注册表，命中视为 openai 兼容。
+// DetectProvider identifies the LLM provider from host and path.
+// Only host substrings are matched for built-in providers; path-only matching
+// was removed because it caused false positives (any host whose path contains
+// "/messages" was treated as Anthropic).
 func DetectProvider(host, path string) Provider {
 	host = strings.ToLower(host)
 	path = strings.ToLower(path)
 	for provider, pat := range providerPatterns {
 		for _, hs := range pat.hostSubstrs {
 			if strings.Contains(host, hs) {
-				return provider
-			}
-		}
-		for _, ps := range pat.pathSubstrs {
-			if strings.Contains(path, ps) {
 				return provider
 			}
 		}
