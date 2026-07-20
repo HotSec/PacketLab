@@ -922,13 +922,13 @@ func TestListHosts_CacheHit(t *testing.T) {
 	_, _ = st.Save(&models.CapturedRequest{Host: "a.com", CapturedAt: time.Now()})
 	_, _, _ = st.ListHosts("", 100, 0) // 填充缓存
 
-	// 调用后插入新 host（不应被缓存看到）
+	// 调用后插入新 host
 	_, _ = st.Save(&models.CapturedRequest{Host: "b.com", CapturedAt: time.Now()})
 
-	// 第二次调用（应命中缓存，只看到 a.com，看不到 b.com）
+	// P1-8 修复后：写操作应使 hostCache 失效，因此第二次调用应重新查询并看到两个 host
 	hosts2, _, _ := st.ListHosts("", 100, 0)
-	if len(hosts2) != 1 {
-		t.Fatalf("expected 1 host from cache (a.com only), got %d (cache miss)", len(hosts2))
+	if len(hosts2) != 2 {
+		t.Fatalf("expected 2 hosts after cache invalidation, got %d", len(hosts2))
 	}
 }
 

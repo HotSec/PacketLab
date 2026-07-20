@@ -3,8 +3,10 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +16,10 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// ErrRequestNotFound 表示 SetStarred 等操作的目标请求不存在。
+// 调用方可用 errors.Is(err, store.ErrRequestNotFound) 区分 404 与其他错误。
+var ErrRequestNotFound = errors.New("request not found")
 
 // Store 持久化存储
 type Store struct {
@@ -225,6 +231,7 @@ func (s *Store) saveLocked(req *models.CapturedRequest) (int64, error) {
 		return 0, fmt.Errorf("insert request: %w", err)
 	}
 
+	s.hostCache = hostCacheEntry{}
 	return result.LastInsertId()
 }
 
@@ -272,7 +279,10 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 			// 必须返回 nil ids 防止调用方误用已回滚的 ID。
 			return nil, fmt.Errorf("exec batch: %w", err)
 		}
-		id, _ := result.LastInsertId()
+		id, err := result.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("last insert id: %w", err)
+		}
 		ids = append(ids, id)
 	}
 
@@ -280,6 +290,7 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
+	s.hostCache = hostCacheEntry{}
 	return ids, nil
 }
 
@@ -293,10 +304,11 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 		args = append(args, method)
 	}
 	if host != "" {
-		where = append(where, "(host = ? OR host LIKE ? || ':%')")
+		where = append(where, "(host = ? OR host = ? OR host LIKE ? || ':%')")
 		hostNoPort := stripPort(host)
-		args = append(args, host, hostNoPort)
-	} else if search != "" {
+		args = append(args, host, hostNoPort, hostNoPort)
+	}
+	if search != "" {
 		where = append(where, "(url LIKE ? OR host LIKE ? OR CAST(status_code AS TEXT) LIKE ?)")
 		pattern := "%" + search + "%"
 		args = append(args, pattern, pattern, pattern)
@@ -386,10 +398,11 @@ func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, off
 		args = append(args, method)
 	}
 	if host != "" {
-		where = append(where, "(host = ? OR host LIKE ? || ':%')")
+		where = append(where, "(host = ? OR host = ? OR host LIKE ? || ':%')")
 		hostNoPort := stripPort(host)
-		args = append(args, host, hostNoPort)
-	} else if search != "" {
+		args = append(args, host, hostNoPort, hostNoPort)
+	}
+	if search != "" {
 		where = append(where, "(url LIKE ? OR host LIKE ? OR CAST(status_code AS TEXT) LIKE ?)")
 		pattern := "%" + search + "%"
 		args = append(args, pattern, pattern, pattern)
@@ -440,7 +453,11 @@ func (s *Store) Delete(id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("DELETE FROM requests WHERE id = ?", id)
-	return err
+	if err != nil {
+		return err
+	}
+	s.hostCache = hostCacheEntry{}
+	return nil
 }
 
 // SetStarred 标记/取消标记请求为收藏（starred=1 收藏，0 取消）
@@ -455,10 +472,14 @@ func (s *Store) SetStarred(id int64, starred bool) error {
 	if err != nil {
 		return fmt.Errorf("set starred: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("request not found: %d", id)
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
 	}
+	if n == 0 {
+		return fmt.Errorf("%w: %d", ErrRequestNotFound, id)
+	}
+	s.hostCache = hostCacheEntry{}
 	return nil
 }
 
@@ -506,11 +527,16 @@ func (s *Store) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("DELETE FROM requests")
-	return err
+	if err != nil {
+		return err
+	}
+	s.hostCache = hostCacheEntry{}
+	return nil
 }
 
 // Cleanup 清理超过保留期的请求与拦截日志，返回各自删除条数。
 // retentionDays <= 0 时从 settings 表读取 'retention_days'，仍为 0 则跳过。
+// 上限 36500 天（≈100 年），避免 time.Duration 乘法溢出导致 cutoff 变成未来时间清空全表。
 func (s *Store) Cleanup(retentionDays int) (deletedRequests, deletedLogs int64, appliedDays int, err error) {
 	if retentionDays <= 0 {
 		if v, gerr := s.GetSetting("retention_days"); gerr == nil {
@@ -522,11 +548,18 @@ func (s *Store) Cleanup(retentionDays int) (deletedRequests, deletedLogs int64, 
 	if retentionDays <= 0 {
 		return 0, 0, 0, nil
 	}
+	// 上限校验：防止 retentionDays 极大值导致 time.Duration(retentionDays)*24*time.Hour 溢出为负
+	// 一旦溢出为负，time.Now().Add(-负值) 会得到未来时间，DELETE 会匹配全表造成数据丢失
+	const maxRetentionDays = 36500 // ≈100 年
+	if retentionDays > maxRetentionDays {
+		retentionDays = maxRetentionDays
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
+	// 用 AddDate 避免 time.Duration 乘法溢出（AddDate 内部按日计算不会溢出）
+	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 
 	res, err := s.db.Exec("DELETE FROM requests WHERE captured_at < ?", cutoff)
 	if err != nil {
@@ -540,6 +573,7 @@ func (s *Store) Cleanup(retentionDays int) (deletedRequests, deletedLogs int64, 
 	}
 	deletedLogs, _ = res.RowsAffected()
 
+	s.hostCache = hostCacheEntry{}
 	return deletedRequests, deletedLogs, retentionDays, nil
 }
 
@@ -762,6 +796,9 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	// 缓存命中（仅 search 为空时缓存）
 	if search == "" {
@@ -903,12 +940,13 @@ func insertPath(node *APIMapNode, parts []string, fullPath string, methods map[s
 }
 
 func stripPort(host string) string {
-	// 去掉末尾端口号，如 httpbin.org:443 → httpbin.org
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		// 排除 IPv6 [::1] 的情况
-		if !strings.HasPrefix(host, "[") {
-			return host[:idx]
-		}
+	// net.SplitHostPort 正确处理 IPv6（含 [::1]:port 形式）和无端口情况：
+	// - "httpbin.org:443" → ("httpbin.org", "443", nil)
+	// - "[::1]:443"       → ("::1", "443", nil)
+	// - "httpbin.org"     → ("", "", error)  → fallthrough 返回原 host
+	// - "::1"             → ("", "", error)  → fallthrough 返回原 host（避免误截断 IPv6）
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
 	}
 	return host
 }
