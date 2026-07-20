@@ -72,6 +72,10 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo_enabled }}
           CC: ${{ matrix.cc }}
+          # Linux arm64 交叉编译：gopacket 需找到 aarch64 libpcap 头文件与库
+          # Linux arm64 cross-compile: gopacket needs aarch64 libpcap headers and libs
+          CGO_CFLAGS: ${{ matrix.cross == true && '-I/usr/aarch64-linux-gnu/include' || '' }}
+          CGO_LDFLAGS: ${{ matrix.cross == true && '-L/usr/aarch64-linux-gnu/lib -lpcap' || '' }}
         shell: bash
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"

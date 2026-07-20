@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +23,9 @@ import (
 	"packetlab/internal/proxy"
 	"packetlab/internal/store"
 )
+
+// version 在 release 构建时通过 -ldflags "-X main.version=..." 注入。
+var version = "dev"
 
 //go:embed web/*
 var webFS embed.FS
@@ -45,7 +49,7 @@ func main() {
 	interceptPendingTimeout := flag.Duration("intercept-pending-timeout", config.DefaultInterceptPendingTimeout,
 		"interceptor pending request timeout (Go duration, e.g. 30s, 2m; range 1s~10m)")
 	cleanupRetentionDays := flag.Int("cleanup-retention-days", config.DefaultCleanupRetentionDays,
-		"auto cleanup: delete requests/logs older than N days (0=use setting or default 7)")
+		"auto cleanup: delete requests/logs older than N days (0=disable auto cleanup)")
 	cleanupInterval := flag.Duration("cleanup-interval", config.DefaultCleanupInterval,
 		"auto cleanup interval (Go duration, e.g. 6h, 30m; min 1m)")
 	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
@@ -160,10 +164,22 @@ func main() {
 	var proxySrv *proxy.Server
 	if !cfg.NoProxy {
 		proxySrv = proxy.New(cfg.ProxyPort, st, caCert, caKey, onCapture, interceptor, cfg.MaxReqBodyKB, cfg.MaxResBodyKB)
+	}
+
+	// 错误收集 channel：proxy/API 启动失败时通知主 goroutine 触发关闭
+	errCh := make(chan error, 2)
+
+	if !cfg.NoProxy {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("goroutine panic", "component", "proxy", "r", r, "stack", string(debug.Stack()))
+				}
+			}()
 			slog.Info("代理服务器启动", "port", cfg.ProxyPort)
-			if err := proxySrv.Start(); err != nil {
+			if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
 				slog.Error("代理服务器启动失败", "error", err)
+				errCh <- err
 			}
 		}()
 	} else {
@@ -191,22 +207,32 @@ func main() {
 		mitmStatus = "已启用"
 	}
 
-	slog.Info("PacketLab v2.0 已就绪",
+	slog.Info("PacketLab "+version+" 已就绪",
 		"web_url", fmt.Sprintf("http://localhost:%d", cfg.APIPort),
 		"proxy_port", cfg.ProxyPort,
 		"mitm", mitmStatus)
 
 	// 在 goroutine 中启动 API，主 goroutine 等待信号
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("goroutine panic", "component", "api", "r", r, "stack", string(debug.Stack()))
+			}
+		}()
 		slog.Info("API 服务器启动", "addr", cfg.APIAddr())
 		if err := apiHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("API 服务器错误", "error", err)
+			errCh <- err
 		}
 	}()
 
-	// 等待关闭信号
-	sig := <-shutdownCh
-	slog.Info("收到关闭信号，开始优雅退出...", "signal", sig.String())
+	// 等待关闭信号或服务器启动失败
+	select {
+	case sig := <-shutdownCh:
+		slog.Info("收到关闭信号，开始优雅退出...", "signal", sig.String())
+	case err := <-errCh:
+		slog.Error("服务器启动失败，开始关闭", "error", err)
+	}
 
 	// 停止抓包引擎（清洗 pendingReq）
 	if capEngine != nil {
@@ -236,10 +262,7 @@ func main() {
 	// 停止后台清理
 	cleanupStop()
 
-	// 关闭数据库
-	if err := st.Close(); err != nil {
-		slog.Error("数据库关闭失败", "error", err)
-	}
+	// 数据库由 defer st.Close() 关闭（line 91），此处不再重复关闭以避免 double close
 
 	slog.Info("PacketLab 已安全退出")
 }
@@ -256,20 +279,32 @@ func loadFrontend() http.Handler {
 // startAutoCleanup 启动后台定期清理 goroutine，返回停止函数。
 // retentionDays 首次启动时若 settings 表无 'retention_days' 则写入；若已有则尊重已存在的 settings 值。
 // cleanupInterval 决定执行间隔（必须 >= 1m）。
-// retentionDays <= 0 时 Cleanup 内部直接返回，零成本。
+// retentionDays <= 0 时视为禁用：仅写入 settings 后返回 no-op stop 函数，不启动 goroutine。
 // startAutoCleanup starts the background cleanup goroutine, returns a stop function.
 // On first start, writes retentionDays to settings if 'retention_days' is unset;
 // if already set, the existing setting is respected.
+// When retentionDays <= 0, auto cleanup is disabled: only settings are written and a no-op
+// stop function is returned (no goroutine is started).
 func startAutoCleanup(st *store.Store, retentionDays int, cleanupInterval time.Duration) func() {
 	// 首次启动写入 settings（如未设置）；已存在则尊重 settings 中的值
 	// Write default to settings on first start (if unset); respect existing value otherwise
 	if existing, err := st.GetSetting("retention_days"); err == nil && existing == "" {
 		_ = st.SetSetting("retention_days", strconv.Itoa(retentionDays))
 	}
+	// 0=禁用自动清理：不启动 goroutine
+	// 0 disables auto cleanup: do not start the goroutine
+	if retentionDays <= 0 {
+		return func() {}
+	}
 
 	ticker := time.NewTicker(cleanupInterval)
 	stopCh := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("goroutine panic", "component", "cleanup", "r", r, "stack", string(debug.Stack()))
+			}
+		}()
 		for {
 			select {
 			case <-ticker.C:

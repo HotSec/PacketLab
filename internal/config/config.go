@@ -73,7 +73,17 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		return nil, fmt.Errorf("config: proxy-port and api-port must differ (both set to %d)", proxyPort)
 	}
 
-	// Ensure DB directory exists
+	// Ensure base/cert/DB directories exist. --db 可能指向 BaseDir 外部，
+	// 此时 BaseDir/CertDir 不会被 dbPath 的 MkdirAll 自动创建，需显式建。
+	// Ensure base/cert/DB directories exist. --db may point outside BaseDir,
+	// in which case BaseDir/CertDir won't be created by dbPath's MkdirAll.
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return nil, fmt.Errorf("config: cannot create base directory %s: %w", baseDir, err)
+	}
+	certDir := filepath.Join(baseDir, "certs")
+	if err := os.MkdirAll(certDir, 0755); err != nil {
+		return nil, fmt.Errorf("config: cannot create cert directory %s: %w", certDir, err)
+	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("config: cannot create DB directory %s: %w", filepath.Dir(dbPath), err)
 	}
@@ -121,13 +131,10 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	if interceptPendingTimeout < time.Second || interceptPendingTimeout > 10*time.Minute {
 		return nil, fmt.Errorf("config: intercept-pending-timeout must be between 1s and 10m, got %v", interceptPendingTimeout)
 	}
-	// cleanupRetentionDays: 负数非法；0=禁用自动清理
-	// cleanupRetentionDays: negative invalid; 0 disables auto cleanup
+	// cleanupRetentionDays: 负数非法；0=禁用自动清理（保留 0，不替换为默认值）
+	// cleanupRetentionDays: negative invalid; 0 disables auto cleanup (keep 0, do not substitute default)
 	if cleanupRetentionDays < 0 {
 		return nil, fmt.Errorf("config: cleanup-retention-days must be >= 0, got %d", cleanupRetentionDays)
-	}
-	if cleanupRetentionDays == 0 {
-		cleanupRetentionDays = DefaultCleanupRetentionDays
 	}
 	// cleanupInterval: 0 用默认值；< 1m 非法（避免过于频繁清理）
 	// cleanupInterval: 0 uses default; < 1m invalid (avoid overly frequent cleanup)
