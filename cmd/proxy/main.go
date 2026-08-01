@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -39,9 +40,9 @@ func main() {
 	noMitm := flag.Bool("no-mitm", false, "禁用 HTTPS MITM 解密")
 	insecure := flag.Bool("insecure", false, "重发请求时跳过 TLS 证书验证（仅开发环境）")
 
-	captureFlag   := flag.Bool("capture", false, "启用网卡抓包")
-	captureIFace  := flag.String("capture-iface", "", "指定抓包网卡（默认自动检测）")
-	captureBPF    := flag.String("capture-bpf", "tcp", "BPF 过滤器 (默认捕获所有 TCP)")
+	captureFlag := flag.Bool("capture", false, "启用网卡抓包")
+	captureIFace := flag.String("capture-iface", "", "指定抓包网卡（默认自动检测）")
+	captureBPF := flag.String("capture-bpf", "tcp", "BPF 过滤器 (默认捕获所有 TCP)")
 	captureNoProc := flag.Bool("capture-no-proc", false, "禁用进程关联")
 	captureStreamTimeout := flag.Int("capture-stream-timeout", config.DefaultStreamTimeoutMin, "网卡抓包流空闲超时（分钟，0=默认2）")
 	captureRingEntries := flag.Int("capture-ring-entries", config.DefaultCaptureRingEntries, "网卡抓包环形缓冲区条目数（向上取 2 的幂，0=默认262144）")
@@ -52,8 +53,8 @@ func main() {
 		"auto cleanup: delete requests/logs older than N days (0=disable auto cleanup)")
 	cleanupInterval := flag.Duration("cleanup-interval", config.DefaultCleanupInterval,
 		"auto cleanup interval (Go duration, e.g. 6h, 30m; min 1m)")
-	maxReqBodyKB  := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值32)")
-	maxResBodyKB  := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值64)")
+	maxReqBodyKB := flag.Int("max-req-body-kb", config.DefaultMaxReqBodyKB, "请求体最大 KB (0=使用默认值2048)")
+	maxResBodyKB := flag.Int("max-res-body-kb", config.DefaultMaxResBodyKB, "响应体最大 KB (0=使用默认值4096)")
 	apiAllowOrigins := flag.String("api-allow-origins", "", "逗号分隔的 CORS/WebSocket 允许 Origin 列表（默认仅 localhost）")
 	flag.Parse()
 
@@ -112,6 +113,8 @@ func main() {
 	interceptor.SetMode(interceptMode)
 	if rules, err := st.ListRules(); err == nil {
 		interceptor.SetRules(rules)
+	} else {
+		slog.Warn("加载拦截规则失败", "error", err)
 	}
 	apiSrv.SetInterceptor(interceptor)
 
@@ -299,7 +302,10 @@ func startAutoCleanup(st *store.Store, retentionDays int, cleanupInterval time.D
 
 	ticker := time.NewTicker(cleanupInterval)
 	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("goroutine panic", "component", "cleanup", "r", r, "stack", string(debug.Stack()))
@@ -324,5 +330,8 @@ func startAutoCleanup(st *store.Store, retentionDays int, cleanupInterval time.D
 			}
 		}
 	}()
-	return func() { close(stopCh) }
+	return func() {
+		close(stopCh)
+		wg.Wait()
+	}
 }
