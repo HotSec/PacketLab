@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"packetlab/internal/models"
@@ -26,24 +27,25 @@ type wsClient struct {
 
 // wsHub WebSocket 中心
 type wsHub struct {
-	clients          map[*wsClient]bool
-	broadcastCh      chan *models.CapturedRequest
-	interceptCh      chan *models.PendingRequest
-	updateCh         chan *models.CapturedRequest // SSE 等流式响应的增量更新
-	register         chan *wsClient
-	unregister       chan *wsClient
-	stopCh           chan struct{}
+	clients     map[*wsClient]bool
+	broadcastCh chan *models.CapturedRequest
+	interceptCh chan *models.PendingRequest
+	updateCh    chan *models.CapturedRequest // SSE 等流式响应的增量更新
+	register    chan *wsClient
+	unregister  chan *wsClient
+	stopCh      chan struct{}
+	stopOnce    sync.Once
 }
 
 func newWSHub() *wsHub {
 	return &wsHub{
-		clients:          make(map[*wsClient]bool),
-		broadcastCh:      make(chan *models.CapturedRequest, 256),
-		interceptCh:      make(chan *models.PendingRequest, 64),
-		updateCh:         make(chan *models.CapturedRequest, 256),
-		register:         make(chan *wsClient),
-		unregister:       make(chan *wsClient),
-		stopCh:           make(chan struct{}),
+		clients:     make(map[*wsClient]bool),
+		broadcastCh: make(chan *models.CapturedRequest, 256),
+		interceptCh: make(chan *models.PendingRequest, 64),
+		updateCh:    make(chan *models.CapturedRequest, 256),
+		register:    make(chan *wsClient),
+		unregister:  make(chan *wsClient),
+		stopCh:      make(chan struct{}),
 	}
 }
 
@@ -218,9 +220,5 @@ func (h *wsHub) BroadcastUpdate(req *models.CapturedRequest) {
 }
 
 func (h *wsHub) Stop() {
-	select {
-	case <-h.stopCh:
-	default:
-		close(h.stopCh)
-	}
+	h.stopOnce.Do(func() { close(h.stopCh) })
 }

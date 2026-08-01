@@ -23,9 +23,9 @@ var ErrRequestNotFound = errors.New("request not found")
 
 // Store 持久化存储
 type Store struct {
-	db    *sql.DB
-	dbRO  *sql.DB // 只读连接，支持 WAL 并发读
-	mu    sync.RWMutex
+	db   *sql.DB
+	dbRO *sql.DB // 只读连接，支持 WAL 并发读
+	mu   sync.RWMutex
 
 	// ListHosts 缓存（仅 search="" 时缓存）
 	hostCache    hostCacheEntry
@@ -100,10 +100,14 @@ func (s *Store) readDB() *sql.DB {
 
 // migrate 建表（版本化迁移）
 func (s *Store) migrate() error {
-	s.db.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")
+	if _, err := s.db.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
 
 	var currentVersion int
-	s.db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion)
+	if err := s.db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion); err != nil {
+		return fmt.Errorf("query schema version: %w", err)
+	}
 
 	type migration struct {
 		version int
@@ -431,6 +435,7 @@ func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, off
 		if err := rows.Scan(&req.ID, &req.Method, &req.URL, &req.Host, &req.Path, &req.Protocol, &req.IsHTTPS,
 			&reqHeadersJSON, &req.ReqBody, &req.StatusCode, &resHeadersJSON, &req.ResBody,
 			&req.DurationMs, &req.SizeBytes, &capturedAt); err != nil {
+			slog.Warn("scan failed", "error", err)
 			continue
 		}
 		json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders)
@@ -598,10 +603,11 @@ func (s *Store) SaveAPINote(note *models.APINote) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.Exec(
-		`INSERT INTO api_notes (host, path, method, note, updated_at) VALUES (?, ?, ?, ?, datetime('now'))
-		 ON CONFLICT(host, path, method) DO UPDATE SET note = excluded.note, updated_at = datetime('now')`,
-		note.Host, note.Path, note.Method, note.Note,
+		`INSERT INTO api_notes (host, path, method, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(host, path, method) DO UPDATE SET note = excluded.note, updated_at = ?`,
+		note.Host, note.Path, note.Method, note.Note, now, now, now,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("save note: %w", err)
@@ -968,10 +974,11 @@ func (s *Store) SaveInterceptLog(log *models.InterceptLog) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.Exec(
 		`INSERT INTO intercept_logs (action, request_url, request_method, request_host, rule_pattern, mode, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
-		log.Action, log.RequestURL, log.RequestMethod, log.RequestHost, log.RulePattern, log.Mode,
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		log.Action, log.RequestURL, log.RequestMethod, log.RequestHost, log.RulePattern, log.Mode, now,
 	)
 	if err != nil {
 		return fmt.Errorf("insert intercept log: %w", err)
@@ -1148,6 +1155,7 @@ func (s *Store) ListRules() ([]models.InterceptRule, error) {
 		var r models.InterceptRule
 		var ca string
 		if err := rows.Scan(&r.ID, &r.Pattern, &r.Method, &r.Action, &r.Enabled, &ca); err != nil {
+			slog.Warn("scan failed", "error", err)
 			continue
 		}
 		r.CreatedAt, _ = time.Parse(time.RFC3339, ca)
@@ -1226,6 +1234,7 @@ func (s *Store) ListLLM(limit, offset int) ([]LLMExchangeListItem, int, error) {
 		var item LLMExchangeListItem
 		var llmDataStr string
 		if err := rows.Scan(&item.ID, &item.Host, &item.URL, &item.IsHTTPS, &item.CapturedAt, &llmDataStr); err != nil {
+			slog.Warn("scan failed", "error", err)
 			continue
 		}
 		// Parse llm_data for display fields

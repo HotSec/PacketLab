@@ -18,28 +18,28 @@ import (
 
 // Engine 网卡抓包引擎
 type Engine struct {
-	iface   string
-	bpf     string
-	handle  pcapHandle
-	store   *store.Store
-	hub     interface {
+	iface  string
+	bpf    string
+	handle pcapHandle
+	store  *store.Store
+	hub    interface {
 		BroadcastCapture(req *models.CapturedRequest)
 		BroadcastUpdate(req *models.CapturedRequest)
 	}
-	running atomic.Bool
-	mu      sync.Mutex
-	stopCh  chan struct{}
-	stats   Stats
+	running       atomic.Bool
+	mu            sync.Mutex
+	stopCh        chan struct{}
+	stats         Stats
 	streamTimeout time.Duration // 流空闲超时（超过则 GC 清理并 emit）
 	maxResBytes   int64         // 单个响应体最大保留字节（截断阈值，与代理侧 config 统一）
 	ringBufSize   int           // 网卡抓包环形缓冲区条目数（<=0 时在 Start 路径用默认值兜底）
 	maxStreams    int           // 单个 worker Assembler 的最大并发流数（<=0 时 NewAssembler 用默认值 1000 兜底）
 
-	streamPool  *TCPStreamPool
-	assembler   *Assembler
-	workers     int       // worker 数量
-	workerChs   []chan gopacket.Packet // per-worker packet channels
-	workerSg    sync.WaitGroup
+	streamPool *TCPStreamPool
+	assembler  *Assembler
+	workers    int                    // worker 数量
+	workerChs  []chan gopacket.Packet // per-worker packet channels
+	workerSg   sync.WaitGroup
 
 	// packetLoopDone 在 packetLoop 退出时 close，Stop 通过 <-packetLoopDone 等待
 	// packetLoop 完成 workerSg.Wait() 与 worker channel 关闭，避免快速 Stop→Start
@@ -51,16 +51,16 @@ type Engine struct {
 	packetLoopDone chan struct{}
 
 	// 进程缓存
-	procCache     map[string]*models.ProcessInfo
-	procCacheTS   map[string]time.Time // 每条缓存写入时间，用于 TTL 淘汰
-	procCacheMu   sync.RWMutex
-	procCacheTTL  time.Duration // 单条缓存有效期（默认 30s）
+	procCache    map[string]*models.ProcessInfo
+	procCacheTS  map[string]time.Time // 每条缓存写入时间，用于 TTL 淘汰
+	procCacheMu  sync.RWMutex
+	procCacheTTL time.Duration // 单条缓存有效期（默认 30s）
 
 	// 批量发射 buffer (ring)
-	emitBuf    []*models.CapturedRequest
-	emitHead   int
-	emitTail   int
-	emitMu     sync.Mutex
+	emitBuf  []*models.CapturedRequest
+	emitHead int
+	emitTail int
+	emitMu   sync.Mutex
 
 	// 2.5Gbps 支撑: 内存环形缓冲区 + 异步写入
 	ringBuf *MemRingBuffer
@@ -78,10 +78,10 @@ type pcapHandle interface {
 
 // Stats 抓包统计
 type Stats struct {
-	PacketsRecv   atomic.Int64
-	HTTPFound     atomic.Int64
-	PacketsDrop   atomic.Int64
-	StreamsDrop   atomic.Int64
+	PacketsRecv    atomic.Int64
+	HTTPFound      atomic.Int64
+	PacketsDrop    atomic.Int64
+	StreamsDrop    atomic.Int64
 	StreamsEvicted atomic.Int64 // 因超过 maxStreams 而 LRU 淘汰的流数
 }
 
@@ -259,10 +259,10 @@ func (e *Engine) GetStats() (int64, int64) {
 // GetMetrics 获取运行指标
 func (e *Engine) GetMetrics() map[string]interface{} {
 	m := map[string]interface{}{
-		"packets":          e.stats.PacketsRecv.Load(),
-		"http":             e.stats.HTTPFound.Load(),
-		"running":          e.running.Load(),
-		"streams_evicted":  e.stats.StreamsEvicted.Load(),
+		"packets":         e.stats.PacketsRecv.Load(),
+		"http":            e.stats.HTTPFound.Load(),
+		"running":         e.running.Load(),
+		"streams_evicted": e.stats.StreamsEvicted.Load(),
 	}
 	if e.ringBuf != nil {
 		m["ring_usage"] = e.ringBuf.Usage()
@@ -775,13 +775,13 @@ type TCPStream struct {
 	serverBuf  []byte // 服务端→客户端 数据
 	lastActive time.Time
 	pendingReq *models.CapturedRequest
-	nonHTTP    bool   // 标记为非HTTP流，跳过后续处理
-	firstData  bool   // 是否已收到首批数据（用于非HTTP检测）
-	sniEmitted bool   // 是否已emit TLS SNI记录
+	nonHTTP    bool // 标记为非HTTP流，跳过后续处理
+	firstData  bool // 是否已收到首批数据（用于非HTTP检测）
+	sniEmitted bool // 是否已emit TLS SNI记录
 
 	// SSE 流式追踪
-	ssePending bool  // 是否为 SSE 流（已 emit 初始记录）
-	sseReqID   int64 // SSE 流对应的 DB 记录 ID
+	ssePending bool   // 是否为 SSE 流（已 emit 初始记录）
+	sseReqID   int64  // SSE 流对应的 DB 记录 ID
 	sseBuf     []byte // SSE 事件累积缓冲
 }
 
@@ -1142,10 +1142,9 @@ func (s *TCPStream) tryExtractHTTPOnClose() {
 				resp := parseHTTPResponseFromHeader(headerData, body)
 				if resp != nil {
 					if resp.StatusCode >= 100 && resp.StatusCode < 200 {
-						s.pendingReq = nil
+						// 1xx informational response：跳过，等待最终响应
 						s.serverBuf = nil
-						s.clientBuf = nil
-						return
+						continue
 					}
 					s.pendingReq.StatusCode = resp.StatusCode
 					s.pendingReq.ResHeaders = resp.Headers

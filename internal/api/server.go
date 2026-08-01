@@ -52,6 +52,7 @@ type Server struct {
 	mu            sync.RWMutex
 	captureEngine captureEngineInterface
 	interceptor   interceptorInterface
+	captureMu     sync.Mutex
 }
 
 func New(st *store.Store, frontendHandler http.Handler, insecure bool, allowOrigins []string) *Server {
@@ -241,6 +242,9 @@ func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
 		slog.Error("list requests failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeAppError(w, ErrInternal("Failed to list requests"))
 		return
+	}
+	if items == nil {
+		items = []models.RequestListItem{}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -438,6 +442,10 @@ func (s *Server) handleAPIMap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIHosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAppError(w, ErrMethodNotAllowed())
+		return
+	}
 	search := r.URL.Query().Get("search")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -532,7 +540,9 @@ func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"mode": ic.GetMode()})
 	case http.MethodPost:
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
-		var body struct{ Mode string `json:"mode"` }
+		var body struct {
+			Mode string `json:"mode"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeAppError(w, ErrValidation("Invalid JSON"))
 			return
@@ -552,6 +562,10 @@ func (s *Server) handleInterceptMode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInterceptPending(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAppError(w, ErrMethodNotAllowed())
+		return
+	}
 	ic := s.getInterceptor()
 	if ic == nil {
 		writeJSON(w, http.StatusOK, []interface{}{})
@@ -610,6 +624,19 @@ func (s *Server) handleInterceptRules(w http.ResponseWriter, r *http.Request) {
 			writeAppError(w, ErrValidation("pattern required, action must be allow or block"))
 			return
 		}
+		if rule.Method != "" {
+			valid := false
+			for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"} {
+				if strings.EqualFold(rule.Method, m) {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				writeAppError(w, ErrValidation("invalid method: "+rule.Method))
+				return
+			}
+		}
 		id, err := s.store.SaveRule(&rule)
 		if err != nil {
 			slog.Error("save rule failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
@@ -639,7 +666,9 @@ func (s *Server) handleInterceptRuleByID(w http.ResponseWriter, r *http.Request)
 	switch r.Method {
 	case http.MethodPut:
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
-		var body struct{ Enabled bool `json:"enabled"` }
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeAppError(w, ErrValidation("Invalid JSON"))
 			return
@@ -767,7 +796,11 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		body.BPF = "tcp"
 	}
 
-	// P3-8: 先 Start 新引擎，成功后再 Stop 旧引擎，避免新引擎启动失败时旧引擎已被停止
+	// captureMu 串行化 getCaptureEngine（读锁）与 SetCaptureEngine（写锁）之间的
+	// 非原子窗口，避免并发请求泄漏 engine（TOCTOU 竞态）。
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	// 先 Start 新引擎，成功后再 Stop 旧引擎，避免新引擎启动失败时旧引擎已被停止
 	oldEngine := s.getCaptureEngine()
 	ce := capture.New(body.Interface, body.BPF, s.store, s)
 	if err := ce.Start(); err != nil {
@@ -799,6 +832,7 @@ func (s *Server) handleCaptureStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ce.Stop()
+	s.SetCaptureEngine(nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
@@ -849,15 +883,7 @@ func (s *Server) handleMaintenanceCleanup(w http.ResponseWriter, r *http.Request
 		writeAppError(w, ErrValidation("Invalid JSON"))
 		return
 	}
-	// 若请求体未指定保留天数，则尝试从 settings 读取
-	if body.RetentionDays <= 0 {
-		if v, err := s.store.GetSetting("retention_days"); err == nil {
-			if d, _ := strconv.Atoi(v); d > 0 {
-				body.RetentionDays = d
-			}
-		}
-	}
-
+	// retention_days 由 Cleanup 唯一负责从 settings 读取（body.RetentionDays 为 0 时回退）
 	deletedRequests, deletedLogs, appliedDays, err := s.store.Cleanup(body.RetentionDays)
 	if err != nil {
 		slog.Error("cleanup failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
@@ -977,6 +1003,9 @@ func (s *Server) handleLLMList(w http.ResponseWriter, r *http.Request) {
 		slog.Error("list llm failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeAppError(w, ErrInternal("Failed to list LLM exchanges"))
 		return
+	}
+	if items == nil {
+		items = []store.LLMExchangeListItem{}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"data":  items,

@@ -16,9 +16,9 @@ import (
 )
 
 type ResendService struct {
-	store    *store.Store
-	hub      *wsHub
-	client   *http.Client
+	store  *store.Store
+	hub    *wsHub
+	client *http.Client
 }
 
 func NewResendService(st *store.Store, hub *wsHub, insecure bool) *ResendService {
@@ -134,20 +134,21 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 	}
 
 	captured := &models.CapturedRequest{
-		Method:     req.Method,
-		URL:        req.URL,
-		Host:       parsedURL.Host,
-		Path:       parsedURL.Path,
-		Protocol:   resp.Proto,
-		IsHTTPS:    isHTTPS,
-		ReqHeaders: req.Headers,
-		ReqBody:    req.Body,
-		StatusCode: resp.StatusCode,
-		ResHeaders: result.ResHeaders,
-		ResBody:    result.ResBody,
-		DurationMs: result.DurationMs,
-		SizeBytes:  result.SizeBytes,
-		CapturedAt: time.Now(),
+		Method:      req.Method,
+		URL:         req.URL,
+		Host:        parsedURL.Host,
+		Path:        parsedURL.Path,
+		Protocol:    resp.Proto,
+		IsHTTPS:     isHTTPS,
+		ReqHeaders:  req.Headers,
+		ReqBody:     req.Body,
+		StatusCode:  resp.StatusCode,
+		ResHeaders:  result.ResHeaders,
+		ResBody:     result.ResBody,
+		DurationMs:  result.DurationMs,
+		SizeBytes:   result.SizeBytes,
+		CapturedAt:  time.Now(),
+		CaptureMode: "resend",
 	}
 
 	id, err := s.store.Save(captured)
@@ -206,9 +207,9 @@ func (s *HARService) Export(limit int) (map[string]interface{}, error) {
 					"text": req.ResBody,
 				},
 			},
-			"cache":            map[string]interface{}{},
-			"timings":          map[string]interface{}{"send": 0, "wait": req.DurationMs, "receive": 0},
-			"serverIPAddress":  req.Host,
+			"cache":           map[string]interface{}{},
+			"timings":         map[string]interface{}{"send": 0, "wait": req.DurationMs, "receive": 0},
+			"serverIPAddress": req.Host,
 		}
 		entries = append(entries, entry)
 	}

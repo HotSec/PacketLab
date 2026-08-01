@@ -29,9 +29,9 @@ type OnCapture func(req *models.CapturedRequest)
 // requestContext is stored in ctx.UserData, extending the captured request
 // with LLM-specific parsed data.
 type requestContext struct {
-	captured   *models.CapturedRequest
+	captured    *models.CapturedRequest
 	llmProvider llm.Provider
-	llmReqInfo *llm.RequestInfo
+	llmReqInfo  *llm.RequestInfo
 }
 
 // Server 代理服务器
@@ -99,15 +99,15 @@ func (s *Server) setupHandlers() {
 	s.proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		// 1. 先捕获请求信息（无论是否启用拦截）
 		captured := &models.CapturedRequest{
-			Method:       req.Method,
-			URL:          req.URL.String(),
-			Host:         req.URL.Host,
-			Path:         req.URL.Path,
-			Protocol:     req.Proto,
-			IsHTTPS:      req.URL.Scheme == "https" || (req.Method == "CONNECT"),
-			ReqHeaders:   api.FlattenHeaders(req.Header),
-			CapturedAt:   time.Now(),
-			CaptureMode:  "proxy",
+			Method:      req.Method,
+			URL:         req.URL.String(),
+			Host:        req.URL.Host,
+			Path:        req.URL.Path,
+			Protocol:    req.Proto,
+			IsHTTPS:     req.URL.Scheme == "https" || (req.Method == "CONNECT"),
+			ReqHeaders:  api.FlattenHeaders(req.Header),
+			CapturedAt:  time.Now(),
+			CaptureMode: "proxy",
 		}
 		maxReqBytes := int64(s.maxReqBodyKB) * 1024
 		if req.Body != nil {
@@ -260,8 +260,10 @@ func (s *Server) Start() error {
 
 	addr := portToAddr(s.port)
 	s.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: s.proxy,
+		Addr:              addr,
+		Handler:           s.proxy,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	slog.Info("代理服务器启动", "addr", addr)

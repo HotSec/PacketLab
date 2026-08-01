@@ -61,9 +61,9 @@ func corsMiddleware(allowOrigins []string) func(http.Handler) http.Handler {
 
 // isAllowedOrigin 检查 Origin 是否允许
 // 允许规则（按优先级）：
-//   1. 显式白名单（allowList）
-//   2. localhost / 127.0.0.1 / ::1 任意端口（默认）
-//   3. 空 Origin → 拒绝（防止 curl/脚本订阅）
+//  1. 显式白名单（allowList）
+//  2. localhost / 127.0.0.1 / ::1 任意端口（默认）
+//  3. 空 Origin → 拒绝（防止 curl/脚本订阅）
 func isAllowedOrigin(origin string, allowList []string) bool {
 	if origin == "" {
 		return false
@@ -99,6 +99,7 @@ type rateLimiter struct {
 	rate     int
 	window   time.Duration
 	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 type visitorInfo struct {
@@ -152,12 +153,16 @@ func (rl *rateLimiter) cleanup() {
 }
 
 func (rl *rateLimiter) stop() {
-	close(rl.stopCh)
+	rl.stopOnce.Do(func() { close(rl.stopCh) })
 }
 
 func rateLimitMiddleware(limiter *rateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if r.URL.Path == "/ws" {
 				next.ServeHTTP(w, r)
 				return
