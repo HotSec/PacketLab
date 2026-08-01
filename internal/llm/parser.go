@@ -12,9 +12,10 @@ import (
 
 // Message represents a single message in a chat conversation.
 type Message struct {
-	Role    string `json:"role"`              // "system" | "user" | "assistant" | "tool"
-	Content string `json:"content"`           // text content (concatenated for multimodal)
-	Name    string `json:"name,omitempty"`    // tool name (OpenAI function calls)
+	Role      string     `json:"role"`               // "system" | "user" | "assistant" | "tool"
+	Content   string     `json:"content"`            // text content (concatenated for multimodal)
+	Name      string     `json:"name,omitempty"`     // tool name (OpenAI function calls)
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // 历史 assistant 消息中的工具调用
 }
 
 // ToolDefinition 表示一个工具/函数定义（OpenAI tools 数组项的 function 部分）。
@@ -112,15 +113,34 @@ func parseOpenAIRequest(body []byte) *RequestInfo {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 			Name    string          `json:"name"`
+			// 历史 assistant 消息中的工具调用（OpenAI 格式）。
+			// Tool calls carried by historical assistant messages (OpenAI format).
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		}
 		if err := json.Unmarshal(rawMsg, &msg); err != nil {
 			continue
 		}
 		content := extractTextContent(msg.Content)
+		var toolCalls []ToolCall
+		for _, tc := range msg.ToolCalls {
+			toolCalls = append(toolCalls, ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			})
+		}
 		info.Messages = append(info.Messages, Message{
-			Role:    msg.Role,
-			Content: content,
-			Name:    msg.Name,
+			Role:      msg.Role,
+			Content:   content,
+			Name:      msg.Name,
+			ToolCalls: toolCalls,
 		})
 	}
 	// 解析 tools
@@ -198,6 +218,18 @@ func parseGeminiRequest(body []byte) *RequestInfo {
 			Role  string `json:"role"`
 			Parts []struct {
 				Text string `json:"text"`
+				// Gemini functionCall 出现在 model 回复中（assistant 工具调用）。
+				// functionCall appears in model responses (assistant tool calls).
+				FunctionCall *struct {
+					Name string          `json:"name"`
+					Args json.RawMessage `json:"args"`
+				} `json:"functionCall"`
+				// functionResponse 出现在 function 角色消息中（工具返回结果）。
+				// functionResponse appears in function-role messages (tool results).
+				FunctionResponse *struct {
+					Name     string          `json:"name"`
+					Response json.RawMessage `json:"response"`
+				} `json:"functionResponse"`
 			} `json:"parts"`
 		} `json:"contents"`
 		SystemInstruction *struct {
@@ -237,19 +269,35 @@ func parseGeminiRequest(body []byte) *RequestInfo {
 	}
 	for _, c := range raw.Contents {
 		var sb strings.Builder
+		var toolCalls []ToolCall
 		for _, p := range c.Parts {
-			sb.WriteString(p.Text)
+			switch {
+			case p.FunctionCall != nil:
+				// model 回复中的工具调用
+				toolCalls = append(toolCalls, ToolCall{
+					Name:      p.FunctionCall.Name,
+					Arguments: string(p.FunctionCall.Args),
+				})
+			case p.FunctionResponse != nil:
+				// 工具返回结果（response 是 JSON 对象），原样写入 content
+				sb.WriteString(string(p.FunctionResponse.Response))
+			default:
+				sb.WriteString(p.Text)
+			}
 		}
 		role := c.Role
 		if role == "model" {
 			role = "assistant"
-		}
-		if role == "" {
+		} else if role == "function" {
+			// Gemini function 角色对应 OpenAI tool 角色
+			role = "tool"
+		} else if role == "" {
 			role = "user"
 		}
 		info.Messages = append(info.Messages, Message{
-			Role:    role,
-			Content: sb.String(),
+			Role:      role,
+			Content:   sb.String(),
+			ToolCalls: toolCalls,
 		})
 	}
 	if raw.GenerationConfig != nil {
@@ -266,8 +314,12 @@ func parseGeminiRequest(body []byte) *RequestInfo {
 		}
 	}
 	if raw.ToolConfig != nil && raw.ToolConfig.FunctionCallingConfig != nil {
-		// Gemini 模式：BLOCK_ONLY / ANY / NONE / AUTO → 简单转字符串
-		info.ToolChoice = json.RawMessage(`"` + raw.ToolConfig.FunctionCallingConfig.Mode + `"`)
+		// Gemini 模式：BLOCK_ONLY / ANY / NONE / AUTO → 转为 JSON 字符串。
+		// 用 json.Marshal 转义，避免原字符串拼接产生非法 JSON。
+		// Marshal the mode string to avoid raw concatenation producing invalid JSON.
+		if b, err := json.Marshal(raw.ToolConfig.FunctionCallingConfig.Mode); err == nil {
+			info.ToolChoice = json.RawMessage(b)
+		}
 	}
 	return info
 }
@@ -285,17 +337,30 @@ func extractTextContent(raw json.RawMessage) string {
 	}
 	// Try array of content parts
 	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &parts); err == nil {
 		var sb strings.Builder
 		for _, p := range parts {
-			if p.Text != "" {
+			var seg string
+			switch p.Type {
+			case "tool_result":
+				// Anthropic tool_result 的文本在 content 字段中（可能是 string
+				// 或 text 块数组），递归提取。原代码仅取 text 字段会丢弃这部分文本。
+				// Anthropic tool_result text lives in the content field (string or
+				// array of text blocks); recurse to extract it.
+				seg = extractTextContent(p.Content)
+			default:
+				// text 块或无类型（OpenAI vision text part）
+				seg = p.Text
+			}
+			if seg != "" {
 				if sb.Len() > 0 {
 					sb.WriteString("\n")
 				}
-				sb.WriteString(p.Text)
+				sb.WriteString(seg)
 			}
 		}
 		return sb.String()
@@ -468,7 +533,6 @@ type StreamAssembler struct {
 	content   strings.Builder
 	finish    string
 	usage     *ResponseInfo
-	detected  bool
 	toolCalls []ToolCall
 }
 
@@ -512,6 +576,12 @@ func (a *StreamAssembler) feedOpenAI(data []byte) bool {
 			} `json:"delta"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		// OpenAI 流式最后一个 chunk 在顶层携带 usage 对象。
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return false
@@ -530,6 +600,11 @@ func (a *StreamAssembler) feedOpenAI(data []byte) bool {
 			if idx < 0 {
 				continue
 			}
+			// 防御：超大 index 直接忽略，避免恶意 chunk 触发 OOM
+			// Defensive: skip absurdly large index to avoid OOM from preallocating slices
+			if idx > 64 {
+				continue
+			}
 			for len(a.toolCalls) <= idx {
 				a.toolCalls = append(a.toolCalls, ToolCall{})
 			}
@@ -545,6 +620,14 @@ func (a *StreamAssembler) feedOpenAI(data []byte) bool {
 			a.finish = c.FinishReason
 		}
 	}
+	// OpenAI 流式最后一个 chunk 含 usage 对象
+	if chunk.Usage != nil {
+		if a.usage == nil {
+			a.usage = &ResponseInfo{}
+		}
+		a.usage.PromptTokens = chunk.Usage.PromptTokens
+		a.usage.CompletionTokens = chunk.Usage.CompletionTokens
+	}
 	return true
 }
 
@@ -558,20 +641,26 @@ func (a *StreamAssembler) feedAnthropic(data []byte) bool {
 	}
 	switch event.Type {
 	case "message_start":
-		var msg struct {
-			Model string `json:"model"`
+		// Anthropic SSE 规范：message 对象在顶层（不在 delta 字段中），
+		// 必须直接从 data 解析。原代码错误地从 event.Delta 解析导致对真实流必然失败。
+		// Anthropic SSE spec: the message object is at the top level (not inside delta),
+		// so we must parse from data directly.
+		var ev struct {
 			Message struct {
+				Model string `json:"model"`
 				Usage *struct {
 					InputTokens int `json:"input_tokens"`
 				} `json:"usage"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal(event.Delta, &msg); err == nil {
-			a.model = msg.Model
+		if err := json.Unmarshal(data, &ev); err == nil {
+			a.model = ev.Message.Model
 			if a.usage == nil {
 				a.usage = &ResponseInfo{}
 			}
-			a.usage.PromptTokens = msg.Message.Usage.InputTokens
+			if ev.Message.Usage != nil {
+				a.usage.PromptTokens = ev.Message.Usage.InputTokens
+			}
 		}
 	case "content_block_start":
 		// content_block_start 事件的 content_block 字段在顶层（不在 delta 中），
@@ -637,44 +726,37 @@ func (a *StreamAssembler) feedAnthropic(data []byte) bool {
 }
 
 func (a *StreamAssembler) feedGemini(data []byte) bool {
-	// Gemini streaming returns array of candidates objects.
+	// Gemini streaming returns array of candidates objects; 非流式可能返回单个对象。
 	// Parts 中可能含 text 或 functionCall（与非流式 parseGeminiResponse 保持一致）。
-	// Parts may contain text or functionCall (consistent with non-streaming parseGeminiResponse).
-	var chunks []struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-					FunctionCall *struct {
-						Name string          `json:"name"`
-						Args json.RawMessage `json:"args"`
-					} `json:"functionCall"`
-				} `json:"parts"`
-			} `json:"content"`
-			FinishReason string `json:"finishReason"`
-		} `json:"candidates"`
+	// Gemini streaming returns array of candidates objects; non-streaming may
+	// return a single object. Parts may contain text or functionCall.
+	type geminiPart struct {
+		Text string `json:"text"`
+		FunctionCall *struct {
+			Name string          `json:"name"`
+			Args json.RawMessage `json:"args"`
+		} `json:"functionCall"`
 	}
-	if err := json.Unmarshal(data, &chunks); err != nil {
-		// Try single object (non-array)
-		var single struct {
-			Candidates []struct {
-				Content struct {
-					Parts []struct {
-						Text string `json:"text"`
-						FunctionCall *struct {
-							Name string          `json:"name"`
-							Args json.RawMessage `json:"args"`
-						} `json:"functionCall"`
-					} `json:"parts"`
-				} `json:"content"`
-				FinishReason string `json:"finishReason"`
-			} `json:"candidates"`
-		}
-		if err2 := json.Unmarshal(data, &single); err2 != nil {
-			return false
-		}
-		for _, c := range single.Candidates {
-			for _, p := range c.Content.Parts {
+	type geminiCandidate struct {
+		Content struct {
+			Parts []geminiPart `json:"parts"`
+		} `json:"content"`
+		FinishReason string `json:"finishReason"`
+	}
+	type geminiChunk struct {
+		Candidates []geminiCandidate `json:"candidates"`
+		// Gemini 流式最后一个 chunk 含 usageMetadata
+		UsageMetadata *struct {
+			PromptTokenCount     int `json:"promptTokenCount"`
+			CandidatesTokenCount int `json:"candidatesTokenCount"`
+			TotalTokenCount      int `json:"totalTokenCount"`
+		} `json:"usageMetadata"`
+	}
+
+	// process 处理单个 chunk（候选 + usage），统一数组和单对象路径，避免逻辑重复。
+	process := func(ch geminiChunk) {
+		for _, cnd := range ch.Candidates {
+			for _, p := range cnd.Content.Parts {
 				if p.FunctionCall != nil {
 					a.toolCalls = append(a.toolCalls, ToolCall{
 						Name:      p.FunctionCall.Name,
@@ -684,29 +766,32 @@ func (a *StreamAssembler) feedGemini(data []byte) bool {
 					a.content.WriteString(p.Text)
 				}
 			}
-			if c.FinishReason != "" {
-				a.finish = c.FinishReason
+			if cnd.FinishReason != "" {
+				a.finish = cnd.FinishReason
 			}
+		}
+		if ch.UsageMetadata != nil {
+			if a.usage == nil {
+				a.usage = &ResponseInfo{}
+			}
+			a.usage.PromptTokens = ch.UsageMetadata.PromptTokenCount
+			a.usage.CompletionTokens = ch.UsageMetadata.CandidatesTokenCount
+		}
+	}
+
+	// 优先按数组解析；失败则按单对象解析，走同一处理路径。
+	var chunks []geminiChunk
+	if err := json.Unmarshal(data, &chunks); err == nil {
+		for _, ch := range chunks {
+			process(ch)
 		}
 		return true
 	}
-	for _, chunk := range chunks {
-		for _, c := range chunk.Candidates {
-			for _, p := range c.Content.Parts {
-				if p.FunctionCall != nil {
-					a.toolCalls = append(a.toolCalls, ToolCall{
-						Name:      p.FunctionCall.Name,
-						Arguments: string(p.FunctionCall.Args),
-					})
-				} else if p.Text != "" {
-					a.content.WriteString(p.Text)
-				}
-			}
-			if c.FinishReason != "" {
-				a.finish = c.FinishReason
-			}
-		}
+	var single geminiChunk
+	if err := json.Unmarshal(data, &single); err != nil {
+		return false
 	}
+	process(single)
 	return true
 }
 

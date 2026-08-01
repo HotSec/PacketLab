@@ -47,7 +47,11 @@ func DetectProvider(host, path string) Provider {
 	path = strings.ToLower(path)
 	for provider, pat := range providerPatterns {
 		for _, hs := range pat.hostSubstrs {
-			if strings.Contains(host, hs) {
+			// 复用 custom_endpoints.go 的 hostMatches：精确匹配或 "."+pattern 后缀匹配。
+			// 避免子串匹配被 "openai.com.evil.com" 这类伪造 host 绕过。
+			// Use hostMatches (exact or "."+pattern suffix) instead of strings.Contains
+			// so forged hosts like "openai.com.evil.com" can't impersonate providers.
+			if hostMatches(host, hs) {
 				return provider
 			}
 		}
@@ -60,8 +64,8 @@ func DetectProvider(host, path string) Provider {
 	return ProviderUnknown
 }
 
-// IsLLMRequest determines whether a request is likely an LLM API call.
-// Checks both provider patterns and a heuristic on the request body.
+// IsLLMRequest determines whether a request is likely an LLM API call
+// by matching the host and path against known LLM provider patterns.
 func IsLLMRequest(host, path string) bool {
 	return DetectProvider(host, path) != ProviderUnknown
 }

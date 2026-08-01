@@ -1,6 +1,10 @@
 package llm
 
-import "sync"
+import (
+	"net"
+	"strings"
+	"sync"
+)
 
 // custom_endpoints.go — 用户配置的自定义 OpenAI 兼容端点注册表。
 // 支持 DeepSeek、Moonshot、本地 vLLM 等 OpenAI 兼容服务的识别。
@@ -32,9 +36,11 @@ func RegisterCustomEndpoint(ep CustomEndpoint) {
 	}
 	customEndpoints.mu.Lock()
 	defer customEndpoints.mu.Unlock()
-	// 去重：host+path 相同则覆盖
+	// 去重：host+path 相同则覆盖。host 比较大小写不敏感（与 matchCustomEndpoint 的
+	// toLowerASCII 匹配保持一致），避免重复注册仅大小写不同的端点。
+	// Dedup host case-insensitively to match the case-insensitive matching logic.
 	for i, existing := range customEndpoints.endpoints {
-		if existing.Host == ep.Host && existing.Path == ep.Path {
+		if strings.EqualFold(existing.Host, ep.Host) && existing.Path == ep.Path {
 			customEndpoints.endpoints[i] = ep
 			return
 		}
@@ -88,14 +94,18 @@ func matchCustomEndpoint(host, path string) (CustomEndpoint, bool) {
 }
 
 // hostMatches 判断 host 是否匹配 pattern。
-// 支持：完全匹配、后缀匹配（".api.deepseek.com" 匹配 "sub.api.deepseek.com"）。
+// 支持：完全匹配、后缀匹配（"api.deepseek.com" 匹配 "sub.api.deepseek.com"）。
+// host 含端口时（如 "localhost:8000"）自动剥离端口后再比较。
 func hostMatches(host, pattern string) bool {
+	host = toLowerASCII(host)
+	pattern = toLowerASCII(pattern)
+	// 剥离端口号，使 "localhost:8000" 能匹配 pattern "localhost"。
+	// Strip port so "localhost:8000" matches pattern "localhost".
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
 	if host == pattern {
 		return true
-	}
-	// 后缀匹配：pattern 以 "." 开头表示匹配任意子域
-	if len(pattern) > 0 && pattern[0] == '.' {
-		return hasSuffix(host, pattern)
 	}
 	// 否则按 "." 分隔后缀匹配（"api.deepseek.com" 匹配 "sub.api.deepseek.com"）
 	return hasSuffix(host, "."+pattern)

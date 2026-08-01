@@ -182,7 +182,8 @@ func TestStreamAssemblerAnthropic(t *testing.T) {
 	a := NewStreamAssembler(ProviderAnthropic)
 
 	chunks := [][]byte{
-		[]byte(`{"type":"message_start","delta":{"model":"claude-3","message":{"usage":{"input_tokens":10}}}}`),
+		// 真实 Anthropic SSE 格式：message 对象在顶层（不在 delta 中）
+		[]byte(`{"type":"message_start","message":{"model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":25}}}`),
 		[]byte(`{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}`),
 		[]byte(`{"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}`),
 		[]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","usage":{"output_tokens":5}}}`),
@@ -195,13 +196,13 @@ func TestStreamAssemblerAnthropic(t *testing.T) {
 	if result.Content != "Hello world" {
 		t.Errorf("content = %q, want 'Hello world'", result.Content)
 	}
-	if result.Model != "claude-3" {
+	if result.Model != "claude-3-5-sonnet-20241022" {
 		t.Errorf("model = %q", result.Model)
 	}
 	if result.FinishReason != "end_turn" {
 		t.Errorf("finish_reason = %q", result.FinishReason)
 	}
-	if result.PromptTokens != 10 {
+	if result.PromptTokens != 25 {
 		t.Errorf("prompt_tokens = %d", result.PromptTokens)
 	}
 	if result.CompletionTokens != 5 {

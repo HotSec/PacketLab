@@ -6,7 +6,6 @@ package proxy
 import (
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"time"
 
 	"packetlab/internal/llm"
@@ -102,18 +101,4 @@ func saveLLMExchange(store interface {
 	if err := store.SetLLMData(id, string(data)); err != nil {
 		slog.Warn("proxy: LLM exchange save failed", "id", id, "error", err)
 	}
-}
-
-// parseSSEDataLine extracts the JSON payload from an SSE "data:" line.
-// Returns the raw JSON bytes, or nil if the line is not a data line or is [DONE].
-func parseSSEDataLine(line string) []byte {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "data:") {
-		return nil
-	}
-	data := strings.TrimSpace(line[5:])
-	if data == "[DONE]" || data == "" {
-		return nil
-	}
-	return []byte(data)
 }
