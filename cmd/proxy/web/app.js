@@ -80,7 +80,8 @@ const PAGE_SIZE = 50;
 let currentPage = 1;       // 1-based
 let pageTotal = 0;         // 当前过滤条件下的总条数（由后端返回）
 // isPaged: 是否启用分页（非 realtime 模式启用）
-let ws = null, wsReconnectTimer = null;
+let ws = null, wsReconnectTimer = null, wsReconnectDelay = 3000;
+let loadStatsTimer = null;
 let requestVersion = 0;
 
 // ── 虚拟滚动 ──────────────────────────────────
@@ -171,6 +172,10 @@ async function loadRequests() {
     const r = await apiGet('/api/requests?' + p.toString());
     requestVersion++;
     requests = (r.data || []).map(normalizeReq);
+    // 合并 pending 请求（拦截模式下的待审请求不在 /api/requests 返回中）
+    const _existingIds = new Set(requests.map(x => String(x.id)));
+    const _pending = Object.values(pendingRequests).filter(p => !_existingIds.has(String(p.id)));
+    if (_pending.length > 0) requests = requests.concat(_pending.map(pendingToReq));
     pageTotal = r.total || 0;
     // 过滤/重新加载后回到顶部，避免虚拟滚动残留位置错位
     virtualScrollTop = 0;
@@ -342,6 +347,7 @@ function connectWebSocket() {
           // 仅 realtime 模式实时追加；定时/手动模式由刷新或翻页统一加载
           if (refreshMode !== 'realtime') return;
           requestVersion++; requests.unshift(normalizeReq(m.data));
+          if (requests.length > 2000) requests.length = 2000;
           // 虚拟滚动模式：保持视口稳定，新条目加到顶部时同步下移滚动位置
           if (virtualFiltered.length > VIRTUAL_THRESHOLD) {
             const list = document.getElementById('requestList');
@@ -353,9 +359,9 @@ function connectWebSocket() {
         if (m.type === 'update_request' && m.data) { updateRequestInList(m.data); }
       } catch { /* ignore parse errors */ }
     };
-    ws.onclose = () => { wsReconnectTimer = setTimeout(connectWebSocket, 3000); };
+    ws.onclose = () => { wsReconnectTimer = setTimeout(connectWebSocket, wsReconnectDelay); wsReconnectDelay = Math.min(wsReconnectDelay * 2, 60000); };
     ws.onerror = () => ws.close();
-  } catch { wsReconnectTimer = setTimeout(connectWebSocket, 3000); }
+  } catch { wsReconnectTimer = setTimeout(connectWebSocket, wsReconnectDelay); wsReconnectDelay = Math.min(wsReconnectDelay * 2, 60000); }
 }
 
 // =============================================
@@ -415,7 +421,8 @@ function renderRequestList() {
     // innerHTML 替换后旧 DOM 缓存失效，清空让 updateRequestInList 重新建立
     requestElCache.clear();
     document.getElementById('requestCount').textContent = `${listCount()} ${t('recordings')}`;
-    loadStats();
+    if (loadStatsTimer) clearTimeout(loadStatsTimer);
+    loadStatsTimer = setTimeout(loadStats, 1000);
     return;
   }
 
@@ -444,7 +451,8 @@ function renderRequestList() {
     requestElCache.clear();
   }
   document.getElementById('requestCount').textContent = `${listCount()} ${t('recordings')}`;
-  loadStats();
+  if (loadStatsTimer) clearTimeout(loadStatsTimer);
+  loadStatsTimer = setTimeout(loadStats, 1000);
 }
 
 // 列表计数：分页模式显示后端 total，否则显示本地条数
@@ -980,9 +988,20 @@ function toggleCapture() {
   } else {
     btn.classList.remove('recording'); label.textContent = t('paused');
     dot.classList.remove('recording'); text.textContent = t('paused');
+    // 暂停录制功能暂未实现，代理将持续录制
+    showToast('warn', '暂停功能暂未实现，代理将持续录制');
   }
 }
-function setFilter(btn, f) { currentFilter = f; currentHost = ''; currentPage = 1; document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active')); btn.classList.add('active'); loadRequests(); }
+function setFilter(btn, f) {
+  currentFilter = f; currentHost = ''; currentPage = 1; errorFilterOnly = false; starredOnly = false;
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  const eBtn = document.getElementById('errorFilterBtn');
+  if (eBtn) { eBtn.classList.remove('active'); eBtn.style.background = 'transparent'; eBtn.style.color = 'var(--text-secondary)'; }
+  const sBtn = document.getElementById('starredFilterBtn');
+  if (sBtn) { sBtn.classList.remove('active'); sBtn.style.color = ''; }
+  loadRequests();
+}
 function toggleErrorFilter() {
   errorFilterOnly = !errorFilterOnly; currentHost = ''; currentPage = 1;
   const btn = document.getElementById('errorFilterBtn');
@@ -1049,11 +1068,16 @@ async function toggleInterceptMode() {
     ind.className = 'mode-indicator ' + (interceptMode === 'auto' ? 'mode-auto' : 'mode-manual');
   } catch (e) { showToast('error', 'Mode switch failed'); }
 }
+function pendingToReq(p) {
+  return { id: p.id, method: p.method, url: p.url, host: p.host, path: p.path,
+    status: 0, status_code: 0, duration_ms: 0, time: '', size: '', size_bytes: 0,
+    reqHeaders: p.headers || {}, reqBody: p.body || '',
+    resHeaders: {}, resBody: '', protocol: '', is_pending: true, captured_at: p.timestamp,
+    starred: false };
+}
 function addPendingToList(p) {
   pendingRequests[p.id] = p;
-  const r = { id: p.id, method: p.method, url: p.url, host: p.host, path: p.path,
-    status: 0, reqHeaders: p.headers || {}, reqBody: p.body || '',
-    resHeaders: {}, resBody: '', protocol: '', is_pending: true, size: '', captured_at: p.timestamp };
+  const r = pendingToReq(p);
   requestVersion++; requests.unshift(r); renderRequestList();
 }
 async function interceptAction(action) {
@@ -1080,7 +1104,7 @@ function removePending(id) {
 // ── Utilities ────────────────────────────────
 function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function escAttr(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-function escJS(s) { return esc(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+function escJS(s) { return esc(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'); }
 function shellQuote(s) {
   // 单引号字符串中转义单引号：' -> '\''
   return String(s).replace(/'/g, "'\\''");
@@ -1202,7 +1226,7 @@ function showToast(type, msg) {
     info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'
   };
   const svg = icons[type] || icons.error;
-  toast.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${svg}</svg><span>${msg.replace(/\n/g, '<br>')}</span>`;
+  toast.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${svg}</svg><span>${esc(msg).replace(/\n/g, '<br>')}</span>`;
   c.appendChild(toast);
   setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity .2s'; }, 2800);
   setTimeout(() => toast.remove(), 2500);
@@ -1370,7 +1394,7 @@ function renderInterceptLogs(logs) {
   loadRequests().then(() => {
     connectWebSocket();
     setTimeout(() => {
-      if (requests.length > 0 && !selectedRequestId) selectRequest(requests[0].id);
+      if (requests.length > 0 && !selectedRequestId) selectRequest(String(requests[0].id));
       const at = document.querySelector('.detail-tab.active');
       if (at) { const ind = document.getElementById('tabIndicator'); ind.style.left = at.offsetLeft + 'px'; ind.style.width = at.offsetWidth + 'px'; }
     }, 400);
