@@ -335,7 +335,7 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 	}
 
 	querySQL := fmt.Sprintf(
-		`SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name
+		`SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name, truncated
 		 FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
 	args = append(args, limit, offset)
 
@@ -349,11 +349,13 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 	for rows.Next() {
 		var item models.RequestListItem
 		var capturedAt string
+		var truncated int
 		if err := rows.Scan(&item.ID, &item.Method, &item.URL, &item.Host,
 			&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS,
-			&item.CaptureMode, &item.ProcessPID, &item.ProcessName); err != nil {
+			&item.CaptureMode, &item.ProcessPID, &item.ProcessName, &truncated); err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
 		}
+		item.Truncated = truncated == 1
 		item.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
 		items = append(items, item)
 	}
@@ -522,7 +524,7 @@ func (s *Store) ListStarred(limit int) ([]models.RequestListItem, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	querySQL := `SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name
+	querySQL := `SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name, truncated
 			 FROM requests WHERE starred = 1 ORDER BY id DESC LIMIT ?`
 	rows, err := s.readDB().Query(querySQL, limit)
 	if err != nil {
@@ -534,11 +536,13 @@ func (s *Store) ListStarred(limit int) ([]models.RequestListItem, error) {
 	for rows.Next() {
 		var item models.RequestListItem
 		var capturedAt string
+		var truncated int
 		if err := rows.Scan(&item.ID, &item.Method, &item.URL, &item.Host,
 			&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS,
-			&item.CaptureMode, &item.ProcessPID, &item.ProcessName); err != nil {
+			&item.CaptureMode, &item.ProcessPID, &item.ProcessName, &truncated); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
+		item.Truncated = truncated == 1
 		item.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
 		items = append(items, item)
 	}

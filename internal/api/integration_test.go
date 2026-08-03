@@ -609,6 +609,74 @@ func TestIntegration_APINoteMissingHostReturns400(t *testing.T) {
 	assertAPIError(t, w, 400, "VALIDATION_ERROR")
 }
 
+// TestIntegration_TruncatedFlagExposed 验证截断标记经 API 完整暴露：
+// 列表项与详情均返回 truncated=true（前端据此显示截断徽标）。
+func TestIntegration_TruncatedFlagExposed(t *testing.T) {
+	s := newIntegrationServer(t)
+
+	truncID, err := s.store.Save(&models.CapturedRequest{
+		Method: "GET", URL: "https://big.example.com/dl", Host: "big.example.com",
+		Path: "/dl", Protocol: "HTTP/1.1", StatusCode: 200,
+		ResBody: "cut", SizeBytes: 1 << 30, Truncated: true,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	normalID, err := s.store.Save(&models.CapturedRequest{
+		Method: "GET", URL: "https://ok.example.com/", Host: "ok.example.com",
+		Path: "/", Protocol: "HTTP/1.1", StatusCode: 200,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// 详情：truncated=true / 缺省
+	w := integrationRequest(t, s, "GET", fmt.Sprintf("/api/requests/%d", truncID), "", nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var detail map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&detail)
+	if detail["truncated"] != true {
+		t.Errorf("detail truncated: expected true, got %v", detail["truncated"])
+	}
+
+	w = integrationRequest(t, s, "GET", fmt.Sprintf("/api/requests/%d", normalID), "", nil)
+	detail = nil
+	json.NewDecoder(w.Body).Decode(&detail)
+	if v, ok := detail["truncated"]; ok && v != false {
+		t.Errorf("detail truncated: expected false/absent, got %v", v)
+	}
+
+	// 列表：截断项在首位且带标记
+	w = integrationRequest(t, s, "GET", "/api/requests?limit=10", "", nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var listResp struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	json.NewDecoder(w.Body).Decode(&listResp)
+	if len(listResp.Data) < 2 {
+		t.Fatalf("expected >= 2 list items, got %d", len(listResp.Data))
+	}
+	foundTrunc, foundNormal := false, false
+	for _, it := range listResp.Data {
+		if it["id"] == float64(truncID) && it["truncated"] == true {
+			foundTrunc = true
+		}
+		if it["id"] == float64(normalID) {
+			foundNormal = it["truncated"] != true
+		}
+	}
+	if !foundTrunc {
+		t.Error("list item for truncated record missing truncated=true")
+	}
+	if !foundNormal {
+		t.Error("list item for normal record must not have truncated=true")
+	}
+}
+
 func TestIntegration_APIMapMissingHostReturns400(t *testing.T) {
 	s := newIntegrationServer(t)
 	w := integrationRequest(t, s, "GET", "/api/apimap", "", nil)

@@ -23,8 +23,8 @@ type CapturedRequest struct {
 	CaptureMode string            `json:"capture_mode,omitempty"` // "proxy" | "nic"
 	ProcessPID  int               `json:"process_pid,omitempty"`
 	ProcessName string            `json:"process_name,omitempty"`
-	IsSSE       bool              `json:"is_sse,omitempty"`      // 是否为 SSE 流式响应
-	SSEEvents   string            `json:"sse_events,omitempty"`  // SSE 事件累积内容
+	IsSSE       bool              `json:"is_sse,omitempty"`     // 是否为 SSE 流式响应
+	SSEEvents   string            `json:"sse_events,omitempty"` // SSE 事件累积内容
 }
 
 // ProcessInfo 进程信息
@@ -48,6 +48,7 @@ type RequestListItem struct {
 	CaptureMode string    `json:"capture_mode,omitempty"`
 	ProcessPID  int       `json:"process_pid,omitempty"`
 	ProcessName string    `json:"process_name,omitempty"`
+	Truncated   bool      `json:"truncated,omitempty"`
 }
 
 // ResendRequest 重发请求的结构
@@ -60,12 +61,12 @@ type ResendRequest struct {
 
 // ResendResponse 重发请求的响应
 type ResendResponse struct {
-	ID          int64             `json:"id"`
-	StatusCode  int               `json:"status_code"`
-	ResHeaders  map[string]string `json:"res_headers"`
-	ResBody     string            `json:"res_body"`
-	DurationMs  int64             `json:"duration_ms"`
-	SizeBytes   int64             `json:"size_bytes"`
+	ID         int64             `json:"id"`
+	StatusCode int               `json:"status_code"`
+	ResHeaders map[string]string `json:"res_headers"`
+	ResBody    string            `json:"res_body"`
+	DurationMs int64             `json:"duration_ms"`
+	SizeBytes  int64             `json:"size_bytes"`
 }
 
 // APINote API 接口备注
@@ -110,12 +111,12 @@ type InterceptResult struct {
 // InterceptLog 拦截操作日志
 type InterceptLog struct {
 	ID            int64  `json:"id"`
-	Action        string `json:"action"`         // "allow" | "drop" | "modify"
+	Action        string `json:"action"` // "allow" | "drop" | "modify"
 	RequestURL    string `json:"request_url"`
 	RequestMethod string `json:"request_method"`
 	RequestHost   string `json:"request_host"`
 	RulePattern   string `json:"rule_pattern"` // auto 模式命中规则时的 pattern，manual 模式为空
-	Mode          string `json:"mode"`          // "auto" | "manual"
+	Mode          string `json:"mode"`         // "auto" | "manual"
 	CreatedAt     string `json:"created_at"`
 }
 

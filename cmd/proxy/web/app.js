@@ -310,9 +310,15 @@ function normalizeReq(r) {
     protocol: r.is_https ? 'HTTPS/1.1' : 'HTTP/1.1',
     reqHeaders: r.req_headers || {}, reqBody: r.req_body,
     resHeaders: r.res_headers || {}, resBody: r.res_body,
+    truncated: !!r.truncated,
     // 保留 starred 字段，避免 loadStarred/loadRequests 后二次过滤丢失收藏项
     starred: !!r.starred
   };
+}
+
+// 截断标记徽标：Truncated 记录在列表/详情中标识（size 仍显示完整大小）
+function truncatedTag(r) {
+  return r.truncated ? '<span class="truncated-badge" title="响应体超过上限已截断">截断</span>' : '';
 }
 
 function formatSize(b) {
@@ -330,6 +336,7 @@ function updateRequestInList(data) {
   if (data.size_bytes !== undefined) { r.size_bytes = data.size_bytes; r.size = formatSize(data.size_bytes); }
   if (data.duration_ms !== undefined) { r.duration_ms = data.duration_ms; r.time = `${data.duration_ms}ms`; }
   if (data.status_code !== undefined) { r.status = data.status_code; r.status_code = data.status_code; }
+  if (data.truncated !== undefined) { r.truncated = data.truncated; }
   // SSE 流式内容增量更新：同步到缓存对象
   if (data.is_sse !== undefined) { r.is_sse = data.is_sse; }
   let bodyChanged = false;
@@ -472,7 +479,7 @@ function renderRequestList() {
         <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
         <div class="request-info">
           <span class="request-url">${esc(r.url)}</span>
-          <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span></div>
+          <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
         </div>
         ${pendingExtra}
         <span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
@@ -506,7 +513,7 @@ function renderItemHTML(r, i) {
     <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
     <div class="request-info">
       <span class="request-url">${esc(r.url)}</span>
-      <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span></div>
+      <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
     </div>
     ${starIcon}
     ${pendingExtra}
@@ -618,7 +625,7 @@ function fillContent(r, isPending) {
   const sc = `status-${Math.floor(r.status / 100)}xx`;
   document.getElementById('res-status').innerHTML = isPending ? '—' : `<span class="status-code ${sc}">${r.status}</span>`;
   document.getElementById('res-time').textContent = r.time || '';
-  document.getElementById('res-size').textContent = r.size || '';
+  document.getElementById('res-size').innerHTML = esc(r.size || '') + truncatedTag(r);
   const rsh = r.resHeaders || {};
   document.getElementById('res-headers-content').textContent =
     Object.keys(rsh).length > 0 ? Object.entries(rsh).map(([k, v]) => `${k}: ${v}`).join('\n') : t('empty');
