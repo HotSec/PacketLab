@@ -16,6 +16,12 @@ import (
 )
 
 func newIntegrationServer(t *testing.T) *Server {
+	return newIntegrationServerInsecure(t, false)
+}
+
+// newIntegrationServerInsecure 构造测试服务器；insecure=true 时重发放行回环地址
+// （httptest mock 均在本机 127.0.0.1）。
+func newIntegrationServerInsecure(t *testing.T, insecure bool) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := dir + "/integration.db"
@@ -24,7 +30,7 @@ func newIntegrationServer(t *testing.T) *Server {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, nil, false, "", nil)
+	return New(st, nil, insecure, "", nil)
 }
 
 func integrationRequest(t *testing.T, s *Server, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -561,7 +567,7 @@ func TestIntegration_ResendWithMockServer(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	s := newIntegrationServer(t)
+	s := newIntegrationServerInsecure(t, true)
 	w := integrationRequest(t, s, "POST", "/api/resend", fmt.Sprintf(
 		`{"method":"GET","url":"%s/api","headers":{"X-Test":"1"}}`, mockServer.URL,
 	), nil)
@@ -584,6 +590,17 @@ func TestIntegration_ResendWithMockServer(t *testing.T) {
 	if result.DurationMs < 0 {
 		t.Errorf("expected non-negative duration, got %d", result.DurationMs)
 	}
+}
+
+func TestIntegration_ResendBlocksPrivateTarget(t *testing.T) {
+	// 默认服务器（insecure=false）：本机客户端发起的重发也禁止访问回环地址
+	s := newIntegrationServer(t)
+	w := integrationRequest(t, s, "POST", "/api/resend",
+		`{"method":"GET","url":"http://127.0.0.1:1/secret"}`, nil)
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	assertAPIError(t, w, 400, "VALIDATION_ERROR")
 }
 
 func TestIntegration_APINoteMissingHostReturns400(t *testing.T) {

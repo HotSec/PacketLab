@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -374,14 +373,7 @@ func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientIP := ""
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		clientIP = host
-	} else {
-		clientIP = r.RemoteAddr
-	}
-
-	result, err := s.resendSvc.ResendFrom(clientIP, &body)
+	result, err := s.resendSvc.Resend(&body)
 	if err != nil {
 		if appErr, ok := err.(*AppError); ok {
 			slog.Warn("resend failed", "url", body.URL, "error", appErr.Message, "request_id", RequestIDFromContext(r.Context()))

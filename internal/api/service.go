@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strings"
 	"time"
 
 	"packetlab/internal/models"
@@ -21,26 +20,57 @@ import (
 )
 
 type ResendService struct {
-	store    *store.Store
-	hub      *wsHub
-	insecure bool
+	store     *store.Store
+	hub       *wsHub
+	insecure  bool
 	transport *http.Transport
 }
 
 func NewResendService(st *store.Store, hub *wsHub, insecure bool) *ResendService {
 	transport := &http.Transport{
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: insecure},
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		TLSClientConfig:        &tls.Config{InsecureSkipVerify: insecure},
+		MaxIdleConns:           100,
+		MaxIdleConnsPerHost:    10,
+		IdleConnTimeout:        90 * time.Second,
+		ResponseHeaderTimeout:  30 * time.Second,
 		MaxResponseHeaderBytes: 64 * 1024,
 	}
+	// DialContext 在建立连接时重新解析并校验目标 IP：拨号用的正是校验过的解析
+	// 结果，封死 check-then-dial 的 DNS rebinding 窗口（外层 checkResendTarget
+	// 仅用于快速失败与清晰报错，不承担安全职责）。
+	transport.DialContext = resendDialContext(insecure)
 	return &ResendService{
 		store:     st,
 		hub:       hub,
 		insecure:  insecure,
 		transport: transport,
+	}
+}
+
+// resendDialContext 返回重发专用的拨号函数：非 trusted（未开启 --insecure）时
+// 在拨号处解析主机名、校验全部解析结果；任一命中禁止地址段则返回 errBlockedTarget
+// （复用重试循环的哨兵判断）。校验通过后直接拨已校验的 IP，避免内核二次解析引入
+// TOCTOU。已校验 IP 直接命中检查；trusted 时原样透传。
+func resendDialContext(trusted bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 10 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if !trusted {
+			ip, err := resolveAllowedIP(ctx, host)
+			if err != nil {
+				if errors.Is(err, errBlockedTarget) {
+					return nil, errBlockedTarget
+				}
+				return nil, err
+			}
+			// 拨已校验的 IP（TLS SNI 由 http.Transport 按请求 URL host 设置，
+			// 不受拨号地址影响）
+			return d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		}
+		return d.DialContext(ctx, network, addr)
 	}
 }
 
@@ -53,17 +83,13 @@ type ResendResult struct {
 	SizeBytes  int64             `json:"size_bytes"`
 }
 
-// Resend 保持旧签名（默认视为本机客户端调用），供测试与兼容使用。
-func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error) {
-	return s.ResendFrom("127.0.0.1", req)
-}
-
 // errBlockedTarget 目标地址被 SSRF 防护拦截的哨兵错误（跳过无意义重试）。
 var errBlockedTarget = errors.New("resend target not allowed")
 
-// ResendFrom 重发请求。clientIP 为调用方地址：来自回环地址的调用视为本机调试，
-// 允许访问私网目标；非本机调用禁止访问回环/链路本地/私网地址（SSRF 防护）。
-func (s *ResendService) ResendFrom(clientIP string, req *models.ResendRequest) (*ResendResult, error) {
+// Resend 重发请求。SSRF 防护：默认禁止访问回环/链路本地/私网地址
+// （含 DNS 解析结果的任一命中，防 DNS rebinding）；仅 --insecure 显式放行。
+// 重定向仅允许同 host（防止重定向链跳到内部网络或第三方收集数据）。
+func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error) {
 	parsedURL, err := url.Parse(req.URL)
 	if err != nil {
 		return nil, ErrValidation(fmt.Sprintf("invalid URL: %s", err.Error()))
@@ -74,18 +100,25 @@ func (s *ResendService) ResendFrom(clientIP string, req *models.ResendRequest) (
 
 	isHTTPS := parsedURL.Scheme == "https"
 
-	// SSRF 防护：仅本机客户端或 --insecure 时允许访问私网/回环地址
-	trusted := s.insecure || isLoopbackAddr(clientIP)
+	// SSRF 防护：仅 --insecure 时放行私网/回环地址；调用方 IP 不参与信任判定，
+	// 否则本机客户端（浏览器/任意本机进程）可无条件探测内网
+	trusted := s.insecure
+	originalHost := parsedURL.Host
 	if err := checkResendTarget(parsedURL, trusted); err != nil {
 		return nil, ErrValidation(err.Error())
 	}
 
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout:   30 * time.Second,
 		Transport: s.transport,
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
+			// 最多 10 跳（len(via) 为已跳次数，>10 时超出）
+			if len(via) > 10 {
 				return errors.New("stopped after 10 redirects")
+			}
+			// 重定向仅允许同 host：跨 host 的跳转一律拦截（含重新做 SSRF 校验）
+			if r.URL.Host != originalHost {
+				return errBlockedTarget
 			}
 			if err := checkResendTarget(r.URL, trusted); err != nil {
 				return errBlockedTarget
@@ -145,7 +178,9 @@ func (s *ResendService) ResendFrom(clientIP string, req *models.ResendRequest) (
 	}
 	if lastErr != nil {
 		if errors.Is(lastErr, errBlockedTarget) {
-			return nil, ErrValidation("redirect target not allowed (private/loopback address)")
+			// errBlockedTarget 可能来自拨号层（目标/重定向地址被 SSRF 拦截）
+			// 或 CheckRedirect（跨 host 重定向），统一描述
+			return nil, ErrValidation("target not allowed (private/loopback address or cross-host redirect)")
 		}
 		return nil, ErrBadGateway(fmt.Sprintf("send request after 3 retries: %s", lastErr.Error()))
 	}
@@ -317,16 +352,6 @@ func toHARHeaders(headers map[string]string) []map[string]string {
 // SSRF 防护
 // ========================================
 
-// isLoopbackAddr 判断地址是否为回环地址（127.0.0.0/8、::1、localhost）。
-func isLoopbackAddr(addr string) bool {
-	ip := net.ParseIP(strings.TrimSpace(addr))
-	if ip != nil {
-		return ip.IsLoopback()
-	}
-	// 主机名形式（如 localhost / 本机 hostname）
-	return strings.EqualFold(addr, "localhost") || strings.EqualFold(addr, "::1") || addr == ""
-}
-
 // blockedIP 判断 IP 是否属于禁止重发访问的地址段。
 // 禁止：回环、链路本地（169.254.0.0/16、fe80::/10）、RFC1918 私网、
 // CGNAT（100.64.0.0/10）、组播、未指定地址。
@@ -344,8 +369,32 @@ func blockedIP(ip net.IP) bool {
 	return false
 }
 
-// checkResendTarget 校验重发目标：trusted=true（本机客户端或 --insecure）时放行全部地址。
+// resolveAllowedIP 解析主机名并校验全部结果，返回首个放行的 IP。
+// IP 字面量直接校验；主机名任一解析结果命中禁止段返回 errBlockedTarget。
+// 快速失败校验（checkResendTarget）与拨号层（resendDialContext）共用，
+// 保证两层判定语义一致。
+func resolveAllowedIP(ctx context.Context, host string) (net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if blockedIP(ip) {
+			return nil, errBlockedTarget
+		}
+		return ip, nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("cannot resolve target host %s", host)
+	}
+	for _, r := range ips {
+		if blockedIP(r.IP) {
+			return nil, errBlockedTarget
+		}
+	}
+	return ips[0].IP, nil
+}
+
+// checkResendTarget 校验重发目标：trusted=true（--insecure）时放行全部地址。
 // 非 trusted 时：解析主机名（防 DNS rebinding，任一解析结果命中禁止段即拦截）。
+// 仅用于快速失败与清晰报错——真实安全职责由 resendDialContext 在拨号处承担。
 func checkResendTarget(u *url.URL, trusted bool) error {
 	if trusted {
 		return nil
@@ -354,23 +403,14 @@ func checkResendTarget(u *url.URL, trusted bool) error {
 	if host == "" {
 		return fmt.Errorf("invalid URL: missing host")
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if blockedIP(ip) {
-			return fmt.Errorf("target %s is a private/loopback address, resend blocked", host)
+	if _, err := resolveAllowedIP(context.Background(), host); err != nil {
+		if errors.Is(err, errBlockedTarget) {
+			if net.ParseIP(host) != nil {
+				return fmt.Errorf("target %s is a private/loopback address, resend blocked", host)
+			}
+			return fmt.Errorf("target %s resolves to a private/loopback address, resend blocked", host)
 		}
-		return nil
-	}
-	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
-	if err != nil {
-		return fmt.Errorf("cannot resolve target host %s", host)
-	}
-	if len(ips) == 0 {
-		return fmt.Errorf("cannot resolve target host %s", host)
-	}
-	for _, ip := range ips {
-		if blockedIP(ip.IP) {
-			return fmt.Errorf("target %s resolves to a private/loopback address (%s), resend blocked", host, ip.IP)
-		}
+		return err
 	}
 	return nil
 }

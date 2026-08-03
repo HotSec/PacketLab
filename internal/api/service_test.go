@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"packetlab/internal/models"
@@ -184,7 +187,8 @@ func TestResendServiceUnsupportedScheme(t *testing.T) {
 
 func TestResendServiceUnreachableHost(t *testing.T) {
 	st := newTestStoreForService(t)
-	svc := NewResendService(st, nil, false)
+	// insecure=true：测试目标是回环地址，仅用于验证"不可达→502"
+	svc := NewResendService(st, nil, true)
 
 	_, err := svc.Resend(&models.ResendRequest{
 		Method:  "GET",
@@ -218,7 +222,8 @@ func TestResendServiceSuccessWithMockServer(t *testing.T) {
 	defer mockServer.Close()
 
 	st := newTestStoreForService(t)
-	svc := NewResendService(st, nil, false)
+	// insecure=true：httptest mock 在 127.0.0.1 上
+	svc := NewResendService(st, nil, true)
 
 	result, err := svc.Resend(&models.ResendRequest{
 		Method:  "POST",
@@ -262,7 +267,8 @@ func TestResendServiceDefaultUserAgent(t *testing.T) {
 	defer mockServer.Close()
 
 	st := newTestStoreForService(t)
-	svc := NewResendService(st, nil, false)
+	// insecure=true：httptest mock 在 127.0.0.1 上
+	svc := NewResendService(st, nil, true)
 
 	_, err := svc.Resend(&models.ResendRequest{
 		Method:  "GET",
@@ -288,7 +294,8 @@ func TestResendServiceCustomUserAgent(t *testing.T) {
 	defer mockServer.Close()
 
 	st := newTestStoreForService(t)
-	svc := NewResendService(st, nil, false)
+	// insecure=true：httptest mock 在 127.0.0.1 上
+	svc := NewResendService(st, nil, true)
 
 	_, err := svc.Resend(&models.ResendRequest{
 		Method:  "GET",
@@ -316,7 +323,8 @@ func TestResendServiceBroadcastsToHub(t *testing.T) {
 	go hub.run()
 	defer hub.Stop()
 
-	svc := NewResendService(st, hub, false)
+	// insecure=true：httptest mock 在 127.0.0.1 上
+	svc := NewResendService(st, hub, true)
 
 	_, err := svc.Resend(&models.ResendRequest{
 		Method:  "GET",
@@ -325,6 +333,137 @@ func TestResendServiceBroadcastsToHub(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Resend: %v", err)
+	}
+}
+
+// TestResendServiceBlocksPrivateTargets 验证非 --insecure 时私网/回环目标被拦截：
+// IP 字面量与解析到禁止段的主机名均返回 VALIDATION_ERROR（不发起任何连接）。
+func TestResendServiceBlocksPrivateTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"loopback ip", "http://127.0.0.1:1/secret"},
+		{"private ip", "http://192.168.1.1:80/secret"},
+		{"hostname resolving to loopback", "http://localhost:1/secret"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newTestStoreForService(t)
+			svc := NewResendService(st, nil, false)
+
+			_, err := svc.Resend(&models.ResendRequest{
+				Method:  "GET",
+				URL:     tt.url,
+				Headers: map[string]string{},
+			})
+			if err == nil {
+				t.Fatalf("expected error for %s", tt.url)
+			}
+			appErr, ok := err.(*AppError)
+			if !ok {
+				t.Fatalf("expected *AppError, got %T", err)
+			}
+			if appErr.Code != "VALIDATION_ERROR" {
+				t.Errorf("expected VALIDATION_ERROR, got %s", appErr.Code)
+			}
+			if !strings.Contains(appErr.Message, "blocked") {
+				t.Errorf("expected blocked message, got %q", appErr.Message)
+			}
+		})
+	}
+}
+
+func TestResendServiceBlocksCrossHostRedirect(t *testing.T) {
+	// 服务器 A 302 跳转到另一个 host（服务器 B），必须被拦截（防重定向链跳内网）
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("should-not-be-reached"))
+	}))
+	defer serverB.Close()
+
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, serverB.URL+"/leak", http.StatusFound)
+	}))
+	defer serverA.Close()
+
+	st := newTestStoreForService(t)
+	svc := NewResendService(st, nil, true)
+
+	_, err := svc.Resend(&models.ResendRequest{
+		Method:  "GET",
+		URL:     serverA.URL + "/",
+		Headers: map[string]string{},
+	})
+	if err == nil {
+		t.Fatal("expected error for cross-host redirect")
+	}
+	appErr, ok := err.(*AppError)
+	if !ok {
+		t.Fatalf("expected *AppError, got %T", err)
+	}
+	if appErr.Code != "VALIDATION_ERROR" {
+		t.Errorf("expected VALIDATION_ERROR, got %s", appErr.Code)
+	}
+	if !strings.Contains(appErr.Message, "redirect") {
+		t.Errorf("expected redirect message, got %q", appErr.Message)
+	}
+}
+
+func TestResendServiceAllowsSameHostRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		w.Write([]byte("final-response"))
+	}))
+	defer server.Close()
+
+	st := newTestStoreForService(t)
+	svc := NewResendService(st, nil, true)
+
+	result, err := svc.Resend(&models.ResendRequest{
+		Method:  "GET",
+		URL:     server.URL + "/redirect",
+		Headers: map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resend: %v", err)
+	}
+	if result.StatusCode != 200 {
+		t.Errorf("expected 200 after same-host redirect, got %d", result.StatusCode)
+	}
+	if result.ResBody != "final-response" {
+		t.Errorf("expected final-response, got %q", result.ResBody)
+	}
+}
+
+// TestResendDialContextBlocksPrivate 验证拨号层的 SSRF 校验：非 trusted 时
+// 回环/私网 IP 与解析到禁止段的 hostname 均在连接前被拦截（不发起实际连接）。
+func TestResendDialContextBlocksPrivate(t *testing.T) {
+	dial := resendDialContext(false)
+
+	// 回环 IP 直接命中
+	if _, err := dial(context.Background(), "tcp", "127.0.0.1:1"); !errors.Is(err, errBlockedTarget) {
+		t.Errorf("expected errBlockedTarget for loopback, got %v", err)
+	}
+	// 私网 IP 直接命中
+	if _, err := dial(context.Background(), "tcp", "192.168.1.1:80"); !errors.Is(err, errBlockedTarget) {
+		t.Errorf("expected errBlockedTarget for private, got %v", err)
+	}
+	// hostname 解析到回环 → 拦截（localhost 离线可解析）
+	if _, err := dial(context.Background(), "tcp", "localhost:1"); !errors.Is(err, errBlockedTarget) {
+		t.Errorf("expected errBlockedTarget for localhost, got %v", err)
+	}
+}
+
+// TestResendDialContextTrustedPassesThrough 验证 trusted（--insecure）时不拦截：
+// 回环目标直接进入拨号（127.0.0.1:1 返回连接拒绝而非 blocked）。
+func TestResendDialContextTrustedPassesThrough(t *testing.T) {
+	dial := resendDialContext(true)
+
+	if _, err := dial(context.Background(), "tcp", "127.0.0.1:1"); errors.Is(err, errBlockedTarget) {
+		t.Error("trusted dial must not be blocked")
 	}
 }
 

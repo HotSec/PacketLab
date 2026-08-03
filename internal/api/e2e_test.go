@@ -72,7 +72,8 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	}
 	defer st.Close()
 
-	srv := New(st, nil, false, "", nil)
+	// insecure=true：e2e 的 resend 步骤重发到本机 httptest mock（回环地址）
+	srv := New(st, nil, true, "", nil)
 	handler := srv.Handler()
 	client := newE2EClient(t, handler, "http://localhost:9090")
 
@@ -361,7 +362,8 @@ func TestE2E_InterceptLogsLifecycle(t *testing.T) {
 	st, _ := store.New(dir + "/intercept.db")
 	defer st.Close()
 
-	srv := New(st, nil, false, "", nil)
+	// insecure=true：e2e 的 resend 步骤重发到本机 httptest mock（回环地址）
+	srv := New(st, nil, true, "", nil)
 	client := newE2EClient(t, srv.Handler(), "")
 
 	st.SaveInterceptLog(&models.InterceptLog{
