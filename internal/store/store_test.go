@@ -295,6 +295,54 @@ func TestSaveAndGet(t *testing.T) {
 	}
 }
 
+// TestSaveGetTruncatedFlag 验证截断标记完整落库：Save → Get 往返一致，
+// 默认（未截断）记录不设标记。
+func TestSaveGetTruncatedFlag(t *testing.T) {
+	st := newTestStore(t)
+
+	id, err := st.Save(&models.CapturedRequest{
+		Method:     "GET",
+		URL:        "https://big.example.com/download",
+		Host:       "big.example.com",
+		Path:       "/download",
+		Protocol:   "HTTP/1.1",
+		StatusCode: 200,
+		ResBody:    "truncated-payload",
+		SizeBytes:  1 << 30, // 截断记录报告完整大小
+		Truncated:  true,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := st.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Truncated {
+		t.Error("expected Truncated=true after round-trip")
+	}
+	if got.SizeBytes != 1<<30 {
+		t.Errorf("expected SizeBytes=1<<30, got %d", got.SizeBytes)
+	}
+
+	// 默认值：未设置 Truncated 的记录回读为 false
+	id2, err := st.Save(&models.CapturedRequest{
+		Method: "GET", URL: "https://ok.example.com/", Host: "ok.example.com",
+		Path: "/", Protocol: "HTTP/1.1", StatusCode: 200,
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got2, err := st.Get(id2)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got2.Truncated {
+		t.Error("expected Truncated=false for untruncated record")
+	}
+}
+
 func TestGetNotFound(t *testing.T) {
 	st := newTestStore(t)
 	_, err := st.Get(99999)

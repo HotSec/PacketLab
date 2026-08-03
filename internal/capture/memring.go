@@ -70,20 +70,35 @@ func NewMemRingBuffer(entryCount int) *MemRingBuffer {
 }
 
 // Push 写入一条记录。条数已满或超字节上限时淘汰最老记录。已 Stop 时返回 false。
+// 单条记录超过字节上限时直接丢弃（记入 dropped）——淘汰任何已有记录也装不下它，
+// 若照常写入会让 head==tail 环被误判为空，记录不可见且 PopBatch 永久阻塞。
 func (r *MemRingBuffer) Push(req *models.CapturedRequest) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stopped {
 		return false
 	}
-	next := (r.head + 1) & r.mask
-	if next == r.tail || (req != nil && r.bytes+recordSize(req) > r.maxBytes) {
-		// 满或超字节上限，淘汰最老
-		oldest := r.buf[r.tail]
-		if oldest.size > r.bytes {
-			oldest.size = r.bytes
+	var size uint64
+	if req != nil {
+		size = recordSize(req)
+		if size > r.maxBytes {
+			r.dropped.Add(1)
+			slog.Warn("ring buffer record exceeds byte cap, dropped",
+				"size", size, "max_bytes", r.maxBytes, "url", req.URL)
+			return true
 		}
-		r.bytes -= oldest.size
+	}
+	next := (r.head + 1) & r.mask
+	if next == r.tail || (req != nil && r.bytes+size > r.maxBytes) {
+		// 满或超字节上限，淘汰最老。此处环必非空：字节上限路径要求
+		// bytes>0（size<=maxBytes 已保证），条数路径 next==tail 也要求非空。
+		// 用钳制防账本漂移（如 PopBatch 复位后 bytes 低于过期槽 size）导致下溢。
+		oldest := r.buf[r.tail].size
+		if oldest > r.bytes {
+			r.bytes = 0
+		} else {
+			r.bytes -= oldest
+		}
 		r.tail = (r.tail + 1) & r.mask
 		d := r.dropped.Add(1)
 		if d%100 == 1 {
@@ -96,7 +111,7 @@ func (r *MemRingBuffer) Push(req *models.CapturedRequest) bool {
 	}
 	if req != nil {
 		rec := Record{Req: *req, Timestamp: time.Now()}
-		rec.size = recordSize(req)
+		rec.size = size
 		r.buf[r.head] = rec
 		r.bytes += rec.size
 	} else {
@@ -134,6 +149,7 @@ func (r *MemRingBuffer) PopBatch() []Record {
 		batch[i] = r.buf[idx]
 	}
 	r.tail = r.head
+	r.bytes = 0 // 环已排空，字节账本复位；否则残留值会让后续 Push 误判超限
 	return batch
 }
 

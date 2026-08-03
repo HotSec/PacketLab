@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -344,6 +345,76 @@ func TestInterceptor_ManualMode_PendingBody(t *testing.T) {
 		// OK
 	case <-time.After(2 * time.Second):
 		t.Fatal("Handle did not return after resolve")
+	}
+}
+
+// ========================================
+// Handle — manual modify: headers only must keep original body
+// 回归测试：仅修改 header/method/URL 时不得丢弃请求体
+// ========================================
+
+func TestInterceptor_ManualModify_HeadersOnlyKeepsBody(t *testing.T) {
+	it := NewInterceptor(2*time.Second, nil, nil)
+	it.SetMode("manual")
+
+	req := httptest.NewRequest("POST", "https://httpbin.org/post", strings.NewReader("original-body"))
+	req.Header.Set("Content-Type", "text/plain")
+
+	var resultReq *http.Request
+	var resultResp *http.Response
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resultReq, resultResp = it.Handle(req, nil, func(r *http.Request) {})
+	}()
+
+	// 等待进入待审队列
+	var n *models.PendingRequest
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if p := it.GetPending(); len(p) > 0 {
+			n = &p[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n == nil {
+		t.Fatal("expected pending request")
+	}
+
+	// 仅修改 header（不提供 NewBody）
+	if err := it.Resolve(n.ID, models.InterceptResult{
+		Action:     "modify",
+		RequestID:  n.ID,
+		NewHeaders: map[string]string{"X-Added": "yes"},
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handle did not return after resolve")
+	}
+
+	if resultResp != nil {
+		t.Fatalf("expected forwarded request, got response %d", resultResp.StatusCode)
+	}
+	if resultReq == nil {
+		t.Fatal("expected modified request")
+	}
+	if resultReq.Header.Get("X-Added") != "yes" {
+		t.Errorf("expected X-Added=yes, got %q", resultReq.Header.Get("X-Added"))
+	}
+	if resultReq.Header.Get("Content-Type") != "text/plain" {
+		t.Errorf("expected original header preserved, got %q", resultReq.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(resultReq.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "original-body" {
+		t.Errorf("expected body preserved, got %q", string(body))
 	}
 }
 

@@ -21,6 +21,11 @@ import (
 // 调用方可用 errors.Is(err, store.ErrRequestNotFound) 区分 404 与其他错误。
 var ErrRequestNotFound = errors.New("request not found")
 
+// requestsInsertStmt requests 表 INSERT 语句。saveLocked 与 SaveBatch 共用，
+// 避免两处列清单漂移——增列时必须同时同步这里的列与占位符数量。
+const requestsInsertStmt = `INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events, truncated)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
 // Store 持久化存储
 type Store struct {
 	db   *sql.DB
@@ -182,6 +187,7 @@ func (s *Store) migrate() error {
 		{22, `ALTER TABLE requests ADD COLUMN is_llm INTEGER NOT NULL DEFAULT 0`},
 		{23, `ALTER TABLE requests ADD COLUMN llm_data TEXT NOT NULL DEFAULT ''`},
 		{24, `CREATE INDEX IF NOT EXISTS idx_requests_is_llm ON requests(is_llm)`},
+		{25, `ALTER TABLE requests ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0`},
 	}
 
 	for _, m := range migrations {
@@ -221,8 +227,7 @@ func (s *Store) saveLocked(req *models.CapturedRequest) (int64, error) {
 	}
 
 	result, err := s.db.Exec(
-		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		requestsInsertStmt,
 		req.Method, req.URL, req.Host, req.Path, req.Protocol, boolToInt(req.IsHTTPS),
 		string(reqHeadersJSON), truncateStr(req.ReqBody, 2*1024*1024),
 		req.StatusCode, string(resHeadersJSON),
@@ -230,6 +235,7 @@ func (s *Store) saveLocked(req *models.CapturedRequest) (int64, error) {
 		req.CapturedAt.UTC().Format(time.RFC3339),
 		req.CaptureMode, req.ProcessPID, req.ProcessName,
 		boolToInt(req.IsSSE), truncateStr(req.SSEEvents, 4*1024*1024),
+		boolToInt(req.Truncated),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert request: %w", err)
@@ -254,9 +260,7 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(
-		`INSERT INTO requests (method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(requestsInsertStmt)
 	if err != nil {
 		return nil, fmt.Errorf("prepare: %w", err)
 	}
@@ -277,6 +281,7 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 			req.DurationMs, req.SizeBytes, req.CapturedAt.UTC().Format(time.RFC3339),
 			req.CaptureMode, req.ProcessPID, req.ProcessName,
 			boolToInt(req.IsSSE), truncateStr(req.SSEEvents, 4*1024*1024),
+			boolToInt(req.Truncated),
 		)
 		if err != nil {
 			// 事务已由 defer tx.Rollback() 回滚，前 K-1 个 LastInsertId 均无效，
@@ -360,15 +365,15 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 	var req models.CapturedRequest
 	var reqHeadersJSON, resHeadersJSON, capturedAt string
-	var isSSE int
+	var isSSE, truncated int
 
 	err := s.readDB().QueryRow(
-		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events
+		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events, truncated
 		 FROM requests WHERE id = ?`, id,
 	).Scan(&req.ID, &req.Method, &req.URL, &req.Host, &req.Path, &req.Protocol, &req.IsHTTPS,
 		&reqHeadersJSON, &req.ReqBody, &req.StatusCode, &resHeadersJSON, &req.ResBody,
 		&req.DurationMs, &req.SizeBytes, &capturedAt,
-		&req.CaptureMode, &req.ProcessPID, &req.ProcessName, &isSSE, &req.SSEEvents)
+		&req.CaptureMode, &req.ProcessPID, &req.ProcessName, &isSSE, &req.SSEEvents, &truncated)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("request not found: %d", id)
@@ -381,6 +386,7 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 	json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders)
 	req.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
 	req.IsSSE = isSSE == 1
+	req.Truncated = truncated == 1
 
 	if req.ReqHeaders == nil {
 		req.ReqHeaders = make(map[string]string)
@@ -699,9 +705,9 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 	// 匹配: 精确host / 去端口host / 去端口host:任意端口（如 httpbin.org → 匹配 httpbin.org:443 等）
 	rows, err := s.readDB().Query(
 		`SELECT path, method, COUNT(*) as cnt, status_code
-		 FROM requests WHERE (host = ? OR host = ? OR host LIKE ? || ':%') AND path != ''
+		 FROM requests WHERE (host = ? OR host = ? OR host LIKE (? || ':%') ESCAPE '\\') AND path != ''
 		 GROUP BY path, method, status_code
-		 ORDER BY path, method`, host, hostNoPort, hostNoPort,
+		 ORDER BY path, method`, host, hostNoPort, escapeLike(hostNoPort),
 	)
 	if err != nil {
 		return nil, err
@@ -729,7 +735,7 @@ func (s *Store) GetAPIMap(host string) (*APIMapNode, error) {
 
 	// 加载备注 — 同样匹配 host / hostNoPort / hostNoPort:*
 	notesMap := make(map[string]models.APINote)
-	noteRows, err := s.readDB().Query("SELECT path, method, note, id FROM api_notes WHERE host = ? OR host = ? OR host LIKE ? || ':%'", host, hostNoPort, hostNoPort)
+	noteRows, err := s.readDB().Query("SELECT path, method, note, id FROM api_notes WHERE host = ? OR host = ? OR host LIKE (? || ':%') ESCAPE '\\'", host, hostNoPort, escapeLike(hostNoPort))
 	if err == nil {
 		defer noteRows.Close()
 		for noteRows.Next() {

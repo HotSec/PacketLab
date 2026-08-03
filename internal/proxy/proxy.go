@@ -138,6 +138,7 @@ func (s *Server) setupHandlers() {
 			if len(head) > 0 {
 				captured.ReqBody = string(head)
 			}
+			captured.Truncated = truncated
 		}
 
 		// LLM 检测：检查是否为已知 LLM API 请求
@@ -234,8 +235,14 @@ func (s *Server) setupHandlers() {
 			if readErr != nil {
 				slog.Warn("proxy: read response body failed", "url", captured.URL, "error", readErr)
 			}
-			if len(head) > 0 {
+			if len(head) > 0 || truncated {
+				captured.Truncated = truncated
+				// 截断时 SizeBytes 报告真实总长：优先 Content-Length（chunked 无 CL
+				// 时回退为已读截断长度，旧实现 io.ReadAll 全量读时的语义无法保持）
 				captured.SizeBytes = int64(len(head))
+				if truncated && resp.ContentLength > 0 {
+					captured.SizeBytes = resp.ContentLength
+				}
 				captured.ResBody = string(head)
 			}
 		}

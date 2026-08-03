@@ -125,7 +125,7 @@ function promptApiToken() {
   return false;
 }
 
-async function apiRequest(path, options) {
+async function apiFetch(path, options) {
   const doFetch = () => {
     const opts = options || {};
     opts.headers = Object.assign({}, opts.headers);
@@ -133,23 +133,28 @@ async function apiRequest(path, options) {
     if (token && !opts.headers['Authorization']) opts.headers['Authorization'] = 'Bearer ' + token;
     return fetch(API_BASE + path, opts);
   };
+  let r = await doFetch();
+  // 401 且本地无 token：提示输入后重试一次
+  if (r.status === 401 && !getApiToken()) {
+    if (promptApiToken()) r = await doFetch();
+  }
+  if (!r.ok) {
+    let body = null;
+    try { body = await r.json(); } catch {}
+    const msg = getErrorMessage(body, r.status);
+    showToast('error', msg);
+    const err = new Error(msg);
+    err.code = body?.code || '';
+    err.status = r.status;
+    err.requestId = body?.request_id || '';
+    throw err;
+  }
+  return r;
+}
+
+async function apiRequest(path, options) {
   try {
-    let r = await doFetch();
-    // 401 且本地无 token：提示输入后重试一次
-    if (r.status === 401 && !getApiToken()) {
-      if (promptApiToken()) r = await doFetch();
-    }
-    if (!r.ok) {
-      let body = null;
-      try { body = await r.json(); } catch {}
-      const msg = getErrorMessage(body, r.status);
-      showToast('error', msg);
-      const err = new Error(msg);
-      err.code = body?.code || '';
-      err.status = r.status;
-      err.requestId = body?.request_id || '';
-      throw err;
-    }
+    const r = await apiFetch(path, options);
     if (r.status === 204) return null;
     return r.json();
   } catch (e) {
@@ -1249,8 +1254,10 @@ function formatJSONBody(text) {
 }
 async function exportHAR() {
   try {
-    const data = await apiRequest('/api/export/har?limit=500');
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    // 直接取原始响应（不再 json() 解析再 stringify 二次物化）：
+    // 大导出时避免 响应文本 + 解析对象 + 重序列化 + Blob 的四份内存拷贝
+    const r = await apiFetch('/api/export/har?limit=500');
+    const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'packetlab.har';

@@ -99,6 +99,126 @@ func TestMemRingBuffer_ByteCap(t *testing.T) {
 	}
 }
 
+// TestMemRingBuffer_PopBatchResetsBytes 验证 PopBatch 排空后字节账本复位：
+// 旧实现 bytes 不归零，排空后继续 Push 会因残留字节误判超限而持续误淘汰
+// （且空环淘汰路径会把已排空的 tail 槽计入账本）。
+func TestMemRingBuffer_PopBatchResetsBytes(t *testing.T) {
+	ring := NewMemRingBuffer(8)
+	ring.maxBytes = 6300
+
+	body := strings.Repeat("x", 60) // recordSize = 2108；2 条共 4216 < 6300 不触发淘汰
+	for i := 0; i < 2; i++ {
+		if !ring.Push(&models.CapturedRequest{URL: "http://cap.test", ResBody: body}) {
+			t.Fatal("initial Push returned false")
+		}
+	}
+
+	batch := ring.PopBatch()
+	if len(batch) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(batch))
+	}
+
+	// 排空后再 Push 同尺寸记录：不得触发误淘汰（旧实现 bytes 残留 4216 > maxBytes 时误判）
+	if !ring.Push(&models.CapturedRequest{URL: "http://cap.test", ResBody: body}) {
+		t.Fatal("Push after drain returned false")
+	}
+	if ring.Dropped() != 0 {
+		t.Errorf("Dropped = %d, want 0 (no eviction after drain)", ring.Dropped())
+	}
+	batch = ring.PopBatch()
+	if len(batch) != 1 {
+		t.Errorf("expected exactly 1 surviving record, got %d", len(batch))
+	}
+}
+
+// TestMemRingBuffer_FullRingLedger 验证条数上限淘汰路径的字节账本正确性：
+// 满环（next==tail）淘汰最老记录时必须归还其字节账，否则 bytes 无限膨胀，
+// 会让后续 byte-cap 判定提前触发误淘汰（回归：旧守卫在满环时跳过归还）。
+func TestMemRingBuffer_FullRingLedger(t *testing.T) {
+	ring := NewMemRingBuffer(2)
+	ring.maxBytes = 10 * 1024 * 1024 // 字节上限不参与，专测条数路径
+
+	body := strings.Repeat("x", 60) // recordSize = 2108
+	for i := 0; i < 5; i++ {
+		if !ring.Push(&models.CapturedRequest{URL: "http://full.test", ResBody: body}) {
+			t.Fatal("Push returned false")
+		}
+	}
+
+	// 环容量 2，连续 5 次 Push 后仅 1 条存活，账本应只计 1 条
+	if ring.bytes != 2108 {
+		t.Errorf("bytes = %d, want 2108 (single survivor; ledger must not inflate)", ring.bytes)
+	}
+	if ring.Dropped() != 4 {
+		t.Errorf("Dropped = %d, want 4", ring.Dropped())
+	}
+
+	batch := ring.PopBatch()
+	if len(batch) != 1 {
+		t.Fatalf("expected 1 surviving record, got %d", len(batch))
+	}
+	if ring.bytes != 0 {
+		t.Errorf("bytes = %d after drain, want 0", ring.bytes)
+	}
+}
+
+// TestMemRingBuffer_SingleRecordExceedsByteCap 验证单条记录超过字节上限时直接
+// 丢弃（记入 dropped）：不写入环（避免 head==tail 判空导致记录不可见 + PopBatch
+// 永久阻塞），且排空后再 Push 超大记录同样安全。
+func TestMemRingBuffer_SingleRecordExceedsByteCap(t *testing.T) {
+	ring := NewMemRingBuffer(8)
+	ring.maxBytes = 1000
+
+	body := strings.Repeat("x", 60) // recordSize = 2108 > 1000
+	if !ring.Push(&models.CapturedRequest{URL: "http://oversize.test", ResBody: body}) {
+		t.Fatal("Push returned false")
+	}
+	if ring.Dropped() != 1 {
+		t.Errorf("Dropped = %d, want 1", ring.Dropped())
+	}
+	if ring.bytes != 0 {
+		t.Errorf("bytes = %d, want 0 (oversized record must not be stored)", ring.bytes)
+	}
+	ring.Stop()
+	if batch := ring.PopBatch(); len(batch) != 0 {
+		t.Errorf("expected empty batch, got %d records", len(batch))
+	}
+}
+
+// TestMemRingBuffer_ResizeAndOversize 覆盖真实路径：正常记录先填满再排空
+// （PopBatch 复位账本），随后超大记录被丢弃而不破坏环状态。
+func TestMemRingBuffer_ResizeAndOversize(t *testing.T) {
+	ring := NewMemRingBuffer(4)
+	ring.maxBytes = 6300
+
+	normal := strings.Repeat("x", 60) // 2108
+	for i := 0; i < 2; i++ {
+		ring.Push(&models.CapturedRequest{URL: "http://ok.test", ResBody: normal})
+	}
+	if batch := ring.PopBatch(); len(batch) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(batch))
+	}
+
+	// 排空后超大记录：不得写入、不得下溢、不得阻塞后续正常 Push
+	big := strings.Repeat("y", 9000) // recordSize > 6300
+	if !ring.Push(&models.CapturedRequest{URL: "http://big.test", ResBody: big}) {
+		t.Fatal("oversized Push returned false")
+	}
+	if ring.Dropped() != 1 {
+		t.Errorf("Dropped = %d, want 1", ring.Dropped())
+	}
+	if !ring.Push(&models.CapturedRequest{URL: "http://ok2.test", ResBody: normal}) {
+		t.Fatal("normal Push after oversized returned false")
+	}
+	if ring.Dropped() != 1 {
+		t.Errorf("Dropped = %d, want still 1 (normal record must not be dropped)", ring.Dropped())
+	}
+	batch := ring.PopBatch()
+	if len(batch) != 1 || batch[0].Req.URL != "http://ok2.test" {
+		t.Fatalf("expected the normal record, got %d records", len(batch))
+	}
+}
+
 // TestMemRingBuffer_PopBatchBlocked 验证空缓冲区时 PopBatch 阻塞，
 // 在 Push 后被 cond.Signal 唤醒并返回该条记录。
 func TestMemRingBuffer_PopBatchBlocked(t *testing.T) {

@@ -18,6 +18,7 @@ type CapturedRequest struct {
 	ResBody     string            `json:"res_body"`
 	DurationMs  int64             `json:"duration_ms"`
 	SizeBytes   int64             `json:"size_bytes"`
+	Truncated   bool              `json:"truncated,omitempty"` // body 是否因超过存储上限被截断
 	CapturedAt  time.Time         `json:"captured_at"`
 	CaptureMode string            `json:"capture_mode,omitempty"` // "proxy" | "nic"
 	ProcessPID  int               `json:"process_pid,omitempty"`

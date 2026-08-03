@@ -257,7 +257,8 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			modified := r.Method != "" || r.URL != "" || r.NewBody != "" || len(r.NewHeaders) > 0
 			if modified {
 				// 构建新请求：未提供的字段沿用原始请求（修复 http.NewRequest 空头导致
-				// 丢失全部原始请求头的问题）；body 仅在新内容非空时替换。
+				// 丢失全部原始请求头的问题）；body 仅在提供了新内容时替换，
+				// 否则沿用原始 body（仅改 header/method/URL 时不能丢请求体）。
 				method := req.Method
 				target := req.URL.String()
 				if r.Method != "" {
@@ -266,7 +267,7 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 				if r.URL != "" {
 					target = r.URL
 				}
-				var bodyReader io.Reader
+				bodyReader := io.Reader(req.Body)
 				if r.NewBody != "" {
 					bodyReader = strings.NewReader(r.NewBody)
 				}
