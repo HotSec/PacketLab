@@ -3,10 +3,12 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +38,37 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// authMiddleware 可选 Bearer token 鉴权。
+// apiToken 为空时不启用鉴权（兼容默认配置）。
+// /health、/ready 始终免鉴权；token 可经 Authorization: Bearer <token> 头
+// 或 ?token=<token> 查询参数传递（后者用于浏览器 WebSocket 握手）。
+func authMiddleware(apiToken string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if apiToken == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if r.URL.Path == "/health" || r.URL.Path == "/ready" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			token := r.Header.Get("Authorization")
+			if strings.HasPrefix(token, "Bearer ") {
+				token = strings.TrimPrefix(token, "Bearer ")
+			}
+			if token == "" {
+				token = r.URL.Query().Get("token")
+			}
+			if subtle.ConstantTimeCompare([]byte(token), []byte(apiToken)) != 1 {
+				writeAppError(w, ErrUnauthorized())
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func corsMiddleware(allowOrigins []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,11 +76,14 @@ func corsMiddleware(allowOrigins []string) func(http.Handler) http.Handler {
 			if isAllowedOrigin(origin, allowOrigins) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
+				// 仅当 Origin 被允许时才声明 credentials，避免浏览器对未授权
+				// 响应中出现 Access-Control-Allow-Credentials 而拒绝
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+			// Authorization：--api-token 鉴权时前端所有请求携带 Bearer token，必须显式放行
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID, Authorization")
 			w.Header().Set("Access-Control-Max-Age", "86400")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)

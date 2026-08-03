@@ -21,6 +21,7 @@ type BatchWriter struct {
 	interval  time.Duration
 	workers   int
 	stopped   int32 // atomic; 非 0 表示已 Stop，Enqueue 走 sync 路径避免 channel 滞留
+	enqMu     sync.Mutex // 串行化 Enqueue 与 Stop，消除“检查后 Send 时 channel 已无人消费”竞态
 }
 
 // NewBatchWriter 创建批量写入器
@@ -51,7 +52,10 @@ func NewBatchWriter(st *store.Store, onSave func(req *models.CapturedRequest), b
 
 // Enqueue 入队一条请求
 func (bw *BatchWriter) Enqueue(req *models.CapturedRequest) {
-	// Stop 后 worker 已退出，channel 无人消费；走 sync 路径避免 req 滞留 channel
+	// enqMu 与 Stop 互斥：Stop 期间/之后的 Enqueue 一律走 sync 路径，
+	// 避免竞态（检查 stopped 后 Stop 完成，Send 落入无人消费的 channel）。
+	bw.enqMu.Lock()
+	defer bw.enqMu.Unlock()
 	if atomic.LoadInt32(&bw.stopped) != 0 {
 		bw.saveSync(req, "stopped")
 		return
@@ -79,6 +83,10 @@ func (bw *BatchWriter) saveSync(req *models.CapturedRequest, reason string) {
 
 // Stop 停止批量写入器
 func (bw *BatchWriter) Stop() {
+	// 先拿 enqMu：等待在途 Enqueue 完成，且此后的 Enqueue 全部走 sync 路径，
+	// 不会与 drain 竞争 channel。
+	bw.enqMu.Lock()
+	defer bw.enqMu.Unlock()
 	// CAS 防止重复 Stop；stopped=1 后 Enqueue 走 sync 路径，避免与 drain 竞争 channel
 	if !atomic.CompareAndSwapInt32(&bw.stopped, 0, 1) {
 		return

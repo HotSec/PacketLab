@@ -6,11 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"packetlab/internal/capture"
@@ -48,14 +50,22 @@ type Server struct {
 	harSvc        *HARService
 	rateLimiter   *rateLimiter
 	allowOrigins  []string
+	apiToken      string
 	upgrader      websocket.Upgrader
 	mu            sync.RWMutex
 	captureEngine captureEngineInterface
 	interceptor   interceptorInterface
 	captureMu     sync.Mutex
+	proxyRunning  atomic.Bool
 }
 
-func New(st *store.Store, frontendHandler http.Handler, insecure bool, allowOrigins []string) *Server {
+// SetProxyRunning 由 main 在代理启动后（或 --no-proxy / 启动失败时）设置状态，
+// /api/proxy/status 据此返回真实运行状态，不再硬编码 running=true。
+func (s *Server) SetProxyRunning(running bool) {
+	s.proxyRunning.Store(running)
+}
+
+func New(st *store.Store, frontendHandler http.Handler, insecure bool, apiToken string, allowOrigins []string) *Server {
 	hub := newWSHub()
 	go hub.run()
 
@@ -67,6 +77,7 @@ func New(st *store.Store, frontendHandler http.Handler, insecure bool, allowOrig
 		harSvc:       NewHARService(st),
 		rateLimiter:  newRateLimiter(120, time.Minute),
 		allowOrigins: allowOrigins,
+		apiToken:     apiToken,
 	}
 	s.upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -130,7 +141,8 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) Handler() http.Handler {
-	h := securityHeadersMiddleware(corsMiddleware(s.allowOrigins)(recoveryMiddleware(requestIDMiddleware(requestIDInjectorMiddleware(s.mux)))))
+	h := securityHeadersMiddleware(corsMiddleware(s.allowOrigins)(
+		recoveryMiddleware(requestIDMiddleware(requestIDInjectorMiddleware(authMiddleware(s.apiToken)(s.mux))))))
 	return rateLimitMiddleware(s.rateLimiter)(h)
 }
 
@@ -362,7 +374,14 @@ func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.resendSvc.Resend(&body)
+	clientIP := ""
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		clientIP = host
+	} else {
+		clientIP = r.RemoteAddr
+	}
+
+	result, err := s.resendSvc.ResendFrom(clientIP, &body)
 	if err != nil {
 		if appErr, ok := err.(*AppError); ok {
 			slog.Warn("resend failed", "url", body.URL, "error", appErr.Message, "request_id", RequestIDFromContext(r.Context()))
@@ -413,7 +432,7 @@ func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"running": true,
+		"running": s.proxyRunning.Load(),
 		"mode":    "proxy",
 	})
 }
@@ -852,8 +871,10 @@ func (s *Server) handleExportHAR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	har, err := s.harSvc.Export(limit)
-	if err != nil {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", "attachment; filename=packetlab.har")
+	// 流式导出：逐条写入，避免数千条完整记录一次性载入内存
+	if err := s.harSvc.ExportTo(w, limit); err != nil {
 		if appErr, ok := err.(*AppError); ok {
 			writeAppError(w, appErr)
 		} else {
@@ -861,10 +882,6 @@ func (s *Server) handleExportHAR(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", "attachment; filename=packetlab.har")
-	json.NewEncoder(w).Encode(har)
 }
 
 // ========================================

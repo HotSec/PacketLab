@@ -20,6 +20,8 @@ type MemRingBuffer struct {
 	buf        []Record
 	head, tail uint64
 	mask       uint64
+	bytes      uint64 // 当前驻留记录的估算字节数（条数 + 字节双上限）
+	maxBytes   uint64 // 字节上限，超出时淘汰最老记录
 	dropped    atomic.Uint64
 	stopped    bool
 }
@@ -27,6 +29,20 @@ type MemRingBuffer struct {
 type Record struct {
 	Req       models.CapturedRequest
 	Timestamp time.Time
+	size      uint64 // 估算驻留字节数（Push 时计算一次）
+}
+
+// maxRingBytes 环形缓冲区总字节上限：条数上限（默认 262144）在写入方停滞、
+// 每条带大 body（代理路径单条可达 ~6MB）时理论驻留可达数百 GB，
+// 字节上限把最坏情况压在 512MB。
+// Byte ceiling for the ring: with the entry cap alone (default 262144) and
+// large bodies (proxy path up to ~6MB each), a stalled writer could pin
+// hundreds of GB; the byte ceiling bounds worst-case residency at 512MB.
+const maxRingBytes = 512 * 1024 * 1024
+
+// recordSize 估算单条记录的驻留字节数：body + SSE 事件 + 头/切片固定开销。
+func recordSize(req *models.CapturedRequest) uint64 {
+	return uint64(len(req.ReqBody)+len(req.ResBody)+len(req.SSEEvents)) + 2048
 }
 
 // NewMemRingBuffer 创建环形缓冲区。size 向上取 2 的幂。
@@ -45,14 +61,15 @@ func NewMemRingBuffer(entryCount int) *MemRingBuffer {
 		size <<= 1
 	}
 	r := &MemRingBuffer{
-		buf:  make([]Record, size),
-		mask: uint64(size - 1),
+		buf:      make([]Record, size),
+		mask:     uint64(size - 1),
+		maxBytes: maxRingBytes,
 	}
 	r.cv = sync.NewCond(&r.mu)
 	return r
 }
 
-// Push 写入一条记录。缓冲区满时淘汰最老记录。已 Stop 时返回 false。
+// Push 写入一条记录。条数已满或超字节上限时淘汰最老记录。已 Stop 时返回 false。
 func (r *MemRingBuffer) Push(req *models.CapturedRequest) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -60,8 +77,13 @@ func (r *MemRingBuffer) Push(req *models.CapturedRequest) bool {
 		return false
 	}
 	next := (r.head + 1) & r.mask
-	if next == r.tail {
-		// 满，淘汰最老
+	if next == r.tail || (req != nil && r.bytes+recordSize(req) > r.maxBytes) {
+		// 满或超字节上限，淘汰最老
+		oldest := r.buf[r.tail]
+		if oldest.size > r.bytes {
+			oldest.size = r.bytes
+		}
+		r.bytes -= oldest.size
 		r.tail = (r.tail + 1) & r.mask
 		d := r.dropped.Add(1)
 		if d%100 == 1 {
@@ -73,7 +95,10 @@ func (r *MemRingBuffer) Push(req *models.CapturedRequest) bool {
 		}
 	}
 	if req != nil {
-		r.buf[r.head] = Record{Req: *req, Timestamp: time.Now()}
+		rec := Record{Req: *req, Timestamp: time.Now()}
+		rec.size = recordSize(req)
+		r.buf[r.head] = rec
+		r.bytes += rec.size
 	} else {
 		r.buf[r.head] = Record{Timestamp: time.Now()}
 	}

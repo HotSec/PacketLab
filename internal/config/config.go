@@ -11,6 +11,8 @@ import (
 type Config struct {
 	ProxyPort      int
 	APIPort        int
+	APIHost        string // API/Web 监听地址（默认 127.0.0.1，仅本机可访问）
+	APIToken       string // API/Web 可选鉴权 token（空 = 不启用鉴权）
 	DBPath         string
 	NoProxy        bool
 	NoMitm         bool
@@ -30,6 +32,7 @@ type Config struct {
 	InterceptPendingTimeout time.Duration // 拦截器 pending 请求超时（默认 15s，范围 1s~10m）
 	CleanupRetentionDays int           // 自动清理：保留 N 天的请求数据（0=禁用自动清理，默认 7）
 	CleanupInterval      time.Duration // 自动清理：执行间隔（默认 6h）
+	LLMEndpoints []string // 自定义 OpenAI 兼容 LLM 端点（"host[=显示名]" 格式），用于 LLM 识别
 }
 
 // Default validated default values
@@ -50,10 +53,12 @@ const (
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
 func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
+	apiHost, apiToken string,
 	capture bool, captureIface, captureBPF string, captureNoProc bool,
 	streamTimeoutMin, maxReqBodyKB, maxResBodyKB, captureRingEntries, maxStreams int,
 	interceptPendingTimeout time.Duration,
-	cleanupRetentionDays int, cleanupInterval time.Duration) (*Config, error) {
+	cleanupRetentionDays int, cleanupInterval time.Duration,
+	llmEndpoints []string) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("config: cannot determine home directory: %w", err)
@@ -62,6 +67,10 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 
 	if dbPath == "" {
 		dbPath = filepath.Join(baseDir, "data.db")
+	}
+	if apiHost == "" {
+		// 默认仅绑定回环地址：API/Web 无鉴权时不对局域网暴露
+		apiHost = "127.0.0.1"
 	}
 	if proxyPort <= 0 || proxyPort > 65535 {
 		return nil, fmt.Errorf("config: invalid proxy-port %d (must be 1-65535)", proxyPort)
@@ -148,6 +157,8 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	cfg := &Config{
 		ProxyPort:              proxyPort,
 		APIPort:                apiPort,
+		APIHost:                apiHost,
+		APIToken:               apiToken,
 		DBPath:                 dbPath,
 		NoProxy:                noProxy,
 		NoMitm:                 noMitm,
@@ -166,11 +177,12 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		InterceptPendingTimeout: interceptPendingTimeout,
 		CleanupRetentionDays:   cleanupRetentionDays,
 		CleanupInterval:        cleanupInterval,
+		LLMEndpoints:           llmEndpoints,
 	}
 	return cfg, nil
 }
 
 // Addr formats a port into a listen address string
 func (c *Config) ProxyAddr() string  { return fmt.Sprintf(":%d", c.ProxyPort) }
-func (c *Config) APIAddr() string    { return fmt.Sprintf(":%d", c.APIPort) }
+func (c *Config) APIAddr() string    { return fmt.Sprintf("%s:%d", c.APIHost, c.APIPort) }
 func (c *Config) OrgName() string    { return defaultOrg }

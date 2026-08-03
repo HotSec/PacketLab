@@ -66,6 +66,37 @@ func TestLookupPricing_CaseInsensitive(t *testing.T) {
 func TestEstimateCost_ZeroTokens(t *testing.T) {
 	cost := EstimateCost("gpt-4o", 0, 0)
 	if cost != 0 {
-		t.Errorf("zero tokens cost = %v, want 0", cost)
+		t.Errorf("cost = %f, want 0", cost)
+	}
+}
+
+// TestLookupPricing_Boundary 验证前缀边界匹配：
+// "gpt-4" 不得误匹配 "gpt-4.1"/"gpt-4.5"（未覆盖模型应返回 0 成本而非 gpt-4 高价）；
+// '-' 分隔的版本后缀仍应正常匹配。
+func TestLookupPricing_Boundary(t *testing.T) {
+	if p := LookupPricing("gpt-4.1"); p.InputPerMTokens != 0 || p.OutputPerMTokens != 0 {
+		t.Errorf("gpt-4.1 should have zero pricing, got %+v", p)
+	}
+	if p := LookupPricing("gpt-4.5"); p.InputPerMTokens != 0 || p.OutputPerMTokens != 0 {
+		t.Errorf("gpt-4.5 should have zero pricing, got %+v", p)
+	}
+	// 版本日期经 '-' 连接，属于同一模型家族，应正常匹配
+	if p := LookupPricing("gpt-4-turbo-2024-04-09"); p.InputPerMTokens != 10.00 {
+		t.Errorf("gpt-4-turbo-2024-04-09 should match gpt-4-turbo, got %+v", p)
+	}
+	if p := LookupPricing("gemini-2.5-flash-001"); p.InputPerMTokens != 0.30 {
+		t.Errorf("gemini-2.5-flash-001 should match gemini-2.5-flash, got %+v", p)
+	}
+}
+
+// TestEstimateCost_Gemini25 验证 gemini-2.5 系列（2025+ 主流模型）定价可查。
+func TestEstimateCost_Gemini25(t *testing.T) {
+	cost := EstimateCost("gemini-2.5-flash", 1_000_000, 1_000_000)
+	want := 0.30 + 2.50
+	if cost != want {
+		t.Errorf("cost = %f, want %f", cost, want)
+	}
+	if cost := EstimateCost("gemini-2.5-pro", 1_000_000, 1_000_000); cost != 11.25 {
+		t.Errorf("gemini-2.5-pro cost = %f, want 11.25", cost)
 	}
 }

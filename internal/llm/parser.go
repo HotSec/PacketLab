@@ -64,6 +64,33 @@ type ResponseInfo struct {
 
 // ── Request parsing ───────────────────────────────────────────
 
+// GeminiModelFromPath extracts the model name from a Gemini API URL path.
+// Gemini 把模型名放在 URL 路径中而非请求体（如
+// "/v1beta/models/gemini-2.5-flash:generateContent"），aiplatform 路径形如
+// "/v1beta1/projects/p/locations/l/publishers/google/models/gemini-2.5-flash:predict"，
+// 两者都含 "/models/<model>:"。取 "/models/" 之后到 ':'/ '/'/'?'/ '#' 之前的部分。
+// Gemini carries the model in the URL path, not the request body.
+// Returns "" when the path does not contain a model segment.
+func GeminiModelFromPath(path string) string {
+	marker := "/models/"
+	i := strings.Index(path, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := path[i+len(marker):]
+	end := len(rest)
+	for j := 0; j < len(rest); j++ {
+		switch rest[j] {
+		case ':', '/', '?', '#':
+			end = j
+		}
+		if end != len(rest) {
+			break
+		}
+	}
+	return rest[:end]
+}
+
 // ParseRequest extracts LLM request info from a JSON body.
 func ParseRequest(provider Provider, body []byte) *RequestInfo {
 	if len(body) == 0 {

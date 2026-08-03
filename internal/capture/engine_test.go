@@ -840,6 +840,11 @@ func TestEngine_GetMetrics_IncludesStreamsEvicted(t *testing.T) {
 // Build a IPv4+TCP gopacket.Packet for testing Assemble. Serializes layers to
 // raw bytes and decodes them back so Layer() lookups work as expected.
 func newTestTCPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte, fin, rst bool) gopacket.Packet {
+	return newTestTCPPacketFlags(srcIP, dstIP, srcPort, dstPort, payload, fin, rst, false, false)
+}
+
+// newTestTCPPacketFlags 同 newTestTCPPacket，额外支持 SYN/ACK 标志位。
+func newTestTCPPacketFlags(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte, fin, rst, syn, ack bool) gopacket.Packet {
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{ComputeChecksums: true, FixLengths: true}
 
@@ -850,6 +855,8 @@ func newTestTCPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []by
 		Window:  65535,
 		FIN:     fin,
 		RST:     rst,
+		SYN:     syn,
+		ACK:     ack,
 	}
 	ip := &layers.IPv4{
 		Version:  4,
@@ -987,5 +994,116 @@ func TestEngine_Assemble_EvictsAndCounts(t *testing.T) {
 	}
 	if !foundEvictedReq {
 		t.Errorf("evicted stream's request (http://evict.test/api/evict) not found in DB; flushEvictedStream did not emit pendingReq")
+	}
+}
+
+// TestEngine_Assemble_SYNDirection 验证 SYN 握手指征修正数据方向：
+// 客户端 40000 → 服务端 50000（双方端口都不像服务端口且 src<dst），
+// 端口启发式会误判为 dst 是客户端；SYN 包（发起方即客户端）应把
+// clientPort 修正为 40000，请求数据进 clientBuf、响应数据进 serverBuf。
+func TestEngine_Assemble_SYNDirection(t *testing.T) {
+	e, _ := newTestEngine(t)
+	pool := NewTCPStreamPool(e)
+	a := NewAssembler(pool)
+
+	clientIP := net.ParseIP("10.0.0.1")
+	serverIP := net.ParseIP("10.0.0.2")
+
+	a.Assemble(newTestTCPPacketFlags(clientIP, serverIP, 40000, 50000, nil, false, false, true, false))
+	a.Assemble(newTestTCPPacketFlags(clientIP, serverIP, 40000, 50000,
+		[]byte("GET /api/dir HTTP/1.1\r\nHost: dir.test\r\nUser-Agent: t\r\n\r\n"), false, false, false, false))
+	a.Assemble(newTestTCPPacketFlags(serverIP, clientIP, 50000, 40000,
+		[]byte("HTTP/1.1 200 OK\r\n\r\npartial-body"), false, false, false, false))
+
+	if len(a.streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(a.streams))
+	}
+	for _, s := range a.streams {
+		if s.clientPort != 40000 {
+			t.Errorf("clientPort = %d, want 40000 (SYN sender)", s.clientPort)
+		}
+		if s.pendingReq == nil {
+			t.Fatal("expected pendingReq from client request")
+		}
+		if s.pendingReq.URL != "http://dir.test/api/dir" {
+			t.Errorf("URL = %q, want http://dir.test/api/dir", s.pendingReq.URL)
+		}
+		if len(s.serverBuf) == 0 {
+			t.Error("server response should be buffered in serverBuf")
+		}
+	}
+	e.writer.Stop()
+}
+
+// TestEngine_Assemble_SYNACKMidCapture 验证抓包中途开始（未见 SYN，首个包是
+// SYN-ACK）时方向仍被修正：SYN-ACK 的接收方才是客户端。
+func TestEngine_Assemble_SYNACKMidCapture(t *testing.T) {
+	e, _ := newTestEngine(t)
+	pool := NewTCPStreamPool(e)
+	a := NewAssembler(pool)
+
+	clientIP := net.ParseIP("10.0.0.1")
+	serverIP := net.ParseIP("10.0.0.2")
+
+	a.Assemble(newTestTCPPacketFlags(serverIP, clientIP, 50000, 40000, nil, false, false, true, true))
+	a.Assemble(newTestTCPPacketFlags(clientIP, serverIP, 40000, 50000,
+		[]byte("GET /api/synack HTTP/1.1\r\nHost: synack.test\r\nUser-Agent: t\r\n\r\n"), false, false, false, false))
+
+	if len(a.streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(a.streams))
+	}
+	for _, s := range a.streams {
+		if s.clientPort != 40000 {
+			t.Errorf("clientPort = %d, want 40000 (SYN-ACK receiver)", s.clientPort)
+		}
+		if s.pendingReq == nil || s.pendingReq.URL != "http://synack.test/api/synack" {
+			t.Errorf("request not parsed from client direction: %+v", s.pendingReq)
+		}
+	}
+	e.writer.Stop()
+}
+
+// TestParseContentLength_LF 验证纯 LF 行尾的响应头也能解析出 Content-Length
+// （旧实现只按 \r\n 切分，LF-only 头整块当一行导致永远返回 -1）。
+func TestParseContentLength_LF(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{"crlf", "HTTP/1.1 200 OK\r\nContent-Length: 42\r\nX: y\r\n\r\n", 42},
+		{"lf only", "HTTP/1.1 200 OK\nContent-Length: 7\nX: y\n\n", 7},
+		{"mixed endings", "HTTP/1.1 200 OK\r\nContent-Length: 13\nX: y\r\n\r\n", 13},
+		{"no content length", "HTTP/1.1 200 OK\r\nX: y\r\n\r\n", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseContentLength([]byte(tt.header)); got != tt.want {
+				t.Errorf("parseContentLength() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatHostForURL 验证 IPv6 Host 在 URL 中加方括号（裸 IPv6 URL 非法）。
+func TestFormatHostForURL(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"example.com", "example.com"},
+		{"example.com:8080", "example.com:8080"},
+		{"127.0.0.1:8080", "127.0.0.1:8080"},
+		{"::1", "[::1]"},
+		{"fe80::1", "[fe80::1]"},
+		{"2001:db8::1", "[2001:db8::1]"},
+		{"fe80::1:8080", "[fe80::1]:8080"},
+		{"[::1]:8080", "[::1]:8080"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := formatHostForURL(tt.in); got != tt.want {
+			t.Errorf("formatHostForURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

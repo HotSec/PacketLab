@@ -38,7 +38,11 @@ type pendingReq struct {
 	result    chan models.InterceptResult
 	timer     *time.Timer
 	createdAt time.Time
+	preview   string // 进入待审队列时快照的 body 预览（GetPending/通知共用，避免并发读流）
 }
+
+// maxPending 待审队列上限：超过后新请求直接拒绝（防止无人审批时无限堆积）。
+const maxPending = 512
 
 // NewInterceptor 创建拦截控制器。
 // timeout <= 0 时使用默认值 15s。建议通过 --intercept-pending-timeout CLI 配置。
@@ -119,7 +123,7 @@ func (it *Interceptor) GetPending() []models.PendingRequest {
 			Host:      p.req.URL.Host,
 			Path:      p.req.URL.Path,
 			Headers:   api.FlattenHeaders(p.req.Header),
-			Body:      readBody(p.req),
+			Body:      p.preview,
 			Timestamp: p.createdAt,
 			Age:       time.Since(p.createdAt).Seconds(),
 		})
@@ -203,12 +207,27 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	timer := time.NewTimer(it.timeout)
 
 	it.mu.Lock()
+	if len(it.pending) >= maxPending {
+		it.mu.Unlock()
+		timer.Stop()
+		it.writeLog(&models.InterceptLog{
+			Action:        "drop",
+			RequestURL:    req.URL.String(),
+			RequestMethod: req.Method,
+			RequestHost:   req.URL.Host,
+			RulePattern:   "",
+			Mode:          "manual",
+		})
+		return nil, goproxy.NewResponse(req, "text/plain", 429,
+			"PacketLab: pending queue full, request dropped")
+	}
 	pr := &pendingReq{
 		req:       req,
 		id:        id,
 		result:    ch,
 		createdAt: time.Now(),
 		timer:     timer,
+		preview:   readBody(req),
 	}
 	it.pending[id] = pr
 	it.mu.Unlock()
@@ -222,7 +241,7 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			Host:      req.URL.Host,
 			Path:      req.URL.Path,
 			Headers:   api.FlattenHeaders(req.Header),
-			Body:      readBody(req),
+			Body:      pr.preview,
 			Timestamp: pr.createdAt,
 		})
 	}
@@ -235,12 +254,28 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 		timer.Stop()
 		switch r.Action {
 		case "allow", "modify":
-			// 有修改内容时构建新请求，否则原样转发
-			if r.Method != "" || r.URL != "" {
-				newReq, err := http.NewRequest(r.Method, r.URL, strings.NewReader(r.NewBody))
+			modified := r.Method != "" || r.URL != "" || r.NewBody != "" || len(r.NewHeaders) > 0
+			if modified {
+				// 构建新请求：未提供的字段沿用原始请求（修复 http.NewRequest 空头导致
+				// 丢失全部原始请求头的问题）；body 仅在新内容非空时替换。
+				method := req.Method
+				target := req.URL.String()
+				if r.Method != "" {
+					method = r.Method
+				}
+				if r.URL != "" {
+					target = r.URL
+				}
+				var bodyReader io.Reader
+				if r.NewBody != "" {
+					bodyReader = strings.NewReader(r.NewBody)
+				}
+				newReq, err := http.NewRequest(method, target, bodyReader)
 				if err != nil {
 					return nil, goproxy.NewResponse(req, "text/plain", 400, "Invalid modified request")
 				}
+				// 保留原始请求的全部 header，再覆盖用户修改项
+				newReq.Header = req.Header.Clone()
 				for k, v := range r.NewHeaders {
 					newReq.Header.Set(k, v)
 				}
@@ -349,6 +384,11 @@ func matchRule(rule models.InterceptRule, method, host, path string) bool {
 	return false
 }
 
+// readBody 读取请求体预览（最多 maxBodyPreview 字节），不破坏转发流。
+// 优先 GetBody（可重复读）；无 GetBody 时用 ReadFull 预览后把已读部分拼回
+// MultiReader 恢复完整流（修复旧实现 64KB 截断导致转发丢数据的问题）。
+const maxBodyPreview = 64 * 1024
+
 func readBody(req *http.Request) string {
 	if req.Body == nil {
 		return ""
@@ -357,23 +397,20 @@ func readBody(req *http.Request) string {
 	if req.GetBody != nil {
 		if body, err := req.GetBody(); err == nil {
 			defer body.Close()
-			raw, err := io.ReadAll(io.LimitReader(body, 64*1024))
+			raw, err := io.ReadAll(io.LimitReader(body, maxBodyPreview))
 			if err == nil && len(raw) > 0 {
 				return string(raw)
 			}
 		}
 	}
-	// fallback：直接读 req.Body（会消费，仅在未走 GetBody 路径时，例如直接构造 req 调用 interceptor）
-	raw, err := io.ReadAll(io.LimitReader(req.Body, 64*1024))
-	if err != nil || len(raw) == 0 {
+	// fallback：预览后恢复完整流（不消费、不截断转发数据）
+	raw := make([]byte, maxBodyPreview)
+	n, _ := io.ReadFull(req.Body, raw)
+	if n == 0 {
 		return ""
 	}
-	// 缓存为 GetBody 并恢复 req.Body，使后续 readBody 调用（GetPending 会再次读取）
-	// 与请求转发都能重复读取 body
-	bodyBytes := raw
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(bodyBytes)), nil
-	}
-	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	return string(raw)
+	preview := raw[:n]
+	// 将已读部分拼回流首，恢复完整请求体
+	req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(preview), req.Body))
+	return string(preview)
 }

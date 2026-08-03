@@ -47,7 +47,7 @@ func TestProxy_ForwardsFullRequestBody(t *testing.T) {
 	}
 	defer st.Close()
 
-	s := New(0, st, nil, nil, nil, nil, 2, 64)
+	s := New(0, st, nil, nil, nil, nil, 2, 64, false)
 	// 用 httptest.NewServer 直接包裹 goproxy 处理器，省去端口管理
 	proxySrv := httptest.NewServer(s.proxy)
 	defer proxySrv.Close()
@@ -116,7 +116,7 @@ func TestProxy_ForwardsFullResponseBody(t *testing.T) {
 	}
 	defer st.Close()
 
-	s := New(0, st, nil, nil, nil, nil, 64, 4)
+	s := New(0, st, nil, nil, nil, nil, 64, 4, false)
 	proxySrv := httptest.NewServer(s.proxy)
 	defer proxySrv.Close()
 	defer s.Stop()

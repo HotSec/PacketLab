@@ -144,6 +144,13 @@ func (e *Engine) SetMaxStreams(n int) {
 	}
 }
 
+// procTableBuildMu 串行化 buildFn（lsof/netstat 外部命令，最坏可阻塞数秒）执行：
+// 大量新 TCP 流同时 cache miss 时只启动一个外部命令，其余等待后复用结果，
+// 避免每流各 fork 一个 lsof 进程并长时间持锁（流锁/assembler 锁）。
+// Serializes buildFn (lsof/netstat, may block seconds): when many new flows miss
+// the cache at once, only one external command runs and the rest reuse its result.
+var procTableBuildMu sync.Mutex
+
 // resolveProcessCached 通用的进程解析缓存逻辑（TTL + 容量上限淘汰）。
 // buildFn 由各平台实现：macOS/Linux 用 lsof，Windows 用 netstat。
 func (e *Engine) resolveProcessCached(srcIP string, srcPort uint16, buildFn func() map[string]*models.ProcessInfo) *models.ProcessInfo {
@@ -157,6 +164,17 @@ func (e *Engine) resolveProcessCached(srcIP string, srcPort uint16, buildFn func
 			e.procCacheMu.RUnlock()
 			return p
 		}
+	}
+	e.procCacheMu.RUnlock()
+
+	// 串行化外部命令执行；等待期间其他 goroutine 可能已填充缓存，先复查
+	procTableBuildMu.Lock()
+	defer procTableBuildMu.Unlock()
+	e.procCacheMu.RLock()
+	if ts, ok := e.procCacheTS[key]; ok && now.Sub(ts) < e.procCacheTTL {
+		p := e.procCache[key]
+		e.procCacheMu.RUnlock()
+		return p
 	}
 	e.procCacheMu.RUnlock()
 
@@ -561,7 +579,8 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 		keyA, keyB = dstIPStr, srcIPStr
 		portA, portB = dstPort, srcPort
 	}
-	streamKey := fmt.Sprintf("%s:%d-%s:%d", keyA, portA, keyB, portB)
+	// 分隔符用 # 而非 - / :：IPv6 地址本身含 :，旧格式 key 会发生解析歧义
+	streamKey := fmt.Sprintf("%s#%d#%s#%d", keyA, portA, keyB, portB)
 
 	var evictedStream *TCPStream
 	a.mu.Lock()
@@ -597,6 +616,23 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 	// 锁外 flush 被淘汰流的残留数据（pendingReq / SSE 事件）。
 	// Flush the evicted stream's residual data outside a.mu.
 	flushEvictedStream(evictedStream)
+
+	// SYN 方向修正：TCP 三次握手中 SYN 的发起方才是客户端，端口启发式
+	// 在客户端/服务端都无标准端口（如自定义端口服务）时会误判；
+	// 抓包中途开始（未见 SYN）时 SYN-ACK 的接收方是客户端。
+	// SYN fixes direction from the handshake: the SYN sender is the client.
+	// The port heuristic can misjudge when neither side uses a standard port.
+	// When capture starts mid-connection (no SYN seen), the SYN-ACK
+	// receiver is the client.
+	if tcp.SYN && !tcp.ACK {
+		stream.clientPort = srcPort
+		isClientToServer = true
+	} else if tcp.SYN && tcp.ACK && stream.clientPort != 0 {
+		stream.clientPort = dstPort
+		isClientToServer = false
+	} else if stream.clientPort != 0 {
+		isClientToServer = srcPort == stream.clientPort
+	}
 
 	if len(tcp.Payload) > 0 {
 		stream.Feed(tcp.Payload, isClientToServer)
@@ -760,6 +796,7 @@ func (p *TCPStreamPool) New(clientIP net.IP, clientPort, serverPort uint16) *TCP
 		srcIP:      clientIP,
 		srcPort:    clientPort,
 		dstPort:    serverPort,
+		clientPort: clientPort,
 		lastActive: time.Now(),
 	}
 }
@@ -771,6 +808,7 @@ type TCPStream struct {
 	srcIP      net.IP
 	srcPort    uint16
 	dstPort    uint16
+	clientPort uint16 // 客户端端口（SYN 握手表征的确定方向，0 表示未知）
 	clientBuf  []byte // 客户端→服务端 数据
 	serverBuf  []byte // 服务端→客户端 数据
 	lastActive time.Time
@@ -784,8 +822,6 @@ type TCPStream struct {
 	sseReqID   int64  // SSE 流对应的 DB 记录 ID
 	sseBuf     []byte // SSE 事件累积缓冲
 }
-
-const streamBufMax = 8 * 1024 * 1024 // 8MB max per stream
 
 // Feed 喂入 TCP 数据（按方向分离缓冲区）
 func (s *TCPStream) Feed(data []byte, clientToServer bool) {
@@ -843,12 +879,26 @@ func (s *TCPStream) Feed(data []byte, clientToServer bool) {
 
 	s.tryExtractHTTP()
 
-	if len(s.clientBuf) > streamBufMax {
-		s.clientBuf = truncateBuffer(s.clientBuf, int(s.engine.maxResBytes))
+	// 缓冲上限与 maxResBytes 一致（而非固定 8MB）：避免每个方向每流在配置
+	// 阈值之外再冗余 2 倍内存；超限时截断为最近 maxResBytes 字节。
+	// Buffer cap tracks maxResBytes (not a hardcoded 8MB) so per-stream
+	// memory stays bounded by the configured limit; oversized buffers are
+	// trimmed to the most recent maxResBytes.
+	bufLimit := int64(streamBufLimit(s))
+	if int64(len(s.clientBuf)) > bufLimit {
+		s.clientBuf = truncateBuffer(s.clientBuf, int(bufLimit))
 	}
-	if len(s.serverBuf) > streamBufMax {
-		s.serverBuf = truncateBuffer(s.serverBuf, int(s.engine.maxResBytes))
+	if int64(len(s.serverBuf)) > bufLimit {
+		s.serverBuf = truncateBuffer(s.serverBuf, int(bufLimit))
 	}
+}
+
+// streamBufLimit 返回单流单方向缓冲上限：maxResBytes（含 0 未配置时回退 4MB）
+func streamBufLimit(s *TCPStream) int64 {
+	if s.engine.maxResBytes > 0 {
+		return s.engine.maxResBytes
+	}
+	return 4 * 1024 * 1024
 }
 
 // isSSEHeader 检测响应头是否为 SSE（Content-Type: text/event-stream）
@@ -1323,12 +1373,16 @@ func parseHTTPResponseFromHeader(headerData []byte, body string) *struct {
 	}{StatusCode: statusCode, Headers: headers, Body: body}
 }
 
-// parseContentLength 从 HTTP 头解析 Content-Length（健壮版）
+// parseContentLength 从 HTTP 头解析 Content-Length（健壮版）。
+// 兼容 CRLF 与 LF 两种行尾：先按 \n 切分再去除行尾 \r，
+// 否则纯 LF 响应会把整个头部当一行，Content-Length 永远找不到。
+// Handles both CRLF and LF line endings: split on \n then trim \r,
+// otherwise a bare-LF header block is treated as a single line.
 func parseContentLength(headerData []byte) int {
 	s := strings.ToLower(string(headerData))
-	lines := strings.Split(s, "\r\n")
+	lines := strings.Split(s, "\n")
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
 		if after, ok := strings.CutPrefix(line, "content-length:"); ok {
 			var cl int
 			fmt.Sscanf(strings.TrimSpace(after), "%d", &cl)
@@ -1419,9 +1473,9 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine
 		scheme = "https"
 		isHTTPS = true
 	}
-	url := fmt.Sprintf("%s://%s%s", scheme, host, urlPath)
+	url := fmt.Sprintf("%s://%s%s", scheme, formatHostForURL(host), urlPath)
 	if !strings.HasPrefix(urlPath, "/") {
-		url = fmt.Sprintf("%s://%s/%s", scheme, host, urlPath)
+		url = fmt.Sprintf("%s://%s/%s", scheme, formatHostForURL(host), urlPath)
 	}
 
 	body := ""
@@ -1497,6 +1551,35 @@ func hasPrefixFold(b, prefix []byte) bool {
 			c += 'a' - 'A'
 		}
 		if a != c {
+			return false
+		}
+	}
+	return true
+}
+
+// formatHostForURL 为 URL 拼装格式化 Host：IPv6 字面量需加方括号，
+// 否则生成 "http://::1/path" 之类的非法 URL。
+// 裸 IPv6 尾部形如 ":8080"（无括号带端口，如 "fe80::1:8080"）时，
+// 拆出数字端口再整体括号化："[fe80::1]:8080"。
+// Brackets IPv6 literals in URLs ("http://::1/path" is invalid).
+// A trailing ":port" (e.g. "fe80::1:8080") is split off and bracketed as
+// "[fe80::1]:8080".
+func formatHostForURL(host string) string {
+	if host == "" || strings.HasPrefix(host, "[") || strings.Count(host, ":") < 2 {
+		return host
+	}
+	if i := strings.LastIndex(host, ":"); i > 0 && isAllDigits(host[i+1:]) && host[i-1] >= '0' && host[i-1] <= '9' {
+		return "[" + host[:i] + "]:" + host[i+1:]
+	}
+	return "[" + host + "]"
+}
+
+func isAllDigits(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}

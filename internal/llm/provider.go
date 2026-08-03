@@ -14,24 +14,22 @@ const (
 	ProviderUnknown   Provider = "unknown"
 )
 
-// providerPattern defines host/path signatures for each provider.
+// providerPattern defines host signatures for each provider.
+// pathSubstrs 曾用于路径匹配，但因误判（任何含 "/messages" 的 host 都被当作
+// Anthropic）已移除，仅保留 host 匹配。
 type providerPattern struct {
 	hostSubstrs []string
-	pathSubstrs []string
 }
 
 var providerPatterns = map[Provider]providerPattern{
 	ProviderOpenAI: {
 		hostSubstrs: []string{"openai.com", "api.openai.com"},
-		pathSubstrs: []string{"/v1/chat/completions", "/v1/completions", "/chat/completions"},
 	},
 	ProviderAnthropic: {
 		hostSubstrs: []string{"anthropic.com"},
-		pathSubstrs: []string{"/v1/messages", "/messages"},
 	},
 	ProviderGemini: {
 		hostSubstrs: []string{"generativelanguage.googleapis.com", "aiplatform.googleapis.com"},
-		pathSubstrs: []string{"generatecontent", "streamgeneratecontent"},
 	},
 }
 

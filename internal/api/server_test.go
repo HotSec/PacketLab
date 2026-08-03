@@ -23,7 +23,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, nil, false, nil)
+	return New(st, nil, false, "", nil)
 }
 
 // helper: execute HTTP request against server
@@ -60,6 +60,52 @@ func TestHealthEndpoint(t *testing.T) {
 	w := testRequest(t, s, "GET", "/health", "")
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+// TestAuthTokenEndpoint 验证 --api-token 鉴权：
+// 无/错误 token 一律 401，正确 token 放行，/health 免鉴权，token 可经查询参数传递。
+func TestAuthTokenEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.New(filepath.Join(dir, "auth.db"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+	s := New(st, nil, false, "s3cret", nil)
+	handler := s.Handler()
+
+	req := func(token string) *httptest.ResponseRecorder {
+		var r *http.Request
+		r = httptest.NewRequest("GET", "/api/stats", nil)
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+
+	if w := req(""); w.Code != http.StatusUnauthorized {
+		t.Errorf("no token: expected 401, got %d", w.Code)
+	}
+	if w := req("wrong"); w.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token: expected 401, got %d", w.Code)
+	}
+	if w := req("s3cret"); w.Code != http.StatusOK {
+		t.Errorf("correct token: expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	// 查询参数方式（WebSocket 握手用）
+	r := httptest.NewRequest("GET", "/api/stats?token=s3cret", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("query token: expected 200, got %d", w.Code)
+	}
+	// /health 免鉴权
+	w = testRequest(t, s, "GET", "/health", "")
+	if w.Code != http.StatusOK {
+		t.Errorf("health without token: expected 200, got %d", w.Code)
 	}
 }
 

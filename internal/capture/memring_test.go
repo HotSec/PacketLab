@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,6 +72,30 @@ func TestMemRingBuffer_Overwrite(t *testing.T) {
 	}
 	if ring.Dropped() == 0 {
 		t.Fatal("expected overwrites > 0")
+	}
+}
+
+// TestMemRingBuffer_ByteCap 验证字节上限：条目数未满但累计字节超限时同样
+// 淘汰最老记录（防止写入方停滞时带大 body 的记录把驻留内存撑爆）。
+func TestMemRingBuffer_ByteCap(t *testing.T) {
+	ring := NewMemRingBuffer(64)
+	ring.maxBytes = 6300
+
+	body := strings.Repeat("x", 60) // recordSize = 60 + 2048 开销
+	for i := 1; i <= 3; i++ {
+		if !ring.Push(&models.CapturedRequest{URL: "http://cap.test", ResBody: body}) {
+			t.Fatal("Push returned false")
+		}
+	}
+	if ring.Dropped() != 1 {
+		t.Errorf("Dropped = %d, want 1 (byte cap eviction)", ring.Dropped())
+	}
+	batch := ring.PopBatch()
+	if len(batch) != 2 {
+		t.Fatalf("expected 2 surviving records, got %d", len(batch))
+	}
+	if batch[0].Req.URL != "http://cap.test" || batch[0].Req.ResBody != body {
+		t.Errorf("oldest surviving record does not match, got %+v", batch[0])
 	}
 }
 

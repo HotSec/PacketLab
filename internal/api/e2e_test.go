@@ -31,6 +31,9 @@ func (c *e2eClient) do(method, path, body string) *httptest.ResponseRecorder {
 		req = httptest.NewRequest(method, path, nil)
 	}
 	req.Header.Set("Origin", "http://localhost:8080")
+	// httptest.NewRequest 默认 RemoteAddr=192.0.2.1（远程客户端），
+	// e2e 测试模拟本机调试（重发到 mock 的 loopback 服务），标记为回环来源
+	req.RemoteAddr = "127.0.0.1:12345"
 	w := httptest.NewRecorder()
 	c.handler.ServeHTTP(w, req)
 	return w
@@ -69,7 +72,7 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	}
 	defer st.Close()
 
-	srv := New(st, nil, false, nil)
+	srv := New(st, nil, false, "", nil)
 	handler := srv.Handler()
 	client := newE2EClient(t, handler, "http://localhost:9090")
 
@@ -329,7 +332,7 @@ func TestE2E_MultipleHostsFiltering(t *testing.T) {
 	st, _ := store.New(dir + "/multi.db")
 	defer st.Close()
 
-	srv := New(st, nil, false, nil)
+	srv := New(st, nil, false, "", nil)
 	client := newE2EClient(t, srv.Handler(), "")
 
 	hosts := []string{"api.a.com", "api.b.com", "api.c.com"}
@@ -358,7 +361,7 @@ func TestE2E_InterceptLogsLifecycle(t *testing.T) {
 	st, _ := store.New(dir + "/intercept.db")
 	defer st.Close()
 
-	srv := New(st, nil, false, nil)
+	srv := New(st, nil, false, "", nil)
 	client := newE2EClient(t, srv.Handler(), "")
 
 	st.SaveInterceptLog(&models.InterceptLog{

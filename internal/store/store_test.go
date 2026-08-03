@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"packetlab/internal/models"
 )
@@ -1038,5 +1039,103 @@ func TestCleanup_ReadsRetentionDaysFromSettings(t *testing.T) {
 	}
 	if dr != 1 {
 		t.Errorf("deletedRequests = %d, want 1", dr)
+	}
+}
+
+// TestTruncateStrUTF8 验证 truncateStr 不会切断多字节 UTF-8 字符：
+// 截断后必须是合法 UTF-8，且尽可能保留完整字符。
+func TestTruncateStrUTF8(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"ascii exact", "hello", 5, "hello"},
+		{"ascii cut", "hello world", 5, "hello"},
+		{"short string", "你好", 10, "你好"},
+		{"rune boundary aligned", "你好", 6, "你好"},
+		{"cut inside rune", "你好世界", 7, "你好"},   // s[:7] 落在"世"中间 → 回退
+		{"cut at rune start", "你好世界", 6, "你好"}, // "世"整字装不下 → 丢弃
+		{"exact rune fit", "你", 3, "你"},
+		{"too small for rune", "你", 2, ""},
+		{"mixed ascii utf8", "a你好b", 5, "a你"}, // 切点在"好"中间 → 回退到"你"
+		{"4-byte rune", "a🀄b", 3, "a"},          // 🀄 = 4 字节，装不下 → 丢弃
+		{"empty", "", 5, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateStr(tt.in, tt.max)
+			if got != tt.want {
+				t.Errorf("truncateStr(%q, %d) = %q, want %q", tt.in, tt.max, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateStr(%q, %d) = %q is not valid UTF-8", tt.in, tt.max, got)
+			}
+		})
+	}
+}
+
+// TestEscapeLike 验证 LIKE 通配符转义（配合 ESCAPE '\'）。
+func TestEscapeLike(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"plain", "plain"},
+		{"100%", `100\%`},
+		{"a_b", `a\_b`},
+		{`a\b`, `a\\b`},
+		{"50% off_", `50\% off\_`},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := escapeLike(tt.in); got != tt.want {
+			t.Errorf("escapeLike(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestListSearchLikeWildcardEscaped 集成验证：搜索输入中的 % 与 _ 被当作
+// 字面量而非 SQL LIKE 通配符（旧实现中搜索 "100%" 会匹配所有 "100" 前缀记录）。
+func TestListSearchLikeWildcardEscaped(t *testing.T) {
+	st := newTestStore(t)
+
+	for _, u := range []string{
+		"http://a.test/100%off",
+		"http://a.test/1000",
+		"http://a.test/10_0",
+		"http://b.test/plain",
+	} {
+		if _, err := st.Save(&models.CapturedRequest{
+			Method: "GET", URL: u, Host: "a.test",
+			Path: "/", Protocol: "HTTP/1.1",
+		}); err != nil {
+			t.Fatalf("Save(%s): %v", u, err)
+		}
+	}
+
+	// 搜索 "100%"：只应命中字面 "100%off"，不得命中 "1000"
+	_, total, err := st.List("", "100%", "", false, 50, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("search \"100%%\" total = %d, want 1 (literal %% must not act as wildcard)", total)
+	}
+
+	// 搜索 "10_0"：只应命中字面 "10_0"，不得命中 "1000"
+	_, total, err = st.List("", "10_0", "", false, 50, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("search \"10_0\" total = %d, want 1 (literal _ must not act as wildcard)", total)
+	}
+
+	// 搜索 "1000" 仍正常命中
+	_, total, err = st.List("", "1000", "", false, 50, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("search \"1000\" total = %d, want 1", total)
 	}
 }

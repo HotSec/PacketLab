@@ -115,9 +115,30 @@ function getErrorMessage(body, status) {
   return '网络请求失败';
 }
 
+// ── API Token ────────────────────────────────
+// --api-token 启用鉴权时：首次 401 弹出输入框，token 存入 localStorage，
+// 后续请求自动携带 Authorization: Bearer <token>。
+function getApiToken() { return localStorage.getItem('packetlab_api_token') || ''; }
+function promptApiToken() {
+  const t = window.prompt('请输入 API Token（服务端 --api-token / PACKETLAB_API_TOKEN）:');
+  if (t) { localStorage.setItem('packetlab_api_token', t); return true; }
+  return false;
+}
+
 async function apiRequest(path, options) {
+  const doFetch = () => {
+    const opts = options || {};
+    opts.headers = Object.assign({}, opts.headers);
+    const token = getApiToken();
+    if (token && !opts.headers['Authorization']) opts.headers['Authorization'] = 'Bearer ' + token;
+    return fetch(API_BASE + path, opts);
+  };
   try {
-    const r = await fetch(API_BASE + path, options);
+    let r = await doFetch();
+    // 401 且本地无 token：提示输入后重试一次
+    if (r.status === 401 && !getApiToken()) {
+      if (promptApiToken()) r = await doFetch();
+    }
     if (!r.ok) {
       let body = null;
       try { body = await r.json(); } catch {}
@@ -155,6 +176,9 @@ async function apiPut(p, b) {
 // ── Data Loading ─────────────────────────────
 async function loadRequests() {
   try {
+    // 清理已过期的本地 pending 条目：服务端最长等待 --intercept-pending-timeout（默认15s，上限10m），
+    // 超时后会被自动放行，前端残留条目无法再操作，需剔除
+    pruneStalePending();
     const p = new URLSearchParams();
     if (currentFilter !== 'all') p.set('method', currentFilter);
     if (errorFilterOnly) p.set('error_only', 'true');
@@ -338,7 +362,9 @@ function connectWebSocket() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   try {
-    ws = new WebSocket(`${protocol}//${location.host}/ws`);
+    // 鉴权启用时经查询参数携带 token（浏览器 WS 无法自定义请求头）
+    const token = getApiToken();
+    ws = new WebSocket(`${protocol}//${location.host}/ws` + (token ? '?token=' + encodeURIComponent(token) : ''));
     ws.onopen = () => { if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; } };
     ws.onmessage = (e) => {
       try {
@@ -518,7 +544,11 @@ function onListScroll() {
 // 核心交互 — selectRequest
 // =============================================
 
+// 选择序号：快速切换请求时，旧的异步详情加载完成后不得覆盖新选中的请求
+let selectionSeq = 0;
+
 async function selectRequest(id) {
+  const seq = ++selectionSeq;
   selectedRequestId = id;
   let r = requests.find(r => String(r.id) === id);
   if (!r) return;
@@ -531,13 +561,14 @@ async function selectRequest(id) {
     // 3. 异步加载详情（如果需要）
     if (!isPending && (!r.reqHeaders || Object.keys(r.reqHeaders).length === 0)) {
       const d = await loadRequestDetail(id);
+      if (seq !== selectionSeq) return; // 期间已切换到其他请求，丢弃过期结果
       if (d) {
         r = normalizeReq(d);
         const idx = requests.findIndex(x => String(x.id) === id);
         if (idx >= 0) requests[idx] = r;
-        if (!r) return;
       }
     }
+    if (seq !== selectionSeq) return;
 
     // 4. 填充内容
     fillContent(r, isPending);
@@ -552,6 +583,7 @@ async function selectRequest(id) {
     scrollToActiveItem();
     if (r.host) syncAPIMapHost(r.host);
   } catch (e) {
+    if (seq !== selectionSeq) return;
     console.error('selectRequest error:', e);
     removeSkeleton();
     document.getElementById('detailEmpty').style.display = 'none';
@@ -835,7 +867,7 @@ function renderTreeNode(node, depth) {
       const allMethods = [...new Set((child.methods || []))];
       const dominantMethod = allMethods[0] || '';
       const borderClass = dominantMethod ? `border-${dominantMethod}` : '';
-      html += `<div class="tree-node"><div class="tree-node-header ${borderClass}" style="padding-left:${depth * 20 + 4}px" onclick="toggleTreeNode(this)">
+      html += `<div class="tree-node"><div class="tree-node-header ${escAttr(borderClass)}" style="padding-left:${depth * 20 + 4}px" onclick="toggleTreeNode(this)">
         <span class="tree-node-toggle ${hasChildren ? 'open' : ''}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--yellow)"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <span class="tree-node-name">${esc(child.name)}</span><span class="tree-node-count">(${child.count || 0})</span>
@@ -854,7 +886,7 @@ function renderLeaf(node, depth) {
     const statusHtml = Object.entries(statuses).sort((a, b) => b[1] - a[1]).slice(0, 3)
       .map(([s, c]) => { const cls = 's' + Math.floor(parseInt(s) / 100); return `<span class="${cls}">${s}</span>`; }).join('');
     const hasNote = node.note && node.note_id;
-    html += `<div class="tree-leaf-row ${method}" onclick="leafClick('${escJS(node.full_path)}','${escJS(method)}')" oncontextmenu="leafContext(event,'${escJS(node.full_path)}','${escJS(method)}','${escJS(node.note || '')}',${node.note_id || 0})" title="点击过滤 | 右键更多">
+    html += `<div class="tree-leaf-row ${escAttr(method)}" onclick="leafClick('${escJS(node.full_path)}','${escJS(method)}')" oncontextmenu="leafContext(event,'${escJS(node.full_path)}','${escJS(method)}','${escJS(node.note || '')}',${node.note_id || 0})" title="点击过滤 | 右键更多">
       <span class="tree-leaf-method method-${escAttr(method)}">${esc(method)}</span>
       <span class="tree-leaf-path">${esc(node.full_path)}</span>
       <span class="tree-leaf-status">${statusHtml}</span>
@@ -914,7 +946,7 @@ async function loadRules() {
       <div class="rule-item">
         <span class="rule-item-pattern">${esc(r.pattern)}</span>
         ${r.method ? `<span class="method-badge method-${escAttr(r.method)}" style="font-size:9px;padding:1px 5px">${esc(r.method)}</span>` : ''}
-        <span class="rule-item-action ${r.action}">${r.action.toUpperCase()}</span>
+        <span class="rule-item-action ${escAttr(r.action)}">${esc(r.action.toUpperCase())}</span>
         <div class="rule-item-actions">
           <button class="${r.enabled ? 'enabled' : 'disabled'}" onclick="toggleRule(${r.id},${!r.enabled})">${r.enabled ? 'ON' : 'OFF'}</button>
           <button class="delete" onclick="deleteRule(${r.id})">✕</button>
@@ -1080,6 +1112,27 @@ function addPendingToList(p) {
   const r = pendingToReq(p);
   requestVersion++; requests.unshift(r); renderRequestList();
 }
+// 服务端超时上限为 10 分钟：本地条目超过该时长+缓冲即不可能仍处于待审状态
+const PENDING_MAX_AGE_MS = 10 * 60 * 1000 + 30 * 1000;
+function pruneStalePending() {
+  const now = Date.now();
+  let changed = false;
+  for (const id of Object.keys(pendingRequests)) {
+    const p = pendingRequests[id];
+    if (now - (p.timestamp || 0) > PENDING_MAX_AGE_MS) {
+      delete pendingRequests[id];
+      requests = requests.filter(r => String(r.id) !== String(id));
+      if (selectedRequestId && String(selectedRequestId) === String(id)) {
+        selectedRequestId = null;
+        document.getElementById('interceptBar').classList.remove('show');
+        document.getElementById('detailEmpty').style.display = 'flex';
+        document.getElementById('detailContent').style.display = 'none';
+      }
+      changed = true;
+    }
+  }
+  if (changed) requestVersion++;
+}
 async function interceptAction(action) {
   if (!selectedRequestId || !pendingRequests[selectedRequestId]) return;
   const p = pendingRequests[selectedRequestId];
@@ -1122,7 +1175,7 @@ async function toggleStar(id, starred) {
     const idx = requests.findIndex(r => r.id === id);
     if (idx >= 0) requests[idx].starred = !starred;
     // 收藏视图下取消收藏需移除
-    if (starredOnly && starred) {
+    if (starredOnly && starred && idx >= 0) {
       requests.splice(idx, 1);
     }
     renderRequestList();
@@ -1155,7 +1208,7 @@ function copyAsFetch() {
     // 尝试解析为 JSON，否则作为纯文本
     try { opts.body = JSON.parse(req.req_body); } catch { opts.body = req.req_body; }
   }
-  let code = `fetch('${req.url}', ${JSON.stringify(opts, null, 2)})\n  .then(res => res.text())\n  .then(text => console.log(text));`;
+  let code = `fetch(${JSON.stringify(req.url)}, ${JSON.stringify(opts, null, 2)})\n  .then(res => res.text())\n  .then(text => console.log(text));`;
   navigator.clipboard.writeText(code).then(() => showToast('success', 'fetch 代码已复制')).catch(() => showToast('error', 'Copy failed'));
 }
 
@@ -1166,7 +1219,7 @@ function copyAsPython() {
   const hdrs = {};
   if (req.req_headers) Object.entries(req.req_headers).forEach(([k, v]) => { hdrs[k] = v; });
   let code = `import requests\n\n`;
-  code += `url = '${req.url}'\n`;
+  code += `url = ${JSON.stringify(req.url)}\n`;
   if (Object.keys(hdrs).length > 0) code += `headers = ${JSON.stringify(hdrs, null, 4)}\n`;
   if (req.req_body) {
     // 尝试解析为 JSON
@@ -1196,14 +1249,8 @@ function formatJSONBody(text) {
 }
 async function exportHAR() {
   try {
-    const r = await fetch('/api/export/har?limit=500');
-    if (!r.ok) {
-      let body = null;
-      try { body = await r.json(); } catch {}
-      showToast('error', getErrorMessage(body, r.status));
-      return;
-    }
-    const blob = await r.blob();
+    const data = await apiRequest('/api/export/har?limit=500');
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'packetlab.har';
@@ -1334,7 +1381,7 @@ function renderInterceptLogs(logs) {
     const time = l.created_at ? new Date(l.created_at.replace(' ', 'T') + 'Z').toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
     const rule = l.rule_pattern ? `<span style="color:var(--accent);font-size:9px">${esc(l.rule_pattern)}</span>` : '';
     return `<div class="log-item">
-      <span class="log-item-action ${l.action}">${actionLabel}</span>
+      <span class="log-item-action ${escAttr(l.action)}">${esc(actionLabel)}</span>
       <span class="log-item-url" title="${escAttr(l.request_url)}">${esc(l.request_method)} ${esc(l.request_url)}</span>
       <span class="log-item-meta">
         ${rule}
@@ -1447,7 +1494,7 @@ function renderLLMContent(exchange) {
 
   // Header: provider badge + model
   html += '<div class="llm-header">';
-  html += `<span class="llm-badge ${provider}">${provider.toUpperCase()}</span>`;
+  html += `<span class="llm-badge ${escAttr(provider)}">${esc(provider.toUpperCase())}</span>`;
   if (model) html += `<span class="llm-model">${escapeHTML(model)}</span>`;
   if (exchange.stream) html += '<span class="llm-model">stream</span>';
   html += '</div>';

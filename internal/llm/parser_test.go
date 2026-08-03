@@ -24,6 +24,25 @@ func TestDetectProvider(t *testing.T) {
 	}
 }
 
+// TestGeminiModelFromPath 验证从 Gemini URL 路径提取模型名。
+// Gemini 的模型名在路径中（"/v1beta/models/gemini-2.5-flash:generateContent"），
+// 请求体/响应体均不含，需从 path 提取用于模型展示与成本估算。
+func TestGeminiModelFromPath(t *testing.T) {
+	tests := []struct{ path, want string }{
+		{"/v1beta/models/gemini-2.5-flash:generateContent", "gemini-2.5-flash"},
+		{"/v1beta/models/gemini-1.5-pro-002:generateContent?key=abc", "gemini-1.5-pro-002"},
+		{"/v1beta1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:predict", "gemini-2.5-pro"},
+		{"/v1beta/models/gemini-2.0-flash:streamGenerateContent", "gemini-2.0-flash"},
+		{"/v1/chat/completions", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := GeminiModelFromPath(tt.path); got != tt.want {
+			t.Errorf("GeminiModelFromPath(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
 func TestParseOpenAIRequest(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-4",

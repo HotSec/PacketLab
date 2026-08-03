@@ -34,6 +34,9 @@ var pricingTable = map[string]ModelPricing{
 	"gemini-1.5-flash":  {InputPerMTokens: 0.075, OutputPerMTokens: 0.30},
 	"gemini-2.0-flash":  {InputPerMTokens: 0.10, OutputPerMTokens: 0.40},
 	"gemini-2.0-pro":    {InputPerMTokens: 1.25, OutputPerMTokens: 10.00},
+	"gemini-2.5-flash":  {InputPerMTokens: 0.30, OutputPerMTokens: 2.50},
+	"gemini-2.5-pro":    {InputPerMTokens: 1.25, OutputPerMTokens: 10.00},
+	"gemini-2.5-flash-lite": {InputPerMTokens: 0.10, OutputPerMTokens: 0.40},
 }
 
 // EstimateCost 根据模型名、输入/输出 token 数估算成本（USD）。
@@ -53,7 +56,11 @@ func EstimateCost(model string, promptTokens, completionTokens int) float64 {
 }
 
 // LookupPricing 查找模型定价。按 key 长度降序匹配最具体的前缀。
-// LookupPricing looks up model pricing. Matches the longest prefix.
+// 前缀必须落在边界上（key 之后的字符是 '-' 或字符串结束），否则视为不同模型：
+// 例如 "gpt-4" 不能匹配 "gpt-4.1" / "gpt-4o"，未覆盖的模型返回零值定价（成本 0）。
+// LookupPricing looks up model pricing. Matches the longest prefix, but only when
+// the prefix ends on a model-name boundary ('-' or end of string), so "gpt-4" does
+// not match "gpt-4.1"/"gpt-4o". Unknown models return the zero value (cost 0).
 func LookupPricing(model string) ModelPricing {
 	// 大小写不敏感
 	m := toLowerASCII(model)
@@ -61,10 +68,18 @@ func LookupPricing(model string) ModelPricing {
 	var bestKeyLen int
 	for key, p := range pricingTable {
 		k := toLowerASCII(key)
-		if hasPrefix(m, k) && len(k) > bestKeyLen {
-			best = p
-			bestKeyLen = len(k)
+		if len(k) <= bestKeyLen {
+			continue
 		}
+		// 边界匹配：key 之后的字符必须是 '-' 或结束
+		if !hasPrefix(m, k) {
+			continue
+		}
+		if len(m) > len(k) && m[len(k)] != '-' {
+			continue
+		}
+		best = p
+		bestKeyLen = len(k)
 	}
 	return best
 }

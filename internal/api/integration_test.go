@@ -24,7 +24,7 @@ func newIntegrationServer(t *testing.T) *Server {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(st, nil, false, nil)
+	return New(st, nil, false, "", nil)
 }
 
 func integrationRequest(t *testing.T, s *Server, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -37,6 +37,9 @@ func integrationRequest(t *testing.T, s *Server, method, path, body string, head
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
+	// httptest.NewRequest 默认 RemoteAddr=192.0.2.1（远程客户端），
+	// 集成测试模拟本机调试（重发到 mock 的 loopback 服务），需标记为回环来源
+	req.RemoteAddr = "127.0.0.1:12345"
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -368,6 +371,8 @@ func TestIntegration_MetricsEndpoint(t *testing.T) {
 
 func TestIntegration_ProxyStatus(t *testing.T) {
 	s := newIntegrationServer(t)
+	// 模拟代理已启动（main 中由 SetProxyRunning 上报真实状态）
+	s.SetProxyRunning(true)
 	w := integrationRequest(t, s, "GET", "/api/proxy/status", "", nil)
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)

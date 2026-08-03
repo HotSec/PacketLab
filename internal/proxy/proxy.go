@@ -51,9 +51,16 @@ type Server struct {
 }
 
 // New 创建代理服务器
-func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture, interceptor *Interceptor, maxReqBodyKB, maxResBodyKB int) *Server {
+// insecure=true 时跳过上游 TLS 证书验证（仅开发环境）；默认严格校验证书。
+func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture, interceptor *Interceptor, maxReqBodyKB, maxResBodyKB int, insecure bool) *Server {
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
+
+	// 上游 Transport：默认校验证书（goproxy 默认 InsecureSkipVerify=true，
+	// 必须显式覆盖，否则 MITM 上游证书从不校验）。
+	upstreamTransport := http.DefaultTransport.(*http.Transport).Clone()
+	upstreamTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecure}
+	proxy.Tr = upstreamTransport
 
 	bw := NewBatchWriter(st, onCapture, 50, 200*time.Millisecond)
 
@@ -111,23 +118,25 @@ func (s *Server) setupHandlers() {
 		}
 		maxReqBytes := int64(s.maxReqBodyKB) * 1024
 		if req.Body != nil {
-			// 全量读取请求体：转发侧需要完整 body，存储侧再取截断
-			fullBody, err := io.ReadAll(req.Body)
-			if err == nil {
-				// 转发完整 body（设置 ContentLength 与 GetBody 以支持重试）
-				req.Body = io.NopCloser(bytes.NewReader(fullBody))
-				req.ContentLength = int64(len(fullBody))
+			// 限量读取请求体：存储侧截断到 maxReqBytes；若请求体超过限制，
+			// 已读部分 + 剩余流拼回 MultiReader 流式转发（内存上限 maxReqBytes+1），
+			// 避免 io.ReadAll 无界缓冲大体积上传。
+			head, rest, truncated, readErr := readBodyBounded(req.Body, maxReqBytes)
+			if readErr != nil {
+				slog.Warn("proxy: read request body failed", "url", req.URL.String(), "error", readErr)
+			}
+			if truncated || rest != nil {
+				req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), rest))
+			} else {
+				// 完整读入：设置 ContentLength 与 GetBody 以支持重试
+				req.Body = io.NopCloser(bytes.NewReader(head))
+				req.ContentLength = int64(len(head))
 				req.GetBody = func() (io.ReadCloser, error) {
-					return io.NopCloser(bytes.NewReader(fullBody)), nil
+					return io.NopCloser(bytes.NewReader(head)), nil
 				}
-				// 存储侧取截断
-				if len(fullBody) > 0 {
-					storeBody := fullBody
-					if int64(len(storeBody)) > maxReqBytes {
-						storeBody = storeBody[:maxReqBytes]
-					}
-					captured.ReqBody = string(storeBody)
-				}
+			}
+			if len(head) > 0 {
+				captured.ReqBody = string(head)
 			}
 		}
 
@@ -137,6 +146,13 @@ func (s *Server) setupHandlers() {
 		if provider != llm.ProviderUnknown {
 			reqCtx.llmProvider = provider
 			reqCtx.llmReqInfo = processLLMRequest(provider, captured.ReqBody)
+			// Gemini 模型名在 URL 路径中（请求/响应体均不含），需手动提取，
+			// 否则模型与成本统计为空
+			if reqCtx.llmReqInfo != nil && reqCtx.llmReqInfo.Model == "" {
+				if m := llm.GeminiModelFromPath(captured.Path); m != "" {
+					reqCtx.llmReqInfo.Model = m
+				}
+			}
 		}
 
 		ctx.UserData = reqCtx
@@ -155,23 +171,21 @@ func (s *Server) setupHandlers() {
 				captured.Path = r.URL.Path
 				captured.ReqHeaders = api.FlattenHeaders(r.Header)
 				if r.Body != nil {
-					bodyBytes, err := io.ReadAll(r.Body)
-					if err != nil {
-						slog.Warn("proxy: storeFunc read modified body failed", "url", captured.URL, "error", err)
-						return
+					head, rest, _, readErr := readBodyBounded(r.Body, maxReqBytes)
+					if readErr != nil {
+						slog.Warn("proxy: storeFunc read modified body failed", "url", captured.URL, "error", readErr)
 					}
-					// 恢复 body 供后续转发消费
-					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					r.ContentLength = int64(len(bodyBytes))
-					if len(bodyBytes) > 0 {
-						storeBody := bodyBytes
-						if int64(len(storeBody)) > maxReqBytes {
-							storeBody = storeBody[:maxReqBytes]
-						}
-						captured.ReqBody = string(storeBody)
+					// 恢复 body 供后续转发消费（超限时剩余流流式转发）
+					if rest != nil {
+						r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), rest))
 					} else {
-						captured.ReqBody = ""
+						r.Body = io.NopCloser(bytes.NewReader(head))
+						r.ContentLength = int64(len(head))
+						r.GetBody = func() (io.ReadCloser, error) {
+							return io.NopCloser(bytes.NewReader(head)), nil
+						}
 					}
+					captured.ReqBody = string(head)
 				} else {
 					captured.ReqBody = ""
 				}
@@ -207,21 +221,22 @@ func (s *Server) setupHandlers() {
 			return resp
 		}
 
-		// 普通响应：读取响应体（完整转发，捕获最多 maxResBodyKB）
+		// 普通响应：限量读取响应体（存储侧截断到 maxResBodyKB；超限时剩余流
+		// 拼回 MultiReader 流式转发，避免 io.ReadAll 无界缓冲大体积下载）
 		maxResBytes := int64(s.maxResBodyKB) * 1024
 		if resp.Body != nil {
-			// 全量读取响应体：转发侧需要完整 body，存储侧再取截断
-			fullBody, err := io.ReadAll(resp.Body)
-			resp.Body = io.NopCloser(bytes.NewReader(fullBody)) // 始终恢复完整 body
-			if err != nil {
-				slog.Warn("proxy: read response body failed", "url", captured.URL, "error", err)
-			} else if len(fullBody) > 0 {
-				captured.SizeBytes = int64(len(fullBody))
-				storeBody := fullBody
-				if int64(len(storeBody)) > maxResBytes {
-					storeBody = storeBody[:maxResBytes]
-				}
-				captured.ResBody = string(storeBody)
+			head, rest, truncated, readErr := readBodyBounded(resp.Body, maxResBytes)
+			if truncated || rest != nil {
+				resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), rest))
+			} else {
+				resp.Body = io.NopCloser(bytes.NewReader(head))
+			}
+			if readErr != nil {
+				slog.Warn("proxy: read response body failed", "url", captured.URL, "error", readErr)
+			}
+			if len(head) > 0 {
+				captured.SizeBytes = int64(len(head))
+				captured.ResBody = string(head)
 			}
 		}
 
@@ -302,6 +317,28 @@ func (s *Server) IsRunning() bool {
 // Port 代理端口
 func (s *Server) Port() int {
 	return s.port
+}
+
+// readBodyBounded 限量读取 body：最多读取 limit+1 字节。
+// 返回：
+//   - head：已读取的捕获内容（截断到 limit）
+//   - rest：剩余流（nil 表示 body 已完整读完；非 nil 时调用方应将其与 head
+//     拼回 MultiReader 继续转发，恢复完整数据流）
+//   - truncated：body 总长是否超过 limit
+//   - err：读取错误（非 EOF；此时 head 为已读部分，rest 为未读部分）
+func readBodyBounded(r io.Reader, limit int64) (head []byte, rest io.Reader, truncated bool, err error) {
+	if r == nil {
+		return nil, nil, false, nil
+	}
+	head, err = io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		// 读取出错：已读部分照常捕获，剩余流交还调用方继续转发
+		return head, r, false, err
+	}
+	if int64(len(head)) > limit {
+		return head[:limit], io.MultiReader(bytes.NewReader(head[limit:]), r), true, nil
+	}
+	return head, nil, false, nil
 }
 
 func portToAddr(port int) string { return ":" + strconv.Itoa(port) }

@@ -227,7 +227,7 @@ func (s *Store) saveLocked(req *models.CapturedRequest) (int64, error) {
 		string(reqHeadersJSON), truncateStr(req.ReqBody, 2*1024*1024),
 		req.StatusCode, string(resHeadersJSON),
 		truncateStr(req.ResBody, 4*1024*1024), req.DurationMs, req.SizeBytes,
-		req.CapturedAt.Format(time.RFC3339),
+		req.CapturedAt.UTC().Format(time.RFC3339),
 		req.CaptureMode, req.ProcessPID, req.ProcessName,
 		boolToInt(req.IsSSE), truncateStr(req.SSEEvents, 4*1024*1024),
 	)
@@ -274,7 +274,7 @@ func (s *Store) SaveBatch(reqs []*models.CapturedRequest) ([]int64, error) {
 			req.Method, req.URL, req.Host, req.Path, req.Protocol, boolToInt(req.IsHTTPS),
 			string(reqHeadersJSON), truncateStr(req.ReqBody, 2*1024*1024),
 			req.StatusCode, string(resHeadersJSON), truncateStr(req.ResBody, 4*1024*1024),
-			req.DurationMs, req.SizeBytes, req.CapturedAt.Format(time.RFC3339),
+			req.DurationMs, req.SizeBytes, req.CapturedAt.UTC().Format(time.RFC3339),
 			req.CaptureMode, req.ProcessPID, req.ProcessName,
 			boolToInt(req.IsSSE), truncateStr(req.SSEEvents, 4*1024*1024),
 		)
@@ -308,13 +308,13 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 		args = append(args, method)
 	}
 	if host != "" {
-		where = append(where, "(host = ? OR host = ? OR host LIKE ? || ':%')")
+		where = append(where, "(host = ? OR host = ? OR host LIKE (? || ':%') ESCAPE '\\')")
 		hostNoPort := stripPort(host)
-		args = append(args, host, hostNoPort, hostNoPort)
+		args = append(args, host, hostNoPort, escapeLike(hostNoPort))
 	}
 	if search != "" {
-		where = append(where, "(url LIKE ? OR host LIKE ? OR CAST(status_code AS TEXT) LIKE ?)")
-		pattern := "%" + search + "%"
+		where = append(where, "(url LIKE ? ESCAPE '\\' OR host LIKE ? ESCAPE '\\' OR CAST(status_code AS TEXT) LIKE ? ESCAPE '\\')")
+		pattern := "%" + escapeLike(search) + "%"
 		args = append(args, pattern, pattern, pattern)
 	}
 	if errorOnly {
@@ -392,8 +392,8 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 	return &req, nil
 }
 
-// ListFull 获取请求完整详情列表（分页 + 过滤，消除 N+1 查询）
-func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, offset int) ([]models.CapturedRequest, error) {
+// listWhere 构建 ListFull/ForEachFull 共用的 WHERE 子句与参数。
+func (s *Store) listWhere(method, search, host string, errorOnly bool) (string, []interface{}) {
 	where := []string{"1=1"}
 	args := []interface{}{}
 
@@ -402,20 +402,28 @@ func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, off
 		args = append(args, method)
 	}
 	if host != "" {
-		where = append(where, "(host = ? OR host = ? OR host LIKE ? || ':%')")
+		where = append(where, "(host = ? OR host = ? OR host LIKE (? || ':%') ESCAPE '\\')")
 		hostNoPort := stripPort(host)
-		args = append(args, host, hostNoPort, hostNoPort)
+		args = append(args, host, hostNoPort, escapeLike(hostNoPort))
 	}
 	if search != "" {
-		where = append(where, "(url LIKE ? OR host LIKE ? OR CAST(status_code AS TEXT) LIKE ?)")
-		pattern := "%" + search + "%"
+		where = append(where, "(url LIKE ? ESCAPE '\\' OR host LIKE ? ESCAPE '\\' OR CAST(status_code AS TEXT) LIKE ? ESCAPE '\\')")
+		pattern := "%" + escapeLike(search) + "%"
 		args = append(args, pattern, pattern, pattern)
 	}
 	if errorOnly {
 		where = append(where, "status_code >= 400")
 	}
 
-	whereClause := strings.Join(where, " AND ")
+	return strings.Join(where, " AND "), args
+}
+
+// ForEachFull 流式遍历请求完整详情（分页 + 过滤，消除 N+1 查询）。
+// fn 返回错误时中止遍历并返回该错误。
+// 用于 HAR 导出等大结果集场景：逐条回调，避免把全部（含最大 6MB 的
+// 请求/响应体）记录同时载入内存造成 OOM。
+func (s *Store) ForEachFull(method, search, host string, errorOnly bool, limit, offset int, fn func(*models.CapturedRequest) error) error {
+	whereClause, args := s.listWhere(method, search, host, errorOnly)
 
 	querySQL := fmt.Sprintf(
 		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at
@@ -424,11 +432,10 @@ func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, off
 
 	rows, err := s.readDB().Query(querySQL, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query full: %w", err)
+		return fmt.Errorf("query full: %w", err)
 	}
 	defer rows.Close()
 
-	var items []models.CapturedRequest
 	for rows.Next() {
 		var req models.CapturedRequest
 		var reqHeadersJSON, resHeadersJSON, capturedAt string
@@ -447,9 +454,25 @@ func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, off
 		if req.ResHeaders == nil {
 			req.ResHeaders = make(map[string]string)
 		}
-		items = append(items, req)
+		if err := fn(&req); err != nil {
+			return err
+		}
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate full: %w", err)
+	}
+	return nil
+}
 
+// ListFull 获取请求完整详情列表（分页 + 过滤，消除 N+1 查询）
+func (s *Store) ListFull(method, search, host string, errorOnly bool, limit, offset int) ([]models.CapturedRequest, error) {
+	var items []models.CapturedRequest
+	if err := s.ForEachFull(method, search, host, errorOnly, limit, offset, func(req *models.CapturedRequest) error {
+		items = append(items, *req)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
@@ -563,8 +586,10 @@ func (s *Store) Cleanup(retentionDays int) (deletedRequests, deletedLogs int64, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 用 AddDate 避免 time.Duration 乘法溢出（AddDate 内部按日计算不会溢出）
-	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+	// 用 AddDate 避免 time.Duration 乘法溢出（AddDate 内部按日计算不会溢出）。
+	// UTC 与 requests.captured_at 存储格式保持一致，否则含偏移（+08:00）与 Z 格式
+	// 的字符串按字典序比较会出错，导致清理误删/漏删。
+	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 
 	res, err := s.db.Exec("DELETE FROM requests WHERE captured_at < ?", cutoff)
 	if err != nil {
@@ -827,8 +852,8 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 	where := "WHERE host != ''"
 	args := []interface{}{}
 	if search != "" {
-		where += " AND host LIKE ?"
-		args = append(args, "%"+search+"%")
+		where += " AND host LIKE ? ESCAPE '\\'"
+		args = append(args, "%"+escapeLike(search)+"%")
 	}
 
 	// 单次查询拿 host + count（按 count 降序）
@@ -1024,12 +1049,12 @@ func (s *Store) ListInterceptLogs(action, since, host, pattern string, limit, of
 		args = append(args, since)
 	}
 	if host != "" {
-		where = append(where, "request_host LIKE ?")
-		args = append(args, "%"+host+"%")
+		where = append(where, "request_host LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+escapeLike(host)+"%")
 	}
 	if pattern != "" {
-		where = append(where, "rule_pattern LIKE ?")
-		args = append(args, "%"+pattern+"%")
+		where = append(where, "rule_pattern LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+escapeLike(pattern)+"%")
 	}
 
 	whereClause := strings.Join(where, " AND ")
@@ -1095,10 +1120,49 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+// truncateStr 截断字符串到 maxLen 字节，不会切断多字节 UTF-8 字符：
+// 若截断点落在某个 rune 中间，则回退丢弃该不完整 rune，
+// 保证写入 SQLite 的 body/headers 始终是合法 UTF-8。
+// Truncates to maxLen bytes without splitting a multi-byte UTF-8 rune:
+// an incomplete trailing rune is dropped, keeping stored text valid UTF-8.
 func truncateStr(s string, maxLen int) string {
-	if len(s) > maxLen {
+	if len(s) <= maxLen {
+		return s
+	}
+	i := maxLen - 1
+	for i >= 0 && i > maxLen-4 && s[i]&0xC0 == 0x80 {
+		i-- // 跳过连续字节，找到最近的 UTF-8 起始字节
+	}
+	if i < 0 || i <= maxLen-4 {
+		return s[:maxLen] // 边界前 4 字节内无起始字节（rune 恰好完整落在边界内）
+	}
+	b := s[i]
+	var runeLen int
+	switch {
+	case b&0x80 == 0:
+		runeLen = 1
+	case b&0xE0 == 0xC0:
+		runeLen = 2
+	case b&0xF0 == 0xE0:
+		runeLen = 3
+	case b&0xF8 == 0xF0:
+		runeLen = 4
+	default:
 		return s[:maxLen]
 	}
+	if i+runeLen > maxLen {
+		return s[:i] // rune 跨过截断边界，丢弃整个 rune
+	}
+	return s[:maxLen]
+}
+
+// escapeLike 转义 LIKE 模式中的通配符（%、_、\），配合 ESCAPE '\' 使用。
+// 防止用户搜索/过滤输入中的通配符被当作模式匹配：
+// 例如搜索 "100%" 应只匹配字面 "100%"，而不是所有以 "100" 开头的记录。
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
 }
 

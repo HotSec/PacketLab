@@ -48,6 +48,10 @@ func ErrRateLimited() *AppError {
 	return newAppError("RATE_LIMITED", "Too many requests, please try again later", 429)
 }
 
+func ErrUnauthorized() *AppError {
+	return newAppError("UNAUTHORIZED", "Missing or invalid API token", 401)
+}
+
 func ErrConflict(message string) *AppError {
 	return newAppError("CONFLICT", message, 409)
 }
