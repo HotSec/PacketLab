@@ -3,10 +3,10 @@ package api
 import "fmt"
 
 type AppError struct {
-	Message   string `json:"message"`
-	Code      string `json:"code"`
-	StatusCode int   `json:"-"`
-	RequestID string `json:"request_id,omitempty"`
+	Message    string `json:"message"`
+	Code       string `json:"code"`
+	StatusCode int    `json:"-"`
+	RequestID  string `json:"request_id,omitempty"`
 }
 
 func (e *AppError) Error() string {

@@ -19,17 +19,17 @@ import (
 
 // Interceptor 拦截控制器
 type Interceptor struct {
-	mu        sync.RWMutex
-	mode      string            // "auto" | "manual"
-	rules     []models.InterceptRule
-	pending   map[string]*pendingReq
-	onNotify  func(req *models.PendingRequest)
-	timeout   time.Duration
-	logCh     chan *models.InterceptLog
-	wg        sync.WaitGroup
-	stopOnce  sync.Once
-	closeMu   sync.RWMutex
-	closed    bool
+	mu       sync.RWMutex
+	mode     string // "auto" | "manual"
+	rules    []models.InterceptRule
+	pending  map[string]*pendingReq
+	onNotify func(req *models.PendingRequest)
+	timeout  time.Duration
+	logCh    chan *models.InterceptLog
+	wg       sync.WaitGroup
+	stopOnce sync.Once
+	closeMu  sync.RWMutex
+	closed   bool
 }
 
 type pendingReq struct {

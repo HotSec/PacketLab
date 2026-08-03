@@ -1108,7 +1108,7 @@ func TestTruncateStrUTF8(t *testing.T) {
 		{"exact rune fit", "你", 3, "你"},
 		{"too small for rune", "你", 2, ""},
 		{"mixed ascii utf8", "a你好b", 5, "a你"}, // 切点在"好"中间 → 回退到"你"
-		{"4-byte rune", "a🀄b", 3, "a"},          // 🀄 = 4 字节，装不下 → 丢弃
+		{"4-byte rune", "a🀄b", 3, "a"},        // 🀄 = 4 字节，装不下 → 丢弃
 		{"empty", "", 5, ""},
 	}
 	for _, tt := range tests {

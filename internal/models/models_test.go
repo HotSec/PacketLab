@@ -171,10 +171,10 @@ func TestInterceptRuleJSON(t *testing.T) {
 
 func TestInterceptResultJSON(t *testing.T) {
 	result := InterceptResult{
-		RequestID: "req_123",
-		Action:    "modify",
-		Method:    "POST",
-		URL:       "https://example.com/api",
+		RequestID:  "req_123",
+		Action:     "modify",
+		Method:     "POST",
+		URL:        "https://example.com/api",
 		NewHeaders: map[string]string{"X-Custom": "value"},
 		NewBody:    `{"key":"value"}`,
 	}
@@ -196,13 +196,13 @@ func TestInterceptResultJSON(t *testing.T) {
 
 func TestPendingRequestJSON(t *testing.T) {
 	pr := PendingRequest{
-		ID:     "req_456",
-		Method: "GET",
-		URL:    "https://example.com/",
-		Host:   "example.com",
-		Path:   "/",
+		ID:      "req_456",
+		Method:  "GET",
+		URL:     "https://example.com/",
+		Host:    "example.com",
+		Path:    "/",
 		Headers: map[string]string{"Accept": "application/json"},
-		Body:   "",
+		Body:    "",
 	}
 
 	data, err := json.Marshal(pr)

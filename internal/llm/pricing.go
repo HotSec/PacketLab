@@ -14,15 +14,15 @@ type ModelPricing struct {
 // 查找时按 key 长度降序，优先匹配更具体的前缀。
 var pricingTable = map[string]ModelPricing{
 	// OpenAI
-	"gpt-4o":            {InputPerMTokens: 2.50, OutputPerMTokens: 10.00},
-	"gpt-4o-mini":       {InputPerMTokens: 0.15, OutputPerMTokens: 0.60},
-	"gpt-4-turbo":       {InputPerMTokens: 10.00, OutputPerMTokens: 30.00},
-	"gpt-4":             {InputPerMTokens: 30.00, OutputPerMTokens: 60.00},
-	"gpt-3.5-turbo":     {InputPerMTokens: 0.50, OutputPerMTokens: 1.50},
-	"o1":                {InputPerMTokens: 15.00, OutputPerMTokens: 60.00},
-	"o1-mini":           {InputPerMTokens: 3.00, OutputPerMTokens: 12.00},
-	"o1-preview":        {InputPerMTokens: 15.00, OutputPerMTokens: 60.00},
-	"o3-mini":           {InputPerMTokens: 3.00, OutputPerMTokens: 12.00},
+	"gpt-4o":        {InputPerMTokens: 2.50, OutputPerMTokens: 10.00},
+	"gpt-4o-mini":   {InputPerMTokens: 0.15, OutputPerMTokens: 0.60},
+	"gpt-4-turbo":   {InputPerMTokens: 10.00, OutputPerMTokens: 30.00},
+	"gpt-4":         {InputPerMTokens: 30.00, OutputPerMTokens: 60.00},
+	"gpt-3.5-turbo": {InputPerMTokens: 0.50, OutputPerMTokens: 1.50},
+	"o1":            {InputPerMTokens: 15.00, OutputPerMTokens: 60.00},
+	"o1-mini":       {InputPerMTokens: 3.00, OutputPerMTokens: 12.00},
+	"o1-preview":    {InputPerMTokens: 15.00, OutputPerMTokens: 60.00},
+	"o3-mini":       {InputPerMTokens: 3.00, OutputPerMTokens: 12.00},
 	// Anthropic
 	"claude-3-5-sonnet": {InputPerMTokens: 3.00, OutputPerMTokens: 15.00},
 	"claude-3-5-haiku":  {InputPerMTokens: 0.80, OutputPerMTokens: 4.00},
@@ -30,12 +30,12 @@ var pricingTable = map[string]ModelPricing{
 	"claude-3-sonnet":   {InputPerMTokens: 3.00, OutputPerMTokens: 15.00},
 	"claude-3-haiku":    {InputPerMTokens: 0.25, OutputPerMTokens: 1.25},
 	// Gemini
-	"gemini-1.5-pro":    {InputPerMTokens: 1.25, OutputPerMTokens: 5.00},
-	"gemini-1.5-flash":  {InputPerMTokens: 0.075, OutputPerMTokens: 0.30},
-	"gemini-2.0-flash":  {InputPerMTokens: 0.10, OutputPerMTokens: 0.40},
-	"gemini-2.0-pro":    {InputPerMTokens: 1.25, OutputPerMTokens: 10.00},
-	"gemini-2.5-flash":  {InputPerMTokens: 0.30, OutputPerMTokens: 2.50},
-	"gemini-2.5-pro":    {InputPerMTokens: 1.25, OutputPerMTokens: 10.00},
+	"gemini-1.5-pro":        {InputPerMTokens: 1.25, OutputPerMTokens: 5.00},
+	"gemini-1.5-flash":      {InputPerMTokens: 0.075, OutputPerMTokens: 0.30},
+	"gemini-2.0-flash":      {InputPerMTokens: 0.10, OutputPerMTokens: 0.40},
+	"gemini-2.0-pro":        {InputPerMTokens: 1.25, OutputPerMTokens: 10.00},
+	"gemini-2.5-flash":      {InputPerMTokens: 0.30, OutputPerMTokens: 2.50},
+	"gemini-2.5-pro":        {InputPerMTokens: 1.25, OutputPerMTokens: 10.00},
 	"gemini-2.5-flash-lite": {InputPerMTokens: 0.10, OutputPerMTokens: 0.40},
 }
 

@@ -12,9 +12,9 @@ import (
 
 // Message represents a single message in a chat conversation.
 type Message struct {
-	Role      string     `json:"role"`               // "system" | "user" | "assistant" | "tool"
-	Content   string     `json:"content"`            // text content (concatenated for multimodal)
-	Name      string     `json:"name,omitempty"`     // tool name (OpenAI function calls)
+	Role      string     `json:"role"`                 // "system" | "user" | "assistant" | "tool"
+	Content   string     `json:"content"`              // text content (concatenated for multimodal)
+	Name      string     `json:"name,omitempty"`       // tool name (OpenAI function calls)
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // 历史 assistant 消息中的工具调用
 }
 
@@ -38,7 +38,7 @@ type RequestInfo struct {
 	Provider Provider  `json:"provider"`
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
-	System   string    `json:"system,omitempty"`  // Anthropic-style top-level system prompt
+	System   string    `json:"system,omitempty"` // Anthropic-style top-level system prompt
 	Stream   bool      `json:"stream"`
 	// Usage hints from the request side (optional)
 	MaxTokens   int     `json:"max_tokens,omitempty"`
@@ -51,8 +51,8 @@ type RequestInfo struct {
 
 // ResponseInfo holds extracted data from an LLM API response.
 type ResponseInfo struct {
-	Model       string `json:"model,omitempty"`
-	Content     string `json:"content"`              // assembled full response text
+	Model        string `json:"model,omitempty"`
+	Content      string `json:"content"` // assembled full response text
 	FinishReason string `json:"finish_reason,omitempty"`
 	// Token usage
 	PromptTokens     int `json:"prompt_tokens,omitempty"`
@@ -420,8 +420,8 @@ func parseOpenAIResponse(body []byte) *ResponseInfo {
 			Message struct {
 				Content   string `json:"content"`
 				ToolCalls []struct {
-					ID   string `json:"id"`
-					Type string `json:"type"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
 					Function struct {
 						Name      string `json:"name"`
 						Arguments string `json:"arguments"`
@@ -461,8 +461,8 @@ func parseOpenAIResponse(body []byte) *ResponseInfo {
 
 func parseAnthropicResponse(body []byte) *ResponseInfo {
 	var raw struct {
-		Model    string `json:"model"`
-		Content  []struct {
+		Model   string `json:"model"`
+		Content []struct {
 			Type  string          `json:"type"`
 			Text  string          `json:"text"`
 			ID    string          `json:"id"`
@@ -508,7 +508,7 @@ func parseGeminiResponse(body []byte) *ResponseInfo {
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
-					Text string `json:"text"`
+					Text         string `json:"text"`
 					FunctionCall *struct {
 						Name string          `json:"name"`
 						Args json.RawMessage `json:"args"`
@@ -587,14 +587,14 @@ func (a *StreamAssembler) Feed(data []byte) bool {
 
 func (a *StreamAssembler) feedOpenAI(data []byte) bool {
 	var chunk struct {
-		Model string `json:"model"`
+		Model   string `json:"model"`
 		Choices []struct {
 			Delta struct {
 				Content   string `json:"content"`
 				ToolCalls []struct {
-					Index   int    `json:"index"`
-					ID      string `json:"id"`
-					Type    string `json:"type"`
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
 					Function struct {
 						Name      string `json:"name"`
 						Arguments string `json:"arguments"`
@@ -695,8 +695,8 @@ func (a *StreamAssembler) feedAnthropic(data []byte) bool {
 		// content_block_start event has content_block at the top level (not inside delta),
 		// so we must parse from data directly. Fix: original code incorrectly used event.Delta.
 		var ev struct {
-			Type  string `json:"type"`
-			Index int    `json:"index"`
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
 			ContentBlock struct {
 				Type string `json:"type"`
 				ID   string `json:"id"`
@@ -733,7 +733,7 @@ func (a *StreamAssembler) feedAnthropic(data []byte) bool {
 	case "message_delta":
 		var delta struct {
 			StopReason string `json:"stop_reason"`
-			Usage *struct {
+			Usage      *struct {
 				OutputTokens int `json:"output_tokens"`
 			} `json:"usage"`
 		}
@@ -758,7 +758,7 @@ func (a *StreamAssembler) feedGemini(data []byte) bool {
 	// Gemini streaming returns array of candidates objects; non-streaming may
 	// return a single object. Parts may contain text or functionCall.
 	type geminiPart struct {
-		Text string `json:"text"`
+		Text         string `json:"text"`
 		FunctionCall *struct {
 			Name string          `json:"name"`
 			Args json.RawMessage `json:"args"`

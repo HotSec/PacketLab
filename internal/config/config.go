@@ -9,46 +9,46 @@ import (
 
 // Config 集中化应用配置 (fail-fast on invalid values)
 type Config struct {
-	ProxyPort      int
-	APIPort        int
-	APIHost        string // API/Web 监听地址（默认 127.0.0.1，仅本机可访问）
-	APIToken       string // API/Web 可选鉴权 token（空 = 不启用鉴权）
-	DBPath         string
-	NoProxy        bool
-	NoMitm         bool
-	Insecure       bool // 是否跳过 TLS 证书校验（仅开发环境）
-	BaseDir        string
-	CertDir        string
-	Capture        bool
-	CaptureIface   string
-	CaptureBPF     string
-	CaptureNoProc  bool
-	CaptureStreamTimeoutMin int // 网卡抓包：流空闲超时（分钟），0=使用默认值
-	CaptureRingEntries int // 网卡抓包：环形缓冲区条目数（向上取 2 的幂），0=使用默认值
-	MaxStreams int // 网卡抓包：最大并发 TCP 流数（超限 LRU 淘汰），0=使用默认值，最小 64
-	MaxReqBodyKB   int // 请求体最大 KB，0=使用默认值
-	MaxResBodyKB   int // 响应体最大 KB，0=使用默认值
-	AllowOrigins []string // CORS/WebSocket 允许的 Origin 白名单（空 = 仅 localhost）
+	ProxyPort               int
+	APIPort                 int
+	APIHost                 string // API/Web 监听地址（默认 127.0.0.1，仅本机可访问）
+	APIToken                string // API/Web 可选鉴权 token（空 = 不启用鉴权）
+	DBPath                  string
+	NoProxy                 bool
+	NoMitm                  bool
+	Insecure                bool // 是否跳过 TLS 证书校验（仅开发环境）
+	BaseDir                 string
+	CertDir                 string
+	Capture                 bool
+	CaptureIface            string
+	CaptureBPF              string
+	CaptureNoProc           bool
+	CaptureStreamTimeoutMin int           // 网卡抓包：流空闲超时（分钟），0=使用默认值
+	CaptureRingEntries      int           // 网卡抓包：环形缓冲区条目数（向上取 2 的幂），0=使用默认值
+	MaxStreams              int           // 网卡抓包：最大并发 TCP 流数（超限 LRU 淘汰），0=使用默认值，最小 64
+	MaxReqBodyKB            int           // 请求体最大 KB，0=使用默认值
+	MaxResBodyKB            int           // 响应体最大 KB，0=使用默认值
+	AllowOrigins            []string      // CORS/WebSocket 允许的 Origin 白名单（空 = 仅 localhost）
 	InterceptPendingTimeout time.Duration // 拦截器 pending 请求超时（默认 15s，范围 1s~10m）
-	CleanupRetentionDays int           // 自动清理：保留 N 天的请求数据（0=禁用自动清理，默认 7）
-	CleanupInterval      time.Duration // 自动清理：执行间隔（默认 6h）
-	LLMEndpoints []string // 自定义 OpenAI 兼容 LLM 端点（"host[=显示名]" 格式），用于 LLM 识别
+	CleanupRetentionDays    int           // 自动清理：保留 N 天的请求数据（0=禁用自动清理，默认 7）
+	CleanupInterval         time.Duration // 自动清理：执行间隔（默认 6h）
+	LLMEndpoints            []string      // 自定义 OpenAI 兼容 LLM 端点（"host[=显示名]" 格式），用于 LLM 识别
 }
 
 // Default validated default values
 const (
-	DefaultProxyPort    = 8080
-	DefaultAPIPort      = 9090
-	DefaultTimeoutSec   = 30
-	DefaultMaxReqBodyKB = 2048  // 2MB
-	DefaultMaxResBodyKB = 4096  // 4MB
-	DefaultStreamTimeoutMin = 2 // 网卡抓包流空闲超时默认 2 分钟
-	DefaultCaptureRingEntries = 262144 // 网卡抓包环形缓冲区默认条目数（256K，向上取 2 的幂）
-	DefaultMaxStreams = 1000 // 网卡抓包最大并发 TCP 流数默认值（超限 LRU 淘汰）
+	DefaultProxyPort               = 8080
+	DefaultAPIPort                 = 9090
+	DefaultTimeoutSec              = 30
+	DefaultMaxReqBodyKB            = 2048             // 2MB
+	DefaultMaxResBodyKB            = 4096             // 4MB
+	DefaultStreamTimeoutMin        = 2                // 网卡抓包流空闲超时默认 2 分钟
+	DefaultCaptureRingEntries      = 262144           // 网卡抓包环形缓冲区默认条目数（256K，向上取 2 的幂）
+	DefaultMaxStreams              = 1000             // 网卡抓包最大并发 TCP 流数默认值（超限 LRU 淘汰）
 	DefaultInterceptPendingTimeout = 15 * time.Second // 拦截器 pending 请求默认超时
-	DefaultCleanupRetentionDays = 7               // 自动清理默认保留 7 天
-	DefaultCleanupInterval      = 6 * time.Hour    // 自动清理默认间隔 6 小时
-	defaultOrg          = "PacketLab"
+	DefaultCleanupRetentionDays    = 7                // 自动清理默认保留 7 天
+	DefaultCleanupInterval         = 6 * time.Hour    // 自动清理默认间隔 6 小时
+	defaultOrg                     = "PacketLab"
 )
 
 // Load 从命令行参数和环境变量加载配置，fail-fast 校验
@@ -155,34 +155,34 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 	}
 
 	cfg := &Config{
-		ProxyPort:              proxyPort,
-		APIPort:                apiPort,
-		APIHost:                apiHost,
-		APIToken:               apiToken,
-		DBPath:                 dbPath,
-		NoProxy:                noProxy,
-		NoMitm:                 noMitm,
-		Insecure:               insecure,
-		BaseDir:                baseDir,
-		CertDir:                filepath.Join(baseDir, "certs"),
-		Capture:                capture,
-		CaptureIface:           captureIface,
-		CaptureBPF:             captureBPF,
-		CaptureNoProc:          captureNoProc,
+		ProxyPort:               proxyPort,
+		APIPort:                 apiPort,
+		APIHost:                 apiHost,
+		APIToken:                apiToken,
+		DBPath:                  dbPath,
+		NoProxy:                 noProxy,
+		NoMitm:                  noMitm,
+		Insecure:                insecure,
+		BaseDir:                 baseDir,
+		CertDir:                 filepath.Join(baseDir, "certs"),
+		Capture:                 capture,
+		CaptureIface:            captureIface,
+		CaptureBPF:              captureBPF,
+		CaptureNoProc:           captureNoProc,
 		CaptureStreamTimeoutMin: streamTimeoutMin,
-		CaptureRingEntries:     captureRingEntries,
-		MaxStreams:             maxStreams,
-		MaxReqBodyKB:           maxReqBodyKB,
-		MaxResBodyKB:           maxResBodyKB,
+		CaptureRingEntries:      captureRingEntries,
+		MaxStreams:              maxStreams,
+		MaxReqBodyKB:            maxReqBodyKB,
+		MaxResBodyKB:            maxResBodyKB,
 		InterceptPendingTimeout: interceptPendingTimeout,
-		CleanupRetentionDays:   cleanupRetentionDays,
-		CleanupInterval:        cleanupInterval,
-		LLMEndpoints:           llmEndpoints,
+		CleanupRetentionDays:    cleanupRetentionDays,
+		CleanupInterval:         cleanupInterval,
+		LLMEndpoints:            llmEndpoints,
 	}
 	return cfg, nil
 }
 
 // Addr formats a port into a listen address string
-func (c *Config) ProxyAddr() string  { return fmt.Sprintf(":%d", c.ProxyPort) }
-func (c *Config) APIAddr() string    { return fmt.Sprintf("%s:%d", c.APIHost, c.APIPort) }
-func (c *Config) OrgName() string    { return defaultOrg }
+func (c *Config) ProxyAddr() string { return fmt.Sprintf(":%d", c.ProxyPort) }
+func (c *Config) APIAddr() string   { return fmt.Sprintf("%s:%d", c.APIHost, c.APIPort) }
+func (c *Config) OrgName() string   { return defaultOrg }

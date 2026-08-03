@@ -15,7 +15,7 @@ import (
 // Bug 6 背景：
 //   - FlushOlderThan 锁顺序：Assembler.mu → TCPStream.mu
 //   - HandleClose    锁顺序：TCPStream.mu → Assembler.mu
-//   两者相反，跨 worker 并发可能死锁。
+//     两者相反，跨 worker 并发可能死锁。
 //
 // 本测试并发调用两者 1000 次，若 5 秒内未完成则判定死锁。
 func TestStreamPool_LockOrder(t *testing.T) {

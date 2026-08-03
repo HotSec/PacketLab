@@ -516,7 +516,7 @@ func TestGetRequestAfterSave(t *testing.T) {
 
 func TestHandleListRequests_LimitClamp(t *testing.T) {
 	cases := []struct{ in, want int }{
-		{0, 50},    // 0 → 默认 50
+		{0, 50}, // 0 → 默认 50
 		{1, 1},
 		{200, 200}, // 上限
 		{201, 200}, // 超过 → clamp 200

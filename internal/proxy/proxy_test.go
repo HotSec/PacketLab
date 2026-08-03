@@ -154,7 +154,7 @@ func TestProxy_ForwardsFullResponseBody(t *testing.T) {
 // 永远匹配不上，导致本应跳过 MITM 的主机被错误地解密。
 func TestMatchSkipHost(t *testing.T) {
 	cases := []struct {
-		host string
+		host     string
 		wantSkip bool // true 表示应跳过 MITM（shouldMITM 返回 false）
 	}{
 		{"abc.wns.windows.com:443", true},
@@ -163,9 +163,9 @@ func TestMatchSkipHost(t *testing.T) {
 		{"api.example.com:443", false},
 		{"push.microsoft.com:443", false},
 		{"1.2.3.4:8080", false},
-		{"ntp.msn.cn:443", true},             // 完整匹配（无前导点的条目）
-		{"x.wns.windows.com:80", true},       // 非标准端口也应匹配
-		{"xwns.windows.com:443", false},      // 前缀不对（不含 .wns.windows.com）
+		{"ntp.msn.cn:443", true},        // 完整匹配（无前导点的条目）
+		{"x.wns.windows.com:80", true},  // 非标准端口也应匹配
+		{"xwns.windows.com:443", false}, // 前缀不对（不含 .wns.windows.com）
 	}
 	for _, c := range cases {
 		got := shouldMITM(c.host)

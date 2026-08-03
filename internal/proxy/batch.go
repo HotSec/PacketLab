@@ -20,7 +20,7 @@ type BatchWriter struct {
 	batchSize int
 	interval  time.Duration
 	workers   int
-	stopped   int32 // atomic; 非 0 表示已 Stop，Enqueue 走 sync 路径避免 channel 滞留
+	stopped   int32      // atomic; 非 0 表示已 Stop，Enqueue 走 sync 路径避免 channel 滞留
 	enqMu     sync.Mutex // 串行化 Enqueue 与 Stop，消除“检查后 Send 时 channel 已无人消费”竞态
 }
 

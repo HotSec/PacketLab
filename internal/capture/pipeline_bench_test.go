@@ -125,7 +125,7 @@ func TestSQLiteThroughput(t *testing.T) {
 					reqs[i] = &models.CapturedRequest{
 						Method: "GET", URL: fmt.Sprintf("https://x.com/api/%d", i),
 						Host: "x.com", Path: fmt.Sprintf("/api/%d", i),
-						Protocol: "HTTP/1.1",
+						Protocol:   "HTTP/1.1",
 						ReqHeaders: map[string]string{"Host": "x.com"},
 						StatusCode: 200,
 						DurationMs: 10, SizeBytes: 500, CapturedAt: now,
