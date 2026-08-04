@@ -1107,3 +1107,28 @@ func TestFormatHostForURL(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatIPForURL 验证 IP 字面量（不含端口）的 URL 括号化：
+// "2001:db8::2:80" 之类的完整 IPv6 地址必须整体括号化，绝不能按
+// host:port 拆分（与 formatHostForURL 的 Host 头启发式区分）。
+func TestFormatIPForURL(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   net.IP
+		want string
+	}{
+		{"ipv4", net.ParseIP("192.168.1.1"), "192.168.1.1"},
+		{"ipv6 loopback", net.ParseIP("::1"), "[::1]"},
+		{"ipv6 full form", net.ParseIP("2001:db8::1"), "[2001:db8::1]"},
+		// 完整 IPv6 尾部为数字组：不可拆端口（这正是 formatHostForURL 的歧义坑）
+		{"ipv6 numeric tail", net.ParseIP("2001:db8::2:80"), "[2001:db8::2:80]"},
+		{"nil", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatIPForURL(tt.ip); got != tt.want {
+				t.Errorf("formatIPForURL(%v) = %q, want %q", tt.ip, got, tt.want)
+			}
+		})
+	}
+}

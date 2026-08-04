@@ -1465,7 +1465,13 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine
 	headerEnd += 4 // skip \r\n\r\n
 
 	if host == "" {
-		host = srcIP.String()
+		// 回退为 IP 字面量（不含端口）：IPv6 整体括号化——IP 字面量无 host:port
+		// 歧义，绝不能走 formatHostForURL 的拆分启发式
+		host = formatIPForURL(srcIP)
+	} else {
+		// Host 头：无括号 IPv6 尾部数字组按 host:port 启发式处理（歧义无法消解，
+		// 表达纯 IPv6 需方括号——见 formatHostForURL）
+		host = formatHostForURL(host)
 	}
 	scheme := "http"
 	isHTTPS := false
@@ -1473,10 +1479,10 @@ func parseHTTPRequest(data []byte, srcIP net.IP, srcPort, dstPort uint16, engine
 		scheme = "https"
 		isHTTPS = true
 	}
-	url := fmt.Sprintf("%s://%s%s", scheme, formatHostForURL(host), urlPath)
 	if !strings.HasPrefix(urlPath, "/") {
-		url = fmt.Sprintf("%s://%s/%s", scheme, formatHostForURL(host), urlPath)
+		urlPath = "/" + urlPath
 	}
+	url := fmt.Sprintf("%s://%s%s", scheme, host, urlPath)
 
 	body := ""
 	if headerEnd < len(data) {
@@ -1557,13 +1563,26 @@ func hasPrefixFold(b, prefix []byte) bool {
 	return true
 }
 
-// formatHostForURL 为 URL 拼装格式化 Host：IPv6 字面量需加方括号，
+// formatIPForURL 将 IP 字面量格式化为 URL 主机段：IPv6 整体加方括号。
+// 与 formatHostForURL 不同：IP 字面量不含端口，无 host:port 歧义（如
+// "2001:db8::2:80" 是完整地址，不可拆出 ":80"）。
+func formatIPForURL(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	if ip.To4() != nil {
+		return ip.String()
+	}
+	return "[" + ip.String() + "]"
+}
+
+// formatHostForURL 为 URL 拼装格式化 Host 头的值：IPv6 字面量需加方括号，
 // 否则生成 "http://::1/path" 之类的非法 URL。
 // 裸 IPv6 尾部形如 ":8080"（无括号带端口，如 "fe80::1:8080"）时，
 // 拆出数字端口再整体括号化："[fe80::1]:8080"。
-// Brackets IPv6 literals in URLs ("http://::1/path" is invalid).
-// A trailing ":port" (e.g. "fe80::1:8080") is split off and bracketed as
-// "[fe80::1]:8080".
+// 仅用于 Host 头（host:port 语义）；IP 字面量请用 formatIPForURL。
+// 已知歧义："2001:db8::2:80" 既可读作完整 IPv6 也可读作 host:port，
+// Host 头语义下按后者处理（表达纯 IPv6 需方括号）。
 func formatHostForURL(host string) string {
 	if host == "" || strings.HasPrefix(host, "[") || strings.Count(host, ":") < 2 {
 		return host
