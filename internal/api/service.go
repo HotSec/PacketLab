@@ -61,9 +61,7 @@ func resendDialContext(trusted bool) func(ctx context.Context, network, addr str
 		if !trusted {
 			ip, err := resolveAllowedIP(ctx, host)
 			if err != nil {
-				if errors.Is(err, errBlockedTarget) {
-					return nil, errBlockedTarget
-				}
+				// errBlockedTarget 直接透传（重试循环的哨兵判断）
 				return nil, err
 			}
 			// 拨已校验的 IP（TLS SNI 由 http.Transport 按请求 URL host 设置，

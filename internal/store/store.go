@@ -335,8 +335,7 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 	}
 
 	querySQL := fmt.Sprintf(
-		`SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name, truncated
-		 FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
+		`SELECT %s FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, requestListColumns, whereClause)
 	args = append(args, limit, offset)
 
 	rows, err := s.readDB().Query(querySQL, args...)
@@ -347,16 +346,10 @@ func (s *Store) List(method, search, host string, errorOnly bool, limit, offset 
 
 	var items []models.RequestListItem
 	for rows.Next() {
-		var item models.RequestListItem
-		var capturedAt string
-		var truncated int
-		if err := rows.Scan(&item.ID, &item.Method, &item.URL, &item.Host,
-			&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS,
-			&item.CaptureMode, &item.ProcessPID, &item.ProcessName, &truncated); err != nil {
+		item, err := scanRequestListItem(rows)
+		if err != nil {
 			return nil, 0, fmt.Errorf("scan: %w", err)
 		}
-		item.Truncated = truncated == 1
-		item.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
 		items = append(items, item)
 	}
 
@@ -387,8 +380,8 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 	json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders)
 	json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders)
 	req.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
-	req.IsSSE = isSSE == 1
-	req.Truncated = truncated == 1
+	req.IsSSE = intToBool(isSSE)
+	req.Truncated = intToBool(truncated)
 
 	if req.ReqHeaders == nil {
 		req.ReqHeaders = make(map[string]string)
@@ -524,7 +517,7 @@ func (s *Store) ListStarred(limit int) ([]models.RequestListItem, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	querySQL := `SELECT id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name, truncated
+	querySQL := `SELECT ` + requestListColumns + `
 			 FROM requests WHERE starred = 1 ORDER BY id DESC LIMIT ?`
 	rows, err := s.readDB().Query(querySQL, limit)
 	if err != nil {
@@ -534,16 +527,10 @@ func (s *Store) ListStarred(limit int) ([]models.RequestListItem, error) {
 
 	var items []models.RequestListItem
 	for rows.Next() {
-		var item models.RequestListItem
-		var capturedAt string
-		var truncated int
-		if err := rows.Scan(&item.ID, &item.Method, &item.URL, &item.Host,
-			&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS,
-			&item.CaptureMode, &item.ProcessPID, &item.ProcessName, &truncated); err != nil {
+		item, err := scanRequestListItem(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		item.Truncated = truncated == 1
-		item.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
 		items = append(items, item)
 	}
 	return items, nil
@@ -1128,6 +1115,26 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// intToBool 与 boolToInt 对称：SQLite 以 0/1 存储布尔。
+func intToBool(v int) bool { return v != 0 }
+
+// requestListColumns 列表查询的列清单（List 与 ListStarred 共用，与
+// scanRequestListItem 的 Scan 顺序严格对应；增列必须两处同步）。
+const requestListColumns = "id, method, url, host, status_code, duration_ms, size_bytes, captured_at, is_https, capture_mode, process_pid, process_name, truncated"
+
+// scanRequestListItem 扫描一行 RequestListItem（列顺序对应 requestListColumns）。
+func scanRequestListItem(rows *sql.Rows) (models.RequestListItem, error) {
+	var item models.RequestListItem
+	var capturedAt string
+	var truncated int
+	err := rows.Scan(&item.ID, &item.Method, &item.URL, &item.Host,
+		&item.StatusCode, &item.DurationMs, &item.SizeBytes, &capturedAt, &item.IsHTTPS,
+		&item.CaptureMode, &item.ProcessPID, &item.ProcessName, &truncated)
+	item.Truncated = intToBool(truncated)
+	item.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
+	return item, err
 }
 
 // truncateStr 截断字符串到 maxLen 字节，不会切断多字节 UTF-8 字符：
