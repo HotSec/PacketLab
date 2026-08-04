@@ -440,6 +440,20 @@ function animateContentIn(container, delay) {
 // Rendering — 请求列表
 // =============================================
 
+// 待审条目类型常量（与后端 models.PendingKindResponse 对齐）
+const PENDING_KIND_RESPONSE = 'response';
+
+// 待审徽标/状态展示计算（虚拟滚动与全量渲染两处共用，避免双处漂移）
+function pendingInfo(r) {
+  const isResp = r.is_pending && r.kind === PENDING_KIND_RESPONSE;
+  return {
+    isResp,
+    sc: (r.is_pending && !isResp) ? '' : `status-${Math.floor(r.status / 100)}xx`,
+    tag: r.is_pending ? `<span class="pending-tag">${isResp ? 'RESPONSE' : 'PENDING'}</span>` : '',
+    statusDisplay: r.is_pending ? (isResp ? r.status : '—') : r.status,
+  };
+}
+
 function renderRequestList() {
   const list = document.getElementById('requestList');
   virtualFiltered = requests.filter(r => {
@@ -469,20 +483,18 @@ function renderRequestList() {
     renderVirtualList();
   } else {
     list.innerHTML = filtered.map((r, i) => {
-      const isRespPending = r.is_pending && r.kind === 'response';
-      const sc = (r.is_pending && !isRespPending) ? '' : `status-${Math.floor(r.status / 100)}xx`;
+      const pi = pendingInfo(r);
       const ts = r.captured_at ? new Date(r.captured_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
       const pcls = r.is_pending ? ' pending' : '';
-      const pendingExtra = r.is_pending ? `<span class="pending-tag">${isRespPending ? 'RESPONSE' : 'PENDING'}</span>` : '';
       const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
       return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
         <span class="method-badge method-${escAttr(r.method)}">${esc(r.method)}</span>
-        <span class="status-code ${sc}">${r.is_pending ? (isRespPending ? r.status : '—') : r.status}</span>
+        <span class="status-code ${pi.sc}">${pi.statusDisplay}</span>
         <div class="request-info">
           <span class="request-url">${esc(r.url)}</span>
           <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
         </div>
-        ${pendingExtra}
+        ${pi.tag}
         <span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
       </div>`;
     }).join('');
@@ -502,23 +514,21 @@ function listCount() {
 
 // 渲染单个请求项的 HTML（虚拟滚动与全量渲染共用）
 function renderItemHTML(r, i) {
-  const isRespPending = r.is_pending && r.kind === 'response';
-  const sc = (r.is_pending && !isRespPending) ? '' : `status-${Math.floor(r.status / 100)}xx`;
+  const pi = pendingInfo(r);
   const pcls = r.is_pending ? ' pending' : '';
-  const pendingExtra = r.is_pending ? `<span class="pending-tag">${isRespPending ? 'RESPONSE' : 'PENDING'}</span>` : '';
   const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
   const starIcon = r.starred
     ? '<span class="star-btn starred" onclick="event.stopPropagation();toggleStar(' + r.id + ',true)" title="取消收藏">★</span>'
     : '<span class="star-btn" onclick="event.stopPropagation();toggleStar(' + r.id + ',false)" title="收藏">☆</span>';
   return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
     <span class="method-badge method-${escAttr(r.method)}">${esc(r.method)}</span>
-    <span class="status-code ${sc}">${r.is_pending ? (isRespPending ? r.status : '—') : r.status}</span>
+    <span class="status-code ${pi.sc}">${pi.statusDisplay}</span>
     <div class="request-info">
       <span class="request-url">${esc(r.url)}</span>
       <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
     </div>
     ${starIcon}
-    ${pendingExtra}
+    ${pi.tag}
     <span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
   </div>`;
 }
@@ -613,7 +623,7 @@ function fillContent(r, isPending) {
   document.getElementById('detailContent').style.display = 'flex';
   document.getElementById('interceptBar').classList.toggle('show', isPending);
 
-  const isRespPending = isPending && r.kind === 'response';
+  const isRespPending = isPending && r.kind === PENDING_KIND_RESPONSE;
   const barLabel = document.getElementById('interceptBarLabel');
   if (barLabel) barLabel.textContent = isRespPending ? '⏳ Pending — review this response' : '⏳ Pending — review this request';
 
@@ -1126,7 +1136,7 @@ async function toggleInterceptMode() {
   } catch (e) { showToast('error', 'Mode switch failed'); }
 }
 function pendingToReq(p) {
-  const isResp = p.kind === 'response';
+  const isResp = p.kind === PENDING_KIND_RESPONSE;
   return { id: p.id, method: p.method, url: p.url, host: p.host, path: p.path,
     kind: p.kind || 'request',
     status: isResp ? (p.status_code || 0) : 0, status_code: isResp ? (p.status_code || 0) : 0,
@@ -1165,7 +1175,7 @@ function pruneStalePending() {
 async function interceptAction(action) {
   if (!selectedRequestId || !pendingRequests[selectedRequestId]) return;
   const p = pendingRequests[selectedRequestId];
-  const isResp = p.kind === 'response';
+  const isResp = p.kind === PENDING_KIND_RESPONSE;
   // 始终读取当前表单值，以 'modify' 发送（允许未修改时原样转发）
   const m = document.getElementById('resendMethod').value, u = document.getElementById('resendUrl').value,
     b = document.getElementById('resendBody').value;

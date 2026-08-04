@@ -471,7 +471,7 @@ func waitForResponsePending(t *testing.T, it *Interceptor) *models.PendingReques
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, p := range it.GetPending() {
-			if p.Kind == "response" {
+			if p.Kind == models.PendingKindResponse {
 				return &p
 			}
 		}
@@ -675,7 +675,7 @@ func TestGetPending_ResponseEntries(t *testing.T) {
 	}()
 
 	n := waitForResponsePending(t, it)
-	if n.Kind != "response" {
+	if n.Kind != models.PendingKindResponse {
 		t.Errorf("expected kind=response, got %q", n.Kind)
 	}
 	if n.StatusCode != 500 {

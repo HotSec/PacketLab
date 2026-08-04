@@ -206,9 +206,9 @@ func TestProxy_ManualResponseModify(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && pendingID == "" {
 		for _, p := range it.GetPending() {
-			if p.Kind == "response" {
+			if p.Kind == models.PendingKindResponse {
 				pendingID = p.ID
-			} else if p.Kind == "request" {
+			} else if p.Kind == models.PendingKindRequest {
 				if err := it.Resolve(p.ID, models.InterceptResult{Action: "allow", RequestID: p.ID}); err != nil {
 					t.Fatalf("resolve request pending: %v", err)
 				}

@@ -135,6 +135,13 @@ type CleanupResponse struct {
 }
 
 // PendingRequest 待审批请求
+// 待审条目类型（PendingRequest.Kind / pendingReq.kind）的规范词表。
+// 前端据此切换请求/响应编辑布局，新增类型时必须同步前端。
+const (
+	PendingKindRequest  = "request"
+	PendingKindResponse = "response"
+)
+
 type PendingRequest struct {
 	ID        string            `json:"id"`
 	Method    string            `json:"method"`

@@ -41,7 +41,7 @@ type pendingReq struct {
 	timer     *time.Timer
 	createdAt time.Time
 	preview   string // 进入待审队列时快照的 body 预览（GetPending/通知共用，避免并发读流）
-	kind      string // "request"（默认）| "response"
+	kind      string // models.PendingKindRequest（默认）| models.PendingKindResponse
 	// 快照字段：Resolve/GetPending 在条目出队后仍要读 URL/method/host，
 	// kind=response 时 req 为 nil，不能从 req 上取
 	method string
@@ -136,11 +136,11 @@ func (it *Interceptor) GetPending() []models.PendingRequest {
 			Age:       time.Since(p.createdAt).Seconds(),
 			Kind:      p.kind,
 		}
-		if p.kind == "response" {
+		if p.kind == models.PendingKindResponse {
 			pr.StatusCode = p.resp.StatusCode
 			pr.Headers = api.FlattenHeaders(p.resp.Header)
 		} else {
-			pr.Kind = "request"
+			pr.Kind = models.PendingKindRequest
 			pr.Headers = api.FlattenHeaders(p.req.Header)
 		}
 		list = append(list, pr)
@@ -219,62 +219,30 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	}
 
 	// manual 模式：推入待审队列
-	id := fmt.Sprintf("req_%d", time.Now().UnixNano())
-	ch := make(chan models.InterceptResult, 1)
-	timer := time.NewTimer(it.timeout)
-
-	it.mu.Lock()
-	if len(it.pending) >= maxPending {
-		it.mu.Unlock()
-		timer.Stop()
-		it.writeLog(&models.InterceptLog{
-			Action:        "drop",
-			RequestURL:    req.URL.String(),
-			RequestMethod: req.Method,
-			RequestHost:   req.URL.Host,
-			RulePattern:   "",
-			Mode:          "manual",
-		})
-		return nil, goproxy.NewResponse(req, "text/plain", 429,
-			"PacketLab: pending queue full, request dropped")
-	}
 	pr := &pendingReq{
 		req:       req,
-		id:        id,
-		result:    ch,
+		id:        fmt.Sprintf("req_%d", time.Now().UnixNano()),
+		result:    make(chan models.InterceptResult, 1),
+		timer:     time.NewTimer(it.timeout),
 		createdAt: time.Now(),
-		timer:     timer,
 		preview:   readBody(req),
-		kind:      "request",
+		kind:      models.PendingKindRequest,
 		method:    req.Method,
 		url:       req.URL.String(),
 		host:      req.URL.Host,
 		path:      req.URL.Path,
 	}
-	it.pending[id] = pr
-	it.mu.Unlock()
-
-	// 通知前端（锁外操作，避免阻塞）
-	if it.onNotify != nil {
-		it.onNotify(&models.PendingRequest{
-			ID:        id,
-			Method:    req.Method,
-			URL:       req.URL.String(),
-			Host:      req.URL.Host,
-			Path:      req.URL.Path,
-			Headers:   api.FlattenHeaders(req.Header),
-			Body:      pr.preview,
-			Timestamp: pr.createdAt,
-			Kind:      "request",
-		})
+	if !it.enqueuePending(pr, &models.PendingRequest{
+		ID: pr.id, Method: pr.method, URL: pr.url, Host: pr.host, Path: pr.path,
+		Headers: api.FlattenHeaders(req.Header), Body: pr.preview,
+		Timestamp: pr.createdAt, Kind: models.PendingKindRequest,
+	}, &models.InterceptLog{Action: "drop", RequestURL: pr.url, RequestMethod: pr.method, RequestHost: pr.host, Mode: "manual"}) {
+		return nil, goproxy.NewResponse(req, "text/plain", 429,
+			"PacketLab: pending queue full, request dropped")
 	}
 
-	// 阻塞等待用户决定或超时 — pr 在锁内赋值，后续只读取 pr 自身字段（结果 channel 和 timer 安全）
 	// handleResult 处理用户决定（allow/modify/drop），返回 goproxy 期望的 (req, resp)。
-	// 提取为闭包以便 timer.C 分支复用：当 timer.C 与 ch 同时就绪时，select 可能选中
-	// timer.C 分支，此时若不消费 ch 会丢失用户操作。
 	handleResult := func(r models.InterceptResult) (*http.Request, *http.Response) {
-		timer.Stop()
 		switch r.Action {
 		case "allow", "modify":
 			modified := r.Method != "" || r.URL != "" || r.NewBody != "" || len(r.NewHeaders) > 0
@@ -319,37 +287,56 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 		}
 	}
 
-	select {
-	case r := <-ch:
-		return handleResult(r)
-	case <-timer.C:
-		// 优先非阻塞检查 ch：用户 Resolve 与 timer.C 同时就绪时，timer.Stop() 返回 false
-		// 但 timer.C 可能被 select 选中，导致用户操作被丢弃。先消费 ch 避免丢操作。
-		// Prefer ch over timer.C: when both are ready, select may pick timer.C,
-		// discarding the user's Resolve. Non-blocking check of ch first prevents
-		// the loss. Resolve already deleted pending and wrote the log, so we
-		// just reuse handleResult to process the action.
-		select {
-		case r := <-ch:
-			return handleResult(r)
-		default:
-		}
-		// ch 无就绪 → 超时自动放过 — 清理并放行
-		it.mu.Lock()
-		if _, ok := it.pending[id]; ok {
-			delete(it.pending, id)
-		}
-		it.mu.Unlock()
-		it.writeLog(&models.InterceptLog{
-			Action:        "allow",
-			RequestURL:    req.URL.String(),
-			RequestMethod: req.Method,
-			RequestHost:   req.URL.Host,
-			RulePattern:   "",
-			Mode:          "manual",
-		})
+	// 阻塞等待用户决定或超时 — pr 在锁内赋值，后续只读取 pr 自身字段（结果 channel 和 timer 安全）
+	r, timeout := it.awaitDecision(pr, &models.InterceptLog{
+		Action: "allow", RequestURL: pr.url, RequestMethod: pr.method, RequestHost: pr.host, Mode: "manual",
+	})
+	if timeout {
+		// 超时自动放过 — 原样转发
 		storeFunc(req)
 		return req, nil
+	}
+	return handleResult(r)
+}
+
+// enqueuePending 将条目推入待审队列并通知前端（锁外操作，避免阻塞）。
+// 队列满时写 drop 日志并返回 false（调用方负责构造拒绝响应）。
+func (it *Interceptor) enqueuePending(pr *pendingReq, notify *models.PendingRequest, dropLog *models.InterceptLog) bool {
+	it.mu.Lock()
+	if len(it.pending) >= maxPending {
+		it.mu.Unlock()
+		pr.timer.Stop()
+		it.writeLog(dropLog)
+		return false
+	}
+	it.pending[pr.id] = pr
+	it.mu.Unlock()
+
+	if it.onNotify != nil {
+		it.onNotify(notify)
+	}
+	return true
+}
+
+// awaitDecision 阻塞等待用户 Resolve 或超时，返回 (结果, 是否超时)。
+// Resolve 与 timer.C 同时就绪时 select 可能选中 timer.C——先非阻塞消费 ch 防丢用户操作。
+// 超时：从待审队列删除条目并写 allow 日志；后续默认动作由调用方决定。
+// Resolve 内已停止 timer，此处不再重复 Stop。
+func (it *Interceptor) awaitDecision(pr *pendingReq, timeoutLog *models.InterceptLog) (models.InterceptResult, bool) {
+	select {
+	case r := <-pr.result:
+		return r, false
+	case <-pr.timer.C:
+		select {
+		case r := <-pr.result:
+			return r, false
+		default:
+		}
+		it.mu.Lock()
+		delete(it.pending, pr.id)
+		it.mu.Unlock()
+		it.writeLog(timeoutLog)
+		return models.InterceptResult{Action: "allow"}, true
 	}
 }
 
@@ -369,59 +356,30 @@ func (it *Interceptor) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx
 	req := resp.Request
 	reqURL := req.URL.String()
 
-	id := fmt.Sprintf("res_%d", time.Now().UnixNano())
-	ch := make(chan models.InterceptResult, 1)
-	timer := time.NewTimer(it.timeout)
-
-	it.mu.Lock()
-	if len(it.pending) >= maxPending {
-		it.mu.Unlock()
-		timer.Stop()
-		it.writeLog(&models.InterceptLog{
-			Action:        "drop",
-			RequestURL:    reqURL,
-			RequestMethod: req.Method,
-			RequestHost:   req.URL.Host,
-			RulePattern:   "",
-			Mode:          "manual",
-		})
-		return goproxy.NewResponse(req, "text/plain", 429,
-			"PacketLab: pending queue full, response dropped")
-	}
 	pr := &pendingReq{
 		resp:      resp,
-		id:        id,
-		result:    ch,
+		id:        fmt.Sprintf("res_%d", time.Now().UnixNano()),
+		result:    make(chan models.InterceptResult, 1),
+		timer:     time.NewTimer(it.timeout),
 		createdAt: time.Now(),
-		timer:     timer,
 		preview:   readRespBody(resp),
-		kind:      "response",
+		kind:      models.PendingKindResponse,
 		method:    req.Method,
 		url:       reqURL,
 		host:      req.URL.Host,
 		path:      req.URL.Path,
 	}
-	it.pending[id] = pr
-	it.mu.Unlock()
-
-	if it.onNotify != nil {
-		it.onNotify(&models.PendingRequest{
-			ID:         id,
-			Kind:       "response",
-			Method:     req.Method,
-			URL:        reqURL,
-			Host:       req.URL.Host,
-			Path:       req.URL.Path,
-			StatusCode: resp.StatusCode,
-			Headers:    api.FlattenHeaders(resp.Header),
-			Body:       pr.preview,
-			Timestamp:  pr.createdAt,
-		})
+	if !it.enqueuePending(pr, &models.PendingRequest{
+		ID: pr.id, Kind: models.PendingKindResponse, Method: pr.method, URL: pr.url,
+		Host: pr.host, Path: pr.path, StatusCode: resp.StatusCode,
+		Headers: api.FlattenHeaders(resp.Header), Body: pr.preview, Timestamp: pr.createdAt,
+	}, &models.InterceptLog{Action: "drop", RequestURL: reqURL, RequestMethod: req.Method, RequestHost: req.URL.Host, Mode: "manual"}) {
+		return goproxy.NewResponse(req, "text/plain", 429,
+			"PacketLab: pending queue full, response dropped")
 	}
 
-	// 处理用户决定
+	// handleResult 处理用户决定
 	handleResult := func(r models.InterceptResult) *http.Response {
-		timer.Stop()
 		switch r.Action {
 		case "allow", "modify":
 			bodyReplaced := false
@@ -456,29 +414,13 @@ func (it *Interceptor) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx
 		}
 	}
 
-	select {
-	case r := <-ch:
-		return handleResult(r)
-	case <-timer.C:
-		// 与请求路径同：timer.C 被选中时先非阻塞消费 ch，防丢用户操作
-		select {
-		case r := <-ch:
-			return handleResult(r)
-		default:
-		}
-		it.mu.Lock()
-		delete(it.pending, id)
-		it.mu.Unlock()
-		it.writeLog(&models.InterceptLog{
-			Action:        "allow",
-			RequestURL:    reqURL,
-			RequestMethod: req.Method,
-			RequestHost:   req.URL.Host,
-			RulePattern:   "",
-			Mode:          "manual",
-		})
+	r, timeout := it.awaitDecision(pr, &models.InterceptLog{
+		Action: "allow", RequestURL: reqURL, RequestMethod: req.Method, RequestHost: req.URL.Host, Mode: "manual",
+	})
+	if timeout {
 		return resp
 	}
+	return handleResult(r)
 }
 
 // writeLog 非阻塞写入拦截日志到 channel。
