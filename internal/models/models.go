@@ -106,6 +106,8 @@ type InterceptResult struct {
 	URL        string            `json:"url,omitempty"`
 	NewHeaders map[string]string `json:"new_headers,omitempty"`
 	NewBody    string            `json:"new_body,omitempty"`
+	// StatusCode 响应拦截（kind=response）时修改的响应状态码；0 表示沿用原始值。
+	StatusCode int `json:"status_code,omitempty"`
 }
 
 // InterceptLog 拦截操作日志
@@ -143,4 +145,8 @@ type PendingRequest struct {
 	Body      string            `json:"body"`
 	Timestamp time.Time         `json:"timestamp"`
 	Age       float64           `json:"age_sec"`
+	// Kind 待审条目类型："request"（默认）| "response"。响应待审时
+	// Body/Headers 为响应内容，StatusCode 为响应状态码。
+	Kind       string `json:"kind,omitempty"`
+	StatusCode int    `json:"status_code,omitempty"`
 }

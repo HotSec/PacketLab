@@ -247,6 +247,33 @@ func (s *Server) setupHandlers() {
 			}
 		}
 
+		// 手动拦截：响应进入待审队列（SSE 已在上方提前返回，流式响应不经此路径）。
+		// 置于 LLM 处理之前，确保记录与 LLM 提取看到的是用户修改后的最终响应。
+		if s.interceptor != nil {
+			resp = s.interceptor.HandleResponse(resp, ctx, func(r *http.Response, bodyReplaced bool) {
+				// 将最终响应同步回捕获记录（修改后的状态码/头；body 仅在替换时重读）
+				captured.StatusCode = r.StatusCode
+				captured.ResHeaders = api.FlattenHeaders(r.Header)
+				if bodyReplaced && r.Body != nil {
+					head, rest, modifiedTrunc, readErr := readBodyBounded(r.Body, maxResBytes)
+					if readErr != nil {
+						slog.Warn("proxy: read modified response body failed", "url", captured.URL, "error", readErr)
+					}
+					if rest != nil {
+						r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), rest))
+					} else {
+						r.Body = io.NopCloser(bytes.NewReader(head))
+					}
+					captured.Truncated = modifiedTrunc
+					captured.SizeBytes = int64(len(head))
+					if modifiedTrunc && r.ContentLength > 0 {
+						captured.SizeBytes = r.ContentLength
+					}
+					captured.ResBody = string(head)
+				}
+			})
+		}
+
 		// LLM 请求：同步保存 + 提取 LLM 数据
 		if isLLM {
 			s.saveLLMCaptured(captured, reqCtx)

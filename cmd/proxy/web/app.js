@@ -469,14 +469,15 @@ function renderRequestList() {
     renderVirtualList();
   } else {
     list.innerHTML = filtered.map((r, i) => {
-      const sc = r.is_pending ? '' : `status-${Math.floor(r.status / 100)}xx`;
+      const isRespPending = r.is_pending && r.kind === 'response';
+      const sc = (r.is_pending && !isRespPending) ? '' : `status-${Math.floor(r.status / 100)}xx`;
       const ts = r.captured_at ? new Date(r.captured_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
       const pcls = r.is_pending ? ' pending' : '';
-      const pendingExtra = r.is_pending ? '<span class="pending-tag">PENDING</span>' : '';
+      const pendingExtra = r.is_pending ? `<span class="pending-tag">${isRespPending ? 'RESPONSE' : 'PENDING'}</span>` : '';
       const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
       return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
         <span class="method-badge method-${escAttr(r.method)}">${esc(r.method)}</span>
-        <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
+        <span class="status-code ${sc}">${r.is_pending ? (isRespPending ? r.status : '—') : r.status}</span>
         <div class="request-info">
           <span class="request-url">${esc(r.url)}</span>
           <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
@@ -501,16 +502,17 @@ function listCount() {
 
 // 渲染单个请求项的 HTML（虚拟滚动与全量渲染共用）
 function renderItemHTML(r, i) {
-  const sc = r.is_pending ? '' : `status-${Math.floor(r.status / 100)}xx`;
+  const isRespPending = r.is_pending && r.kind === 'response';
+  const sc = (r.is_pending && !isRespPending) ? '' : `status-${Math.floor(r.status / 100)}xx`;
   const pcls = r.is_pending ? ' pending' : '';
-  const pendingExtra = r.is_pending ? '<span class="pending-tag">PENDING</span>' : '';
+  const pendingExtra = r.is_pending ? `<span class="pending-tag">${isRespPending ? 'RESPONSE' : 'PENDING'}</span>` : '';
   const isActive = String(selectedRequestId) === String(r.id) ? ' active' : '';
   const starIcon = r.starred
     ? '<span class="star-btn starred" onclick="event.stopPropagation();toggleStar(' + r.id + ',true)" title="取消收藏">★</span>'
     : '<span class="star-btn" onclick="event.stopPropagation();toggleStar(' + r.id + ',false)" title="收藏">☆</span>';
   return `<div class="request-item${pcls}${isActive}" data-id="${r.id}">
     <span class="method-badge method-${escAttr(r.method)}">${esc(r.method)}</span>
-    <span class="status-code ${sc}">${r.is_pending ? '—' : r.status}</span>
+    <span class="status-code ${sc}">${r.is_pending ? (isRespPending ? r.status : '—') : r.status}</span>
     <div class="request-info">
       <span class="request-url">${esc(r.url)}</span>
       <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
@@ -611,6 +613,10 @@ function fillContent(r, isPending) {
   document.getElementById('detailContent').style.display = 'flex';
   document.getElementById('interceptBar').classList.toggle('show', isPending);
 
+  const isRespPending = isPending && r.kind === 'response';
+  const barLabel = document.getElementById('interceptBarLabel');
+  if (barLabel) barLabel.textContent = isRespPending ? '⏳ Pending — review this response' : '⏳ Pending — review this request';
+
   // 请求 tab
   document.getElementById('req-url').textContent = r.url || '';
   document.getElementById('req-method').textContent = r.method || '';
@@ -621,9 +627,9 @@ function fillContent(r, isPending) {
     Object.keys(rh).length > 0 ? Object.entries(rh).map(([k, v]) => `${k}: ${v}`).join('\n') : t('empty');
   document.getElementById('req-body-content').textContent = formatJSONBody(r.reqBody) || t('empty');
 
-  // 响应 tab
+  // 响应 tab（响应待审时已有真实状态/头/体，直接展示）
   const sc = `status-${Math.floor(r.status / 100)}xx`;
-  document.getElementById('res-status').innerHTML = isPending ? '—' : `<span class="status-code ${sc}">${r.status}</span>`;
+  document.getElementById('res-status').innerHTML = (isPending && !isRespPending) ? '—' : `<span class="status-code ${sc}">${r.status}</span>`;
   document.getElementById('res-time').textContent = r.time || '';
   document.getElementById('res-size').innerHTML = esc(r.size || '') + truncatedTag(r);
   const rsh = r.resHeaders || {};
@@ -631,14 +637,21 @@ function fillContent(r, isPending) {
     Object.keys(rsh).length > 0 ? Object.entries(rsh).map(([k, v]) => `${k}: ${v}`).join('\n') : t('empty');
   document.getElementById('res-body-content').textContent = formatJSONBody(r.resBody) || t('empty');
 
-  // 重发 tab
+  // 编辑 tab（待审时用于放行前修改；响应待审切换为响应编辑布局）
+  document.getElementById('resendRequestRow').style.display = isRespPending ? 'none' : '';
+  document.getElementById('resendStatusRow').style.display = isRespPending ? '' : 'none';
+  const editLabel = document.getElementById('resendEditLabel');
+  if (editLabel) editLabel.textContent = isRespPending ? '编辑响应' : '编辑请求';
+  const editHeaders = isRespPending ? rsh : rh;
+  const editBody = isRespPending ? (r.resBody || '') : (r.reqBody || '');
   document.getElementById('resendMethod').value = r.method || 'GET';
   document.getElementById('resendUrl').value = r.url || '';
-  document.getElementById('resendBody').value = r.reqBody || '';
+  if (isRespPending) document.getElementById('resendStatus').value = r.status || 200;
+  document.getElementById('resendBody').value = editBody;
   const hc = document.getElementById('resendHeaders'); hc.innerHTML = '';
-  if (rh && Object.keys(rh).length > 0) {
-    Object.entries(rh).forEach(([k, v]) => addHeaderRow(k, v));
-  } else {
+  if (editHeaders && Object.keys(editHeaders).length > 0) {
+    Object.entries(editHeaders).forEach(([k, v]) => addHeaderRow(k, v));
+  } else if (!isRespPending) {
     addHeaderRow('Host', r.host || '');
   }
 
@@ -1113,10 +1126,14 @@ async function toggleInterceptMode() {
   } catch (e) { showToast('error', 'Mode switch failed'); }
 }
 function pendingToReq(p) {
+  const isResp = p.kind === 'response';
   return { id: p.id, method: p.method, url: p.url, host: p.host, path: p.path,
-    status: 0, status_code: 0, duration_ms: 0, time: '', size: '', size_bytes: 0,
-    reqHeaders: p.headers || {}, reqBody: p.body || '',
-    resHeaders: {}, resBody: '', protocol: '', is_pending: true, captured_at: p.timestamp,
+    kind: p.kind || 'request',
+    status: isResp ? (p.status_code || 0) : 0, status_code: isResp ? (p.status_code || 0) : 0,
+    duration_ms: 0, time: '', size: '', size_bytes: 0,
+    reqHeaders: isResp ? {} : (p.headers || {}), reqBody: isResp ? '' : (p.body || ''),
+    resHeaders: isResp ? (p.headers || {}) : {}, resBody: isResp ? (p.body || '') : '',
+    protocol: '', is_pending: true, captured_at: p.timestamp,
     starred: false };
 }
 function addPendingToList(p) {
@@ -1148,13 +1165,18 @@ function pruneStalePending() {
 async function interceptAction(action) {
   if (!selectedRequestId || !pendingRequests[selectedRequestId]) return;
   const p = pendingRequests[selectedRequestId];
+  const isResp = p.kind === 'response';
   // 始终读取当前表单值，以 'modify' 发送（允许未修改时原样转发）
   const m = document.getElementById('resendMethod').value, u = document.getElementById('resendUrl').value,
     b = document.getElementById('resendBody').value;
   const hrs = document.querySelectorAll('#resendHeaders .kv-editor-row'); const h = {};
   hrs.forEach(r => { const k = r.querySelector('.header-key').value.trim(); const v = r.querySelector('.header-value').value.trim(); if (k) h[k] = v; });
+  const act = action === 'drop' ? 'drop' : 'modify';
+  const payload = isResp
+    ? { request_id: selectedRequestId, action: act, status_code: parseInt(document.getElementById('resendStatus').value, 10) || 0, new_headers: h, new_body: b }
+    : { request_id: selectedRequestId, action: act, method: m, url: u, new_headers: h, new_body: b };
   try {
-    await apiPost('/api/intercept/action', { request_id: selectedRequestId, action: action === 'drop' ? 'drop' : 'modify', method: m, url: u, new_headers: h, new_body: b });
+    await apiPost('/api/intercept/action', payload);
   } catch (e) { showToast('error', 'Intercept failed'); }
   removePending(selectedRequestId);
 }

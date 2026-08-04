@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,11 +35,19 @@ type Interceptor struct {
 
 type pendingReq struct {
 	req       *http.Request
+	resp      *http.Response // kind=response 时的待审响应
 	id        string
 	result    chan models.InterceptResult
 	timer     *time.Timer
 	createdAt time.Time
 	preview   string // 进入待审队列时快照的 body 预览（GetPending/通知共用，避免并发读流）
+	kind      string // "request"（默认）| "response"
+	// 快照字段：Resolve/GetPending 在条目出队后仍要读 URL/method/host，
+	// kind=response 时 req 为 nil，不能从 req 上取
+	method string
+	url    string
+	host   string
+	path   string
 }
 
 // maxPending 待审队列上限：超过后新请求直接拒绝（防止无人审批时无限堆积）。
@@ -116,17 +125,25 @@ func (it *Interceptor) GetPending() []models.PendingRequest {
 	defer it.mu.RUnlock()
 	var list []models.PendingRequest
 	for _, p := range it.pending {
-		list = append(list, models.PendingRequest{
+		pr := models.PendingRequest{
 			ID:        p.id,
-			Method:    p.req.Method,
-			URL:       p.req.URL.String(),
-			Host:      p.req.URL.Host,
-			Path:      p.req.URL.Path,
-			Headers:   api.FlattenHeaders(p.req.Header),
+			Method:    p.method,
+			URL:       p.url,
+			Host:      p.host,
+			Path:      p.path,
 			Body:      p.preview,
 			Timestamp: p.createdAt,
 			Age:       time.Since(p.createdAt).Seconds(),
-		})
+			Kind:      p.kind,
+		}
+		if p.kind == "response" {
+			pr.StatusCode = p.resp.StatusCode
+			pr.Headers = api.FlattenHeaders(p.resp.Header)
+		} else {
+			pr.Kind = "request"
+			pr.Headers = api.FlattenHeaders(p.req.Header)
+		}
+		list = append(list, pr)
 	}
 	return list
 }
@@ -148,9 +165,9 @@ func (it *Interceptor) Resolve(id string, result models.InterceptResult) error {
 	// 记录拦截日志（非阻塞）
 	it.writeLog(&models.InterceptLog{
 		Action:        result.Action,
-		RequestURL:    p.req.URL.String(),
-		RequestMethod: p.req.Method,
-		RequestHost:   p.req.URL.Host,
+		RequestURL:    p.url,
+		RequestMethod: p.method,
+		RequestHost:   p.host,
 		RulePattern:   "",
 		Mode:          "manual",
 	})
@@ -228,6 +245,11 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 		createdAt: time.Now(),
 		timer:     timer,
 		preview:   readBody(req),
+		kind:      "request",
+		method:    req.Method,
+		url:       req.URL.String(),
+		host:      req.URL.Host,
+		path:      req.URL.Path,
 	}
 	it.pending[id] = pr
 	it.mu.Unlock()
@@ -243,6 +265,7 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 			Headers:   api.FlattenHeaders(req.Header),
 			Body:      pr.preview,
 			Timestamp: pr.createdAt,
+			Kind:      "request",
 		})
 	}
 
@@ -330,6 +353,134 @@ func (it *Interceptor) Handle(req *http.Request, ctx *goproxy.ProxyCtx, storeFun
 	}
 }
 
+// HandleResponse 处理响应（manual 模式阻塞等待用户决定；auto 模式直放行）。
+// 用户可修改响应状态码/头/体（对应 InterceptResult.StatusCode/NewHeaders/NewBody），
+// drop 则替换为 403。storeFunc(resp, bodyReplaced) 仅在用户实际修改时调用，
+// 将最终响应同步回捕获记录（未修改时不重读 body，避免截断大响应多拉上游数据）。
+// SSE 等流式响应不应经过此函数（预览会阻塞流），调用方负责过滤。
+func (it *Interceptor) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx, storeFunc func(*http.Response, bool)) *http.Response {
+	it.mu.RLock()
+	mode := it.mode
+	it.mu.RUnlock()
+
+	if mode != "manual" || resp == nil || resp.Request == nil {
+		return resp
+	}
+	req := resp.Request
+	reqURL := req.URL.String()
+
+	id := fmt.Sprintf("res_%d", time.Now().UnixNano())
+	ch := make(chan models.InterceptResult, 1)
+	timer := time.NewTimer(it.timeout)
+
+	it.mu.Lock()
+	if len(it.pending) >= maxPending {
+		it.mu.Unlock()
+		timer.Stop()
+		it.writeLog(&models.InterceptLog{
+			Action:        "drop",
+			RequestURL:    reqURL,
+			RequestMethod: req.Method,
+			RequestHost:   req.URL.Host,
+			RulePattern:   "",
+			Mode:          "manual",
+		})
+		return goproxy.NewResponse(req, "text/plain", 429,
+			"PacketLab: pending queue full, response dropped")
+	}
+	pr := &pendingReq{
+		resp:      resp,
+		id:        id,
+		result:    ch,
+		createdAt: time.Now(),
+		timer:     timer,
+		preview:   readRespBody(resp),
+		kind:      "response",
+		method:    req.Method,
+		url:       reqURL,
+		host:      req.URL.Host,
+		path:      req.URL.Path,
+	}
+	it.pending[id] = pr
+	it.mu.Unlock()
+
+	if it.onNotify != nil {
+		it.onNotify(&models.PendingRequest{
+			ID:         id,
+			Kind:       "response",
+			Method:     req.Method,
+			URL:        reqURL,
+			Host:       req.URL.Host,
+			Path:       req.URL.Path,
+			StatusCode: resp.StatusCode,
+			Headers:    api.FlattenHeaders(resp.Header),
+			Body:       pr.preview,
+			Timestamp:  pr.createdAt,
+		})
+	}
+
+	// 处理用户决定
+	handleResult := func(r models.InterceptResult) *http.Response {
+		timer.Stop()
+		switch r.Action {
+		case "allow", "modify":
+			bodyReplaced := false
+			if r.StatusCode > 0 {
+				resp.StatusCode = r.StatusCode
+				if text := http.StatusText(r.StatusCode); text != "" {
+					resp.Status = fmt.Sprintf("%d %s", r.StatusCode, text)
+				} else {
+					resp.Status = fmt.Sprintf("%d", r.StatusCode)
+				}
+			}
+			for k, v := range r.NewHeaders {
+				resp.Header.Set(k, v)
+			}
+			if r.NewBody != "" {
+				body := []byte(r.NewBody)
+				resp.Body = io.NopCloser(bytes.NewReader(body))
+				resp.ContentLength = int64(len(body))
+				resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+				bodyReplaced = true
+			}
+			// 仅在实际修改时同步捕获记录：未修改的截断大响应若重读 body
+			// 会从上游多拉数据（rest 为无界流）
+			if r.StatusCode > 0 || len(r.NewHeaders) > 0 || bodyReplaced {
+				storeFunc(resp, bodyReplaced)
+			}
+			return resp
+		case "drop":
+			return goproxy.NewResponse(req, "text/plain", 403, "Blocked by PacketLab")
+		default:
+			return resp
+		}
+	}
+
+	select {
+	case r := <-ch:
+		return handleResult(r)
+	case <-timer.C:
+		// 与请求路径同：timer.C 被选中时先非阻塞消费 ch，防丢用户操作
+		select {
+		case r := <-ch:
+			return handleResult(r)
+		default:
+		}
+		it.mu.Lock()
+		delete(it.pending, id)
+		it.mu.Unlock()
+		it.writeLog(&models.InterceptLog{
+			Action:        "allow",
+			RequestURL:    reqURL,
+			RequestMethod: req.Method,
+			RequestHost:   req.URL.Host,
+			RulePattern:   "",
+			Mode:          "manual",
+		})
+		return resp
+	}
+}
+
 // writeLog 非阻塞写入拦截日志到 channel。
 // 持读锁期间 channel 不会被 close，确保 send 安全。
 func (it *Interceptor) writeLog(log *models.InterceptLog) {
@@ -413,5 +564,22 @@ func readBody(req *http.Request) string {
 	preview := raw[:n]
 	// 将已读部分拼回流首，恢复完整请求体
 	req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(preview), req.Body))
+	return string(preview)
+}
+
+// readRespBody 读取响应体预览（最多 maxBodyPreview 字节），不破坏转发流。
+// 与 readBody 的 fallback 路径同理：响应无 GetBody，预览后拼回 MultiReader。
+// 注意：SSE 等流式响应不可经此函数（ReadFull 会阻塞等待填充），调用方负责过滤。
+func readRespBody(resp *http.Response) string {
+	if resp.Body == nil {
+		return ""
+	}
+	raw := make([]byte, maxBodyPreview)
+	n, _ := io.ReadFull(resp.Body, raw)
+	if n == 0 {
+		return ""
+	}
+	preview := raw[:n]
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(preview), resp.Body))
 	return string(preview)
 }

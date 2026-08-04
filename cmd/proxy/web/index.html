@@ -88,7 +88,7 @@
 <div class="detail-empty-sub" data-i18n="select_request_hint">从左侧请求列表点击任意条目，即可查看请求/响应详情、编辑并重发</div>
 </div>
 <div class="detail-content" id="detailContent" style="display:none">
-<div class="intercept-bar" id="interceptBar"><span style="font-size:11px;font-weight:600;color:var(--yellow)">⏳ Pending — review this request</span><div class="intercept-actions"><button class="intercept-btn allow" onclick="interceptAction('allow')">Allow</button><button class="intercept-btn drop" onclick="interceptAction('drop')">Drop</button></div></div>
+<div class="intercept-bar" id="interceptBar"><span style="font-size:11px;font-weight:600;color:var(--yellow)" id="interceptBarLabel">⏳ Pending — review this request</span><div class="intercept-actions"><button class="intercept-btn allow" onclick="interceptAction('allow')">Allow</button><button class="intercept-btn drop" onclick="interceptAction('drop')">Drop</button></div></div>
 <div class="detail-tabs">
 <button class="detail-tab active" data-tab="request" onclick="switchTab('request')" data-i18n="tab_request">请求</button>
 <button class="detail-tab" data-tab="response" onclick="switchTab('response')" data-i18n="tab_response">响应</button>
@@ -123,8 +123,11 @@
 <div id="res-body-wrap" class="code-block"><div class="code-block-header"><span class="code-block-lang">Body</span><button class="mini-btn" onclick="copyToClipboard('res-body-wrap')" data-i18n="copy">复制</button></div><pre id="res-body-content"></pre></div></div>
 </div>
 <div class="tab-panel" id="tab-resend">
-<div class="detail-section"><div class="section-label" data-i18n="edit_request">编辑请求</div>
-<div class="resend-url-row">
+<div class="detail-section"><div class="section-label" id="resendEditLabel" data-i18n="edit_request">编辑请求</div>
+<div class="resend-url-row" id="resendStatusRow" style="display:none">
+<input type="number" class="url-input" id="resendStatus" placeholder="200" min="100" max="599" style="max-width:120px">
+</div>
+<div class="resend-url-row" id="resendRequestRow">
 <select class="method-select" id="resendMethod"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option><option>CONNECT</option><option>TRACE</option></select>
 <input type="text" class="url-input" id="resendUrl" placeholder="https://api.example.com/endpoint">
 <button class="mini-btn primary" onclick="sendResend()" data-tooltip="发送请求" title="发送请求" id="resendBtn">

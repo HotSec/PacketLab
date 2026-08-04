@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -445,6 +446,252 @@ func TestHandleManualTimeout(t *testing.T) {
 		// OK — request auto-released via timeout
 	case <-time.After(3 * time.Second):
 		t.Fatal("Handle did not return after timeout")
+	}
+}
+
+// ========================================
+// HandleResponse — manual mode, response modify/drop/timeout
+// ========================================
+
+func newTestResponse(t *testing.T, status int, body string) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest("GET", "https://example.com/api", nil)
+	return &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:     http.Header{"Content-Type": []string{"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+// 等待响应进入待审队列并返回 PendingRequest（kind=response）
+func waitForResponsePending(t *testing.T, it *Interceptor) *models.PendingRequest {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, p := range it.GetPending() {
+			if p.Kind == "response" {
+				return &p
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected response pending entry within 2s")
+	return nil
+}
+
+func TestInterceptor_ManualResponse_ModifyStatusHeadersBody(t *testing.T) {
+	it := NewInterceptor(2*time.Second, nil, nil)
+	it.SetMode("manual")
+
+	resp := newTestResponse(t, 200, "original-body")
+
+	var stored *http.Response
+	var storedBodyReplaced bool
+	done := make(chan struct{})
+	var resultResp *http.Response
+	go func() {
+		defer close(done)
+		resultResp = it.HandleResponse(resp, nil, func(r *http.Response, bodyReplaced bool) {
+			stored = r
+			storedBodyReplaced = bodyReplaced
+		})
+	}()
+
+	n := waitForResponsePending(t, it)
+	if n.StatusCode != 200 {
+		t.Errorf("expected pending status_code=200, got %d", n.StatusCode)
+	}
+	if n.Body != "original-body" {
+		t.Errorf("expected pending body preview, got %q", n.Body)
+	}
+
+	if err := it.Resolve(n.ID, models.InterceptResult{
+		Action:     "modify",
+		RequestID:  n.ID,
+		StatusCode: 418,
+		NewHeaders: map[string]string{"X-Injected": "yes"},
+		NewBody:    "modified-body",
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleResponse did not return after resolve")
+	}
+
+	if resultResp == nil {
+		t.Fatal("expected response")
+	}
+	if resultResp.StatusCode != 418 {
+		t.Errorf("expected status 418, got %d", resultResp.StatusCode)
+	}
+	if !strings.HasPrefix(resultResp.Status, "418") {
+		t.Errorf("expected Status to start with 418, got %q", resultResp.Status)
+	}
+	if resultResp.Header.Get("X-Injected") != "yes" {
+		t.Errorf("expected X-Injected=yes, got %q", resultResp.Header.Get("X-Injected"))
+	}
+	if resultResp.Header.Get("Content-Length") != "13" {
+		t.Errorf("expected Content-Length=13, got %q", resultResp.Header.Get("Content-Length"))
+	}
+	body, err := io.ReadAll(resultResp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "modified-body" {
+		t.Errorf("expected modified-body, got %q", string(body))
+	}
+	if stored != resultResp || !storedBodyReplaced {
+		t.Errorf("expected storeFunc called with bodyReplaced=true, got %v", storedBodyReplaced)
+	}
+}
+
+// 回归：仅修改响应头（不改 body）时不得丢失响应体
+func TestInterceptor_ManualResponse_HeadersOnlyKeepsBody(t *testing.T) {
+	it := NewInterceptor(2*time.Second, nil, nil)
+	it.SetMode("manual")
+
+	resp := newTestResponse(t, 200, "keep-me")
+
+	done := make(chan struct{})
+	var resultResp *http.Response
+	go func() {
+		defer close(done)
+		resultResp = it.HandleResponse(resp, nil, func(r *http.Response, bodyReplaced bool) {})
+	}()
+
+	n := waitForResponsePending(t, it)
+	if err := it.Resolve(n.ID, models.InterceptResult{
+		Action:     "modify",
+		RequestID:  n.ID,
+		NewHeaders: map[string]string{"X-Added": "1"},
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleResponse did not return")
+	}
+
+	if resultResp.Header.Get("X-Added") != "1" {
+		t.Errorf("expected X-Added=1, got %q", resultResp.Header.Get("X-Added"))
+	}
+	body, err := io.ReadAll(resultResp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "keep-me" {
+		t.Errorf("expected body preserved, got %q", string(body))
+	}
+}
+
+func TestInterceptor_ManualResponse_Drop(t *testing.T) {
+	it := NewInterceptor(2*time.Second, nil, nil)
+	it.SetMode("manual")
+
+	resp := newTestResponse(t, 200, "payload")
+
+	done := make(chan struct{})
+	var resultResp *http.Response
+	go func() {
+		defer close(done)
+		resultResp = it.HandleResponse(resp, nil, func(r *http.Response, bodyReplaced bool) {})
+	}()
+
+	n := waitForResponsePending(t, it)
+	if err := it.Resolve(n.ID, models.InterceptResult{Action: "drop", RequestID: n.ID}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleResponse did not return")
+	}
+
+	if resultResp == nil || resultResp.StatusCode != 403 {
+		t.Fatalf("expected 403 after drop, got %v", resultResp)
+	}
+}
+
+func TestInterceptor_ManualResponse_TimeoutAutoAllows(t *testing.T) {
+	it := NewInterceptor(500*time.Millisecond, nil, nil)
+	it.SetMode("manual")
+
+	resp := newTestResponse(t, 201, "timeout-body")
+
+	done := make(chan struct{})
+	var resultResp *http.Response
+	go func() {
+		defer close(done)
+		resultResp = it.HandleResponse(resp, nil, func(r *http.Response, bodyReplaced bool) {
+			t.Error("storeFunc must not be called on timeout (no modification)")
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleResponse did not return after timeout")
+	}
+
+	if resultResp == nil || resultResp.StatusCode != 201 {
+		t.Fatalf("expected original 201 after timeout, got %v", resultResp)
+	}
+	// 待审队列应已清理
+	if n := len(it.GetPending()); n != 0 {
+		t.Errorf("expected 0 pending after timeout, got %d", n)
+	}
+}
+
+func TestInterceptor_AutoMode_ResponsePassesThrough(t *testing.T) {
+	it := NewInterceptor(time.Second, nil, nil)
+	it.SetMode("auto")
+
+	resp := newTestResponse(t, 200, "body")
+	resultResp := it.HandleResponse(resp, nil, func(r *http.Response, bodyReplaced bool) {
+		t.Error("storeFunc must not be called in auto mode")
+	})
+	if resultResp != resp {
+		t.Error("expected pass-through in auto mode")
+	}
+}
+
+func TestGetPending_ResponseEntries(t *testing.T) {
+	it := NewInterceptor(2*time.Second, nil, nil)
+	it.SetMode("manual")
+
+	resp := newTestResponse(t, 500, "server-error")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		it.HandleResponse(resp, nil, func(r *http.Response, bodyReplaced bool) {})
+	}()
+
+	n := waitForResponsePending(t, it)
+	if n.Kind != "response" {
+		t.Errorf("expected kind=response, got %q", n.Kind)
+	}
+	if n.StatusCode != 500 {
+		t.Errorf("expected status_code=500, got %d", n.StatusCode)
+	}
+	if n.Headers["Content-Type"] != "text/plain" {
+		t.Errorf("expected response headers snapshot, got %v", n.Headers)
+	}
+
+	if err := it.Resolve(n.ID, models.InterceptResult{Action: "allow", RequestID: n.ID}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleResponse did not return after resolve")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"packetlab/internal/models"
 	"packetlab/internal/store"
 )
 
@@ -152,6 +153,96 @@ func TestProxy_ForwardsFullResponseBody(t *testing.T) {
 // Bug 3 复现：HandleConnectFunc 收到的 host 形如 "abc.wns.windows.com:443"，
 // 旧实现直接对带端口的 host 做 HasSuffix(".wns.windows.com")，末尾是 ":443"，
 // 永远匹配不上，导致本应跳过 MITM 的主机被错误地解密。
+// TestProxy_ManualResponseModify 验证手动拦截响应的端到端流：上游响应进入待审
+// 队列 → 用户修改状态码/body → 客户端收到修改后的响应，且捕获记录同步。
+func TestProxy_ManualResponseModify(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("server-body"))
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	st, err := store.New(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	it := NewInterceptor(5*time.Second, nil, nil)
+	it.SetMode("manual")
+	defer it.Stop()
+
+	s := New(0, st, nil, nil, nil, it, 64, 64, false)
+	proxySrv := httptest.NewServer(s.proxy)
+	defer proxySrv.Close()
+	defer s.Stop()
+
+	proxyURL, _ := url.Parse(proxySrv.URL)
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+
+	type clientResult struct {
+		status int
+		body   string
+	}
+	resultCh := make(chan clientResult, 1)
+	go func() {
+		resp, err := client.Get(upstream.URL + "/api")
+		if err != nil {
+			resultCh <- clientResult{status: -1, body: err.Error()}
+			return
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		resultCh <- clientResult{status: resp.StatusCode, body: string(b)}
+	}()
+
+	// 手动模式：请求先进入待审队列，放行后才走到响应拦截。
+	// 循环：request 待审一律 allow，直到 response 待审出现。
+	var pendingID string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && pendingID == "" {
+		for _, p := range it.GetPending() {
+			if p.Kind == "response" {
+				pendingID = p.ID
+			} else if p.Kind == "request" {
+				if err := it.Resolve(p.ID, models.InterceptResult{Action: "allow", RequestID: p.ID}); err != nil {
+					t.Fatalf("resolve request pending: %v", err)
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pendingID == "" {
+		t.Fatal("expected response pending entry")
+	}
+
+	if err := it.Resolve(pendingID, models.InterceptResult{
+		Action:     "modify",
+		RequestID:  pendingID,
+		StatusCode: 502,
+		NewBody:    "injected",
+		NewHeaders: map[string]string{"X-Modified": "true"},
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	select {
+	case res := <-resultCh:
+		if res.status != 502 {
+			t.Errorf("expected client status 502, got %d (body=%q)", res.status, res.body)
+		}
+		if res.body != "injected" {
+			t.Errorf("expected client body injected, got %q", res.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client request did not complete")
+	}
+}
+
 func TestMatchSkipHost(t *testing.T) {
 	cases := []struct {
 		host     string
