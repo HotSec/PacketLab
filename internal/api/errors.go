@@ -52,6 +52,10 @@ func ErrUnauthorized() *AppError {
 	return newAppError("UNAUTHORIZED", "Missing or invalid API token", 401)
 }
 
+func ErrForbidden() *AppError {
+	return newAppError("FORBIDDEN", "Forbidden", 403)
+}
+
 func ErrConflict(message string) *AppError {
 	return newAppError("CONFLICT", message, 409)
 }

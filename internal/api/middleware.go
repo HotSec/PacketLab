@@ -69,6 +69,26 @@ func authMiddleware(apiToken string) func(http.Handler) http.Handler {
 	}
 }
 
+// csrfMiddleware 对状态变更请求（非 GET/HEAD/OPTIONS）要求自定义头
+// X-Requested-With: XMLHttpRequest。浏览器跨站 fetch/form 无法自动携带
+// 自定义头（需预检且预检会被 CORS 拒绝），因此可有效阻止恶意网页跨站
+// 调用 /api/resend、/api/intercept/*、/api/clear 等端点（CWE-352）。
+func csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		// WebSocket 升级请求本身是 GET，不在此列；其余状态变更请求必须带自定义头
+		if r.Header.Get("X-Requested-With") != "XMLHttpRequest" {
+			writeAppError(w, ErrForbidden())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func corsMiddleware(allowOrigins []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

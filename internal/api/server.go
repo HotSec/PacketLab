@@ -141,7 +141,7 @@ func (s *Server) setupRoutes() {
 
 func (s *Server) Handler() http.Handler {
 	h := securityHeadersMiddleware(corsMiddleware(s.allowOrigins)(
-		recoveryMiddleware(requestIDMiddleware(requestIDInjectorMiddleware(authMiddleware(s.apiToken)(s.mux))))))
+		csrfMiddleware(recoveryMiddleware(requestIDMiddleware(requestIDInjectorMiddleware(authMiddleware(s.apiToken)(s.mux)))))))
 	return rateLimitMiddleware(s.rateLimiter)(h)
 }
 

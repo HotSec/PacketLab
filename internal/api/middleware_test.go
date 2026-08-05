@@ -280,3 +280,76 @@ func TestRecoveryMiddlewareCatchesPanic(t *testing.T) {
 		t.Errorf("expected 500, got %d", w.Code)
 	}
 }
+
+func TestCSRFMiddlewareBlocksStateChangingWithoutHeader(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := csrfMiddleware(inner)
+
+	// POST 无自定义头 → 403
+	req := httptest.NewRequest("POST", "/api/resend", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for POST without X-Requested-With, got %d", w.Code)
+	}
+
+	// POST 带自定义头 → 放行
+	req2 := httptest.NewRequest("POST", "/api/resend", nil)
+	req2.Header.Set("X-Requested-With", "XMLHttpRequest")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("expected 200 for POST with X-Requested-With, got %d", w2.Code)
+	}
+
+	// GET 无头 → 放行（读操作不受 CSRF 影响）
+	req3 := httptest.NewRequest("GET", "/api/requests", nil)
+	w3 := httptest.NewRecorder()
+	handler.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Errorf("expected 200 for GET without header, got %d", w3.Code)
+	}
+}
+
+func TestAuthMiddlewareDefaultTokenRequired(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := authMiddleware("test-secret-token")(inner)
+
+	// 无 token → 401
+	req := httptest.NewRequest("GET", "/api/requests", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without token, got %d", w.Code)
+	}
+
+	// 正确 Bearer token → 放行
+	req2 := httptest.NewRequest("GET", "/api/requests", nil)
+	req2.Header.Set("Authorization", "Bearer test-secret-token")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("expected 200 with Bearer token, got %d", w2.Code)
+	}
+
+	// 查询参数 token → 放行（WS 握手用）
+	req3 := httptest.NewRequest("GET", "/ws?token=test-secret-token", nil)
+	w3 := httptest.NewRecorder()
+	handler.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Errorf("expected 200 with query token, got %d", w3.Code)
+	}
+
+	// 错误 token → 401
+	req4 := httptest.NewRequest("GET", "/api/requests", nil)
+	req4.Header.Set("Authorization", "Bearer wrong")
+	w4 := httptest.NewRecorder()
+	handler.ServeHTTP(w4, req4)
+	if w4.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with wrong token, got %d", w4.Code)
+	}
+}

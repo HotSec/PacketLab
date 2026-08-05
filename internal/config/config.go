@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,6 +99,20 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		return nil, fmt.Errorf("config: cannot create DB directory %s: %w", filepath.Dir(dbPath), err)
 	}
 
+	// 默认鉴权：未显式提供 --api-token / PACKETLAB_API_TOKEN 时自动生成随机 token，
+	// 避免默认安装无鉴权导致本机任意进程可读取解密流量。
+	// 生成后写入 baseDir/token 文件（0600），启动日志中会打印一次。
+	if apiToken == "" {
+		apiToken, err = generateAPIToken()
+		if err != nil {
+			return nil, fmt.Errorf("config: cannot generate api token: %w", err)
+		}
+		tokenPath := filepath.Join(baseDir, "token")
+		if werr := os.WriteFile(tokenPath, []byte(apiToken+"\n"), 0600); werr != nil {
+			fmt.Fprintf(os.Stderr, "config: warning: cannot write api token file %s: %v\n", tokenPath, werr)
+		}
+	}
+
 	if maxReqBodyKB < 0 {
 		return nil, fmt.Errorf("config: max-req-body-kb must be >= 0, got %d", maxReqBodyKB)
 	}
@@ -180,6 +196,15 @@ func Load(proxyPort, apiPort int, dbPath string, noProxy, noMitm, insecure bool,
 		LLMEndpoints:            llmEndpoints,
 	}
 	return cfg, nil
+}
+
+// generateAPIToken 生成 32 字节随机 token（hex 编码，64 字符）。
+func generateAPIToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // Addr formats a port into a listen address string

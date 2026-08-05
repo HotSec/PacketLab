@@ -129,6 +129,8 @@ async function apiFetch(path, options) {
   const doFetch = () => {
     const opts = options || {};
     opts.headers = Object.assign({}, opts.headers);
+    // CSRF 防护：服务端要求状态变更请求携带此自定义头（浏览器跨站无法自动携带）
+    if (!opts.headers['X-Requested-With']) opts.headers['X-Requested-With'] = 'XMLHttpRequest';
     const token = getApiToken();
     if (token && !opts.headers['Authorization']) opts.headers['Authorization'] = 'Bearer ' + token;
     return fetch(API_BASE + path, opts);

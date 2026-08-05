@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -118,6 +119,11 @@ func main() {
 		"api_host", cfg.APIHost, "api_auth", cfg.APIToken != "",
 		"db", cfg.DBPath, "no_proxy", cfg.NoProxy, "no_mitm", cfg.NoMitm, "insecure", cfg.Insecure,
 		"max_req_body_kb", cfg.MaxReqBodyKB, "max_res_body_kb", cfg.MaxResBodyKB)
+	if cfg.APIToken != "" {
+		tokenFile := filepath.Join(cfg.BaseDir, "token")
+		slog.Info("API 鉴权已启用：Web 界面首次访问会要求输入 token（从本日志或 "+tokenFile+" 获取）",
+			"hint", "cat "+tokenFile)
+	}
 
 	// 初始化存储
 	st, err := store.New(cfg.DBPath)

@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.1 (2026-08-05) — 安全修复（默认鉴权 + CSRF 防护）
+
+修复默认安装无 API 鉴权导致本机任意进程可读取解密流量、恶意网页可跨站重放请求的问题（Security Advisory GHSA-gp8p-c8gg-x422）。
+
+### 🔴 安全修复（P0）
+
+- **默认启用 API 鉴权**：未设置 `--api-token` / `PACKETLAB_API_TOKEN` 时自动生成随机 token，写入 `~/.packetlab/token`（0600）。Web 界面首次访问需输入 token。(`internal/config/config.go`, `cmd/proxy/main.go`)
+- **CSRF 防护**：状态变更请求（非 GET/HEAD/OPTIONS）必须携带 `X-Requested-With: XMLHttpRequest` 自定义头，阻止恶意网页跨站调用 `/api/resend`、`/api/intercept/*`、`/api/clear` 等端点。(`internal/api/middleware.go`, `internal/api/server.go`, `cmd/proxy/web/app.js`)
+- 新增 `SECURITY.md` 安全政策与漏洞报告渠道。
+
+### 影响
+
+所有 v0.1.0 及更早版本默认配置下 API 无鉴权。升级到 v0.1.1 后首次访问 Web 界面需从 `~/.packetlab/token` 获取 token。
+
+# Changelog
+
 ## v0.1.0 (2026-07-17) — 稳定性、安全、V3 完整交付
 
 v0.0.2 → v0.1.0 是稳定性延续版本，无破坏性变更，可直接替换二进制升级。

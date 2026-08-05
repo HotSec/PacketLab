@@ -31,6 +31,10 @@ func (c *e2eClient) do(method, path, body string) *httptest.ResponseRecorder {
 		req = httptest.NewRequest(method, path, nil)
 	}
 	req.Header.Set("Origin", "http://localhost:8080")
+	// CSRF 防护要求状态变更请求携带自定义头（模拟真实前端 apiFetch 行为）
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	}
 	// httptest.NewRequest 默认 RemoteAddr=192.0.2.1（远程客户端），
 	// e2e 测试模拟本机调试（重发到 mock 的 loopback 服务），标记为回环来源
 	req.RemoteAddr = "127.0.0.1:12345"

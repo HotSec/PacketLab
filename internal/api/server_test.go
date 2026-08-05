@@ -37,6 +37,10 @@ func testRequest(t *testing.T, s *Server, method, path string, body string) *htt
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
+	// CSRF 防护要求状态变更请求携带自定义头（模拟真实前端 apiFetch 行为）
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	return w

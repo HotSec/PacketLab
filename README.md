@@ -58,6 +58,12 @@ go build -o packetlab ./cmd/proxy/
 
 访问 `http://localhost:9090`，配置浏览器 HTTP 代理为 `localhost:8080`。
 
+> **安全说明（重要）**
+> - API 默认启用鉴权：未设置 `--api-token` / `PACKETLAB_API_TOKEN` 时，启动自动生成随机 token 并写入 `~/.packetlab/token`（仅本用户可读）。
+> - Web 界面首次访问会提示输入 token：`cat ~/.packetlab/token` 获取。
+> - 状态变更 API 要求 `X-Requested-With: XMLHttpRequest` 头（前端自动携带），防止恶意网页跨站调用（CSRF）。
+> - API 默认仅绑定 `127.0.0.1`。局域网访问需显式 `--api-host 0.0.0.0`，此时务必使用 `--api-token` 保护。
+
 ## HTTPS 证书安装
 
 启动时自动生成自签名 CA 证书至 `~/.packetlab/certs/ca.crt`。
