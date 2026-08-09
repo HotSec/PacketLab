@@ -230,12 +230,15 @@ func main() {
 	}
 
 	// API HTTP 服务器
+	// 不设 WriteTimeout：HAR 导出等流式响应需要长时间写入，
+	// 超时会导致大导出被截断为非法 JSON。ReadTimeout + ReadHeaderTimeout
+	// 已足以防 Slowloris。
 	apiHTTPServer := &http.Server{
-		Addr:         cfg.APIAddr(),
-		Handler:      apiSrv.Handler(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              cfg.APIAddr(),
+		Handler:           apiSrv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// 后台定期清理：每 N 小时执行一次，retention_days 由 settings 表控制（<=0 表示禁用）

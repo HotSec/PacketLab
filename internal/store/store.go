@@ -427,7 +427,7 @@ func (s *Store) ForEachFull(method, search, host string, errorOnly bool, limit, 
 	whereClause, args := s.listWhere(method, search, host, errorOnly)
 
 	querySQL := fmt.Sprintf(
-		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at
+		`SELECT id, method, url, host, path, protocol, is_https, req_headers, req_body, status_code, res_headers, res_body, duration_ms, size_bytes, captured_at, capture_mode, process_pid, process_name, is_sse, sse_events, truncated
 		 FROM requests WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, whereClause)
 	args = append(args, limit, offset)
 
@@ -440,12 +440,16 @@ func (s *Store) ForEachFull(method, search, host string, errorOnly bool, limit, 
 	for rows.Next() {
 		var req models.CapturedRequest
 		var reqHeadersJSON, resHeadersJSON, capturedAt string
+		var isSSE, truncated int
 		if err := rows.Scan(&req.ID, &req.Method, &req.URL, &req.Host, &req.Path, &req.Protocol, &req.IsHTTPS,
 			&reqHeadersJSON, &req.ReqBody, &req.StatusCode, &resHeadersJSON, &req.ResBody,
-			&req.DurationMs, &req.SizeBytes, &capturedAt); err != nil {
+			&req.DurationMs, &req.SizeBytes, &capturedAt,
+			&req.CaptureMode, &req.ProcessPID, &req.ProcessName, &isSSE, &req.SSEEvents, &truncated); err != nil {
 			slog.Warn("scan failed", "error", err)
 			continue
 		}
+		req.IsSSE = intToBool(isSSE)
+		req.Truncated = intToBool(truncated)
 		json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders)
 		json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders)
 		req.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
@@ -547,12 +551,14 @@ func (s *Store) UpdateResBody(id int64, resBody, sseEvents string, sizeBytes int
 	return err
 }
 
-// Clear 清空所有记录
+// Clear 清空所有记录（requests + intercept_logs）
 func (s *Store) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec("DELETE FROM requests")
-	if err != nil {
+	if _, err := s.db.Exec("DELETE FROM requests"); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec("DELETE FROM intercept_logs"); err != nil {
 		return err
 	}
 	s.hostCache = hostCacheEntry{}
@@ -611,6 +617,7 @@ func (s *Store) Stats() (total int, errors int, totalSize int64, err error) {
 	}
 	// 错误计数失败不影响主统计返回
 	if scanErr := s.readDB().QueryRow("SELECT COUNT(*) FROM requests WHERE status_code >= 400").Scan(&errors); scanErr != nil {
+		slog.Warn("stats error count failed", "error", scanErr)
 		errors = 0
 	}
 	return
@@ -871,6 +878,7 @@ func (s *Store) ListHosts(search string, limit, offset int) ([]string, int, erro
 		var h string
 		var cnt int
 		if err := rows.Scan(&h, &cnt); err != nil {
+			slog.Warn("scan host failed", "error", err)
 			continue
 		}
 		baseHost := stripPort(h)
@@ -959,9 +967,13 @@ func insertPath(node *APIMapNode, parts []string, fullPath string, methods map[s
 			}
 		}
 	} else {
-		// 中间节点 — 之前若是叶子节点则重置
+		// 中间节点 — 之前若是叶子节点则清空方法数据，避免残留统计
 		if child.IsLeaf {
 			child.IsLeaf = false
+			child.Methods = nil
+			child.Statuses = nil
+			child.Note = ""
+			child.NoteID = 0
 		}
 		insertPath(child, remaining, fullPath, methods, notesMap)
 	}

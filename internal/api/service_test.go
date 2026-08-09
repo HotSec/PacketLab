@@ -477,8 +477,8 @@ func TestFlattenHeaders(t *testing.T) {
 	if result["Content-Type"] != "text/html" {
 		t.Errorf("expected text/html, got %s", result["Content-Type"])
 	}
-	if result["X-Multi"] != "first" {
-		t.Errorf("expected first value for multi-header, got %s", result["X-Multi"])
+	if result["X-Multi"] != "first, second" {
+		t.Errorf("expected joined values for multi-header, got %s", result["X-Multi"])
 	}
 }
 

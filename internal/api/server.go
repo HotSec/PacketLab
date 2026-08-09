@@ -865,13 +865,11 @@ func (s *Server) handleExportHAR(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", "attachment; filename=packetlab.har")
-	// 流式导出：逐条写入，避免数千条完整记录一次性载入内存
+	// 流式导出：逐条写入，避免数千条完整记录一次性载入内存。
+	// ExportTo 已开始写响应体后报错时无法再发 HTTP 错误码（headers 已发送），
+	// 只能 log 并终止写入；客户端会收到截断的 JSON。
 	if err := s.harSvc.ExportTo(w, limit); err != nil {
-		if appErr, ok := err.(*AppError); ok {
-			writeAppError(w, appErr)
-		} else {
-			writeAppError(w, ErrInternal("Failed to export HAR"))
-		}
+		slog.Error("HAR export failed", "error", err, "limit", limit)
 		return
 	}
 }
@@ -970,7 +968,7 @@ func FlattenHeaders(h http.Header) map[string]string {
 	result := make(map[string]string)
 	for k, v := range h {
 		if len(v) > 0 {
-			result[k] = v[0]
+			result[k] = strings.Join(v, ", ")
 		}
 	}
 	return result
