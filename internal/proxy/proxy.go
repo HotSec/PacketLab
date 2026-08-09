@@ -490,10 +490,13 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 				if strings.HasPrefix(trimmed, "data:") {
 					data := strings.TrimSpace(trimmed[5:])
 					if data != "" && data != "[DONE]" {
-						if sseDataBuf.Len() > 0 {
-							sseDataBuf.WriteString("\n")
+						// 防止恶意 SSE 流无空行分隔导致 sseDataBuf 无限增长
+						if sseDataBuf.Len()+len(data)+1 <= int(maxResBytes) {
+							if sseDataBuf.Len() > 0 {
+								sseDataBuf.WriteString("\n")
+							}
+							sseDataBuf.WriteString(data)
 						}
-						sseDataBuf.WriteString(data)
 					}
 				} else if trimmed == "" {
 					// 事件边界：Feed 累积的 data

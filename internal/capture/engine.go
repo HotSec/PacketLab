@@ -171,7 +171,8 @@ func (e *Engine) resolveProcessCached(srcIP string, srcPort uint16, buildFn func
 	procTableBuildMu.Lock()
 	defer procTableBuildMu.Unlock()
 	e.procCacheMu.RLock()
-	if ts, ok := e.procCacheTS[key]; ok && now.Sub(ts) < e.procCacheTTL {
+	// 锁内用新的 time.Now() 复查，避免锁等待期间 now 过期
+	if ts, ok := e.procCacheTS[key]; ok && time.Now().Sub(ts) < e.procCacheTTL {
 		p := e.procCache[key]
 		e.procCacheMu.RUnlock()
 		return p
@@ -609,6 +610,7 @@ func (a *Assembler) Assemble(packet gopacket.Packet) {
 			}
 		}
 		stream = a.pool.New(clientIP, clientPort, serverPort)
+		stream.key = streamKey
 		a.streams[streamKey] = stream
 	}
 	a.mu.Unlock()
@@ -816,6 +818,7 @@ type TCPStream struct {
 	nonHTTP    bool // 标记为非HTTP流，跳过后续处理
 	firstData  bool // 是否已收到首批数据（用于非HTTP检测）
 	sniEmitted bool // 是否已emit TLS SNI记录
+	key        string // 在 a.streams 中的键，HandleClose 时直接删除避免 O(n) 遍历
 
 	// SSE 流式追踪
 	ssePending bool   // 是否为 SSE 流（已 emit 初始记录）
@@ -967,35 +970,19 @@ func (s *TCPStream) HandleClose(a *Assembler) {
 	defer s.mu.Unlock()
 
 	if s.nonHTTP {
-		for key, stream := range a.streams {
-			if stream == s {
-				delete(a.streams, key)
-				break
-			}
-		}
+		delete(a.streams, s.key)
 		return
 	}
 
 	// SSE 流关闭，最终 flush
 	if s.ssePending {
 		s.flushSSEEvents()
-		for key, stream := range a.streams {
-			if stream == s {
-				delete(a.streams, key)
-				break
-			}
-		}
+		delete(a.streams, s.key)
 		return
 	}
 
 	s.tryExtractHTTPOnClose()
-
-	for key, stream := range a.streams {
-		if stream == s {
-			delete(a.streams, key)
-			break
-		}
-	}
+	delete(a.streams, s.key)
 }
 
 // tryExtractHTTP 从双缓冲区中提取 HTTP 请求/响应并消费

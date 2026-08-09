@@ -369,7 +369,8 @@ func TestHandleCloseRemovesStream(t *testing.T) {
 
 	stream := pool.New(net.ParseIP("192.168.1.100"), 54321, 80)
 	stream.Feed([]byte("GET /close HTTP/1.1\r\nHost: close.test\r\n\r\n"), true)
-	a.streams["10.0.0.1:80-192.168.1.100:54321"] = stream
+	stream.key = "10.0.0.1:80-192.168.1.100:54321"
+	a.streams[stream.key] = stream
 
 	if len(a.streams) != 1 {
 		t.Fatalf("expected 1 stream, got %d", len(a.streams))
