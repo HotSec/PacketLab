@@ -40,6 +40,7 @@
 <button class="icon-btn" data-i18n-title="capture_toggle" data-tooltip="网卡抓包" title="网卡抓包" onclick="toggleNICCapture()" id="captureToggleBtn">
 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
 </button>
+<button class="mini-btn llm-overview-btn" onclick="openLLMOverview()" data-tooltip="AI 流量总览（成本/用量统计）" title="AI 流量总览">🤖 AI总览</button>
 <span class="mode-indicator mode-auto" id="modeIndicator">AUTO</span>
 <button class="mini-btn" onclick="openRulesPanel()" style="margin-left:4px" data-i18n-title="rules_manage" data-tooltip="规则管理" title="规则管理">⚙</button>
 </div>
@@ -72,6 +73,7 @@
 <button class="filter-chip" data-filter="PATCH" onclick="setFilter(this,'PATCH')">PATCH</button>
 <button class="filter-chip" data-filter="HEAD" onclick="setFilter(this,'HEAD')">HEAD</button>
 <button class="filter-chip" data-filter="OPTIONS" onclick="setFilter(this,'OPTIONS')">OPTIONS</button>
+<button class="filter-chip llm-chip" data-filter="__llm__" onclick="setLLMFilter(this)" id="llmFilterChip">🤖 AI</button>
 </div>
 <div class="request-list" id="requestList"></div>
 <div class="pagination-bar" id="paginationBar" style="display:none">
@@ -149,6 +151,7 @@
 <div class="api-map-tree" id="apimapTree"></div></div>
 </div>
 <div class="tab-panel" id="tab-llm">
+<div id="llmStatsPanel" class="llm-stats-panel" style="display:none"></div>
 <div id="llmContent"></div>
 </div>
 </div></div></section></div>

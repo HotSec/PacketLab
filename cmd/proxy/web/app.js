@@ -65,7 +65,7 @@ let requestDetailCache = {};
 let requestElCache = new Map(); // id → { el, sizeSpan, durSpan } DOM 缓存
 let selectedRequestId = null;
 let activeTab = 'request';
-let currentFilter = 'all', currentHost = '', errorFilterOnly = false, starredOnly = false, isRecording = true;
+let currentFilter = 'all', currentHost = '', errorFilterOnly = false, starredOnly = false, llmOnly = false, isRecording = true;
 
 // ── 刷新模式 ──────────────────────────────────
 // refreshMode: 'realtime' = WebSocket 实时追加（无分页）
@@ -311,6 +311,7 @@ function normalizeReq(r) {
     captured_at: r.captured_at, is_https: r.is_https,
     protocol: r.is_https ? 'HTTPS/1.1' : 'HTTP/1.1',
     reqHeaders: r.req_headers || {}, reqBody: r.req_body,
+    is_llm: !!r.is_llm,
     resHeaders: r.res_headers || {}, resBody: r.res_body,
     truncated: !!r.truncated,
     // 保留 starred 字段，避免 loadStarred/loadRequests 后二次过滤丢失收藏项
@@ -462,6 +463,7 @@ function renderRequestList() {
     if (currentFilter !== 'all' && r.method !== currentFilter) return false;
     if (errorFilterOnly && r.status < 400) return false;
     if (starredOnly && !r.starred) return false;
+    if (llmOnly && !r.is_llm) return false;
     const q = document.getElementById('searchInput').value.toLowerCase();
     if (q) { return r.url.toLowerCase().includes(q) || r.method.toLowerCase().includes(q) || String(r.status).includes(q); }
     return true;
@@ -494,7 +496,7 @@ function renderRequestList() {
         <span class="status-code ${pi.sc}">${pi.statusDisplay}</span>
         <div class="request-info">
           <span class="request-url">${esc(r.url)}</span>
-          <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
+          <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}${r.is_llm ? '<span class="llm-badge-mini" title="LLM API 调用">🤖</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
         </div>
         ${pi.tag}
         <span class="request-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
@@ -527,7 +529,7 @@ function renderItemHTML(r, i) {
     <span class="status-code ${pi.sc}">${pi.statusDisplay}</span>
     <div class="request-info">
       <span class="request-url">${esc(r.url)}</span>
-      <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
+      <div class="request-meta"><span>${esc(r.host)}</span>${r.process_name ? `<span style="color:var(--accent)">🐧 ${esc(r.process_name)}</span>` : ''}${r.capture_mode === 'nic' ? '<span style="color:var(--accent)">NIC</span>' : ''}${r.is_llm ? '<span class="llm-badge-mini" title="LLM API 调用">🤖</span>' : ''}<span class="item-duration">${r.time}</span><span class="item-size">${r.size}</span>${truncatedTag(r)}</div>
     </div>
     ${starIcon}
     ${pi.tag}
@@ -667,9 +669,9 @@ function fillContent(r, isPending) {
     addHeaderRow('Host', r.host || '');
   }
 
-  // LLM tab: show/hide based on detection
+  // LLM tab: show/hide based on server-side detection (is_llm 标记)
   const llmTabBtn = document.getElementById('tabBtnLLM');
-  const isLLM = isLLMRequest(r);
+  const isLLM = !!(r && r.is_llm);
   if (llmTabBtn) llmTabBtn.style.display = isLLM ? '' : 'none';
   // If switching away and LLM tab was active, go back to request tab
   if (!isLLM && activeTab === 'llm') switchTab('request');
@@ -761,7 +763,13 @@ function switchTab(tab) {
     ind.style.width = bt.offsetWidth + 'px';
   }
   if (tab === 'apimap') loadAPIMapHosts();
-  if (tab === 'llm' && selectedRequestId) loadLLMDetail(selectedRequestId);
+  if (tab === 'llm') {
+    if (llmOverviewOpen) {
+      loadLLMStats();
+    } else if (selectedRequestId) {
+      loadLLMDetail(selectedRequestId);
+    }
+  }
 }
 
 function syncAPIMapHost(host) {
@@ -1062,13 +1070,24 @@ function toggleCapture() {
   }
 }
 function setFilter(btn, f) {
-  currentFilter = f; currentHost = ''; currentPage = 1; errorFilterOnly = false; starredOnly = false;
+  currentFilter = f; currentHost = ''; currentPage = 1; errorFilterOnly = false; starredOnly = false; llmOnly = false;
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
   btn.classList.add('active');
   const eBtn = document.getElementById('errorFilterBtn');
   if (eBtn) { eBtn.classList.remove('active'); eBtn.style.background = 'transparent'; eBtn.style.color = 'var(--text-secondary)'; }
   const sBtn = document.getElementById('starredFilterBtn');
   if (sBtn) { sBtn.classList.remove('active'); sBtn.style.color = ''; }
+  loadRequests();
+}
+// AI 流量筛选：仅显示被识别为 LLM API 调用的请求（服务端 is_llm 标记）
+function setLLMFilter(btn) {
+  llmOnly = !llmOnly; currentHost = ''; currentPage = 1;
+  if (llmOnly) { currentFilter = 'all'; errorFilterOnly = false; starredOnly = false; }
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  if (llmOnly) btn.classList.add('active'); else {
+    const allBtn = document.querySelector('[data-filter="all"]');
+    if (allBtn) allBtn.classList.add('active');
+  }
   loadRequests();
 }
 function toggleErrorFilter() {
@@ -1497,31 +1516,21 @@ function renderInterceptLogs(logs) {
 })();
 
 // =============================================
-// LLM AI 对话视图
+// LLM AI 对话视图 + 全局统计（v0.1.2 重构）
 // =============================================
+//
+// LLM 检测以服务端 is_llm 标记为准（provider 检测覆盖 OpenAI/Anthropic/Gemini
+// 及 DeepSeek/Kimi/智谱 GLM/MiniMax/Qwen/xAI 等国内厂商 + 自定义端点）。
+// 前端不再维护硬编码 host 列表——单一事实来源在 internal/llm。
 
-const LLM_HOST_PATTERNS = [
-  { host: 'openai.com', provider: 'openai' },
-  { host: 'api.openai.com', provider: 'openai' },
-  { host: 'anthropic.com', provider: 'anthropic' },
-  { host: 'generativelanguage.googleapis.com', provider: 'gemini' },
-  { host: 'aiplatform.googleapis.com', provider: 'gemini' },
-];
-const LLM_PATH_PATTERNS = ['/chat/completions', '/v1/messages', '/generateContent', '/streamGenerateContent'];
-
-// 检测请求是否为 LLM API 调用
-function isLLMRequest(r) {
-  if (!r) return false;
-  const host = (r.host || '').toLowerCase();
-  const url = (r.url || '').toLowerCase();
-  for (const p of LLM_HOST_PATTERNS) {
-    if (host.includes(p.host)) return true;
-  }
-  for (const p of LLM_PATH_PATTERNS) {
-    if (url.includes(p)) return true;
-  }
-  return false;
-}
+// provider 展示名映射（后端 DisplayName 的前端镜像，兜底用原名）
+const LLM_PROVIDER_NAMES = {
+  openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google Gemini',
+  deepseek: 'DeepSeek', moonshot: 'Moonshot (Kimi)', zhipu: '智谱 GLM',
+  minimax: 'MiniMax', qwen: '阿里云 Qwen', xai: 'xAI (Grok)',
+  unknown: 'Unknown',
+};
+function llmProviderName(p) { return LLM_PROVIDER_NAMES[p] || p || 'unknown'; }
 
 // 渲染 LLM 对话内容
 function renderLLMContent(exchange) {
@@ -1542,7 +1551,7 @@ function renderLLMContent(exchange) {
 
   // Header: provider badge + model
   html += '<div class="llm-header">';
-  html += `<span class="llm-badge ${escAttr(provider)}">${esc(provider.toUpperCase())}</span>`;
+  html += `<span class="llm-badge ${escAttr(provider)}">${esc(llmProviderName(provider))}</span>`;
   if (model) html += `<span class="llm-model">${escapeHTML(model)}</span>`;
   if (exchange.stream) html += '<span class="llm-model">stream</span>';
   html += '</div>';
@@ -1553,7 +1562,7 @@ function renderLLMContent(exchange) {
     if (usage.prompt_tokens) html += `<div class="llm-usage-item"><span>Prompt Tokens</span><span class="llm-usage-val">${usage.prompt_tokens}</span></div>`;
     if (usage.completion_tokens) html += `<div class="llm-usage-item"><span>Completion Tokens</span><span class="llm-usage-val">${usage.completion_tokens}</span></div>`;
     if (usage.total_tokens) html += `<div class="llm-usage-item"><span>Total Tokens</span><span class="llm-usage-val">${usage.total_tokens}</span></div>`;
-    if (usage.cost_usd) html += `<div class="llm-usage-item"><span>Cost</span><span class="llm-usage-val">$${usage.cost_usd.toFixed(4)}</span></div>`;
+    if (usage.cost_usd) html += `<div class="llm-usage-item"><span>Cost</span><span class="llm-usage-val">$${usage.cost_usd.toFixed(6)}</span></div>`;
     html += '</div>';
   }
 
@@ -1621,4 +1630,132 @@ async function loadLLMDetail(id) {
     console.warn('loadLLMDetail failed', e);
     renderLLMContent(null);
   }
+}
+
+// =============================================
+// LLM 全局总览（成本/用量统计，/api/llm/stats）
+// =============================================
+
+let llmOverviewOpen = false;
+
+// 打开 AI 总览：切入「AI对话」tab 并在详情区顶部渲染统计面板
+function openLLMOverview() {
+  llmOverviewOpen = true;
+  const dp = document.getElementById('detailPanel');
+  if (dp) dp.classList.remove('collapsed');
+  // 详情区无选中请求时也允许总览：切换到 llm tab（无请求时不加载详情）
+  switchTab('llm');
+  loadLLMStats();
+}
+
+// 关闭总览面板（回到所选请求的对话详情）
+function closeLLMOverview() {
+  llmOverviewOpen = false;
+  const panel = document.getElementById('llmStatsPanel');
+  if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+  if (selectedRequestId) loadLLMDetail(selectedRequestId);
+}
+
+function fmtCostUSD(v) {
+  if (v == null || isNaN(v)) return '$0.000000';
+  if (v >= 1) return '$' + v.toFixed(2);
+  if (v >= 0.01) return '$' + v.toFixed(4);
+  return '$' + v.toFixed(6);
+}
+function fmtInt(n) {
+  const v = Number(n || 0);
+  if (v >= 1000000) return (v / 1000000).toFixed(2) + 'M';
+  if (v >= 10000) return (v / 1000).toFixed(1) + 'K';
+  return String(v);
+}
+
+// 拉取并渲染统计
+async function loadLLMStats() {
+  const panel = document.getElementById('llmStatsPanel');
+  if (!panel) return;
+  panel.style.display = '';
+  panel.innerHTML = '<div class="llm-stats-loading">加载统计中...</div>';
+  try {
+    const s = await apiGet('/api/llm/stats');
+    renderLLMStatsPanel(s);
+  } catch (e) {
+    console.warn('loadLLMStats failed', e);
+    panel.innerHTML = '<div class="llm-stats-loading">统计加载失败</div>';
+  }
+}
+
+// 刷新按钮（每次强制重新拉取）
+function refreshLLMStats() { loadLLMStats(); }
+
+function renderLLMStatsPanel(s) {
+  const panel = document.getElementById('llmStatsPanel');
+  if (!panel) return;
+  const totals = s.totals || {};
+  const byModel = s.by_model || [];
+  const byProvider = s.by_provider || [];
+
+  const percent = (part, whole) => {
+    if (!whole) return 0;
+    return Math.min(100, (part / whole) * 100);
+  };
+
+  let html = '<div class="llm-stats-box">';
+  html += '<div class="llm-stats-header">';
+  html += '<span class="llm-stats-title">🤖 AI 流量总览</span>';
+  html += '<div class="llm-stats-actions">';
+  html += '<button class="mini-btn" onclick="refreshLLMStats()">刷新</button>';
+  html += '<button class="mini-btn" onclick="closeLLMOverview()">关闭</button>';
+  html += '</div></div>';
+
+  // 总览卡片
+  html += '<div class="llm-stats-cards">';
+  html += `<div class="llm-stat-card"><div class="llm-stat-num">${fmtInt(totals.exchanges)}</div><div class="llm-stat-label">交换次数</div></div>`;
+  html += `<div class="llm-stat-card"><div class="llm-stat-num">${fmtInt(totals.prompt_tokens)}</div><div class="llm-stat-label">Prompt Tokens</div></div>`;
+  html += `<div class="llm-stat-card"><div class="llm-stat-num">${fmtInt(totals.completion_tokens)}</div><div class="llm-stat-label">Completion Tokens</div></div>`;
+  html += `<div class="llm-stat-card"><div class="llm-stat-num">${fmtInt(totals.total_tokens)}</div><div class="llm-stat-label">Total Tokens</div></div>`;
+  html += `<div class="llm-stat-card cost"><div class="llm-stat-num">${fmtCostUSD(totals.cost_usd)}</div><div class="llm-stat-label">估算成本 (USD)</div></div>`;
+  html += '</div>';
+
+  // 按模型分布
+  html += '<div class="llm-stats-section-title">按模型分布（成本降序）</div>';
+  if (byModel.length === 0) {
+    html += '<div class="llm-stats-empty">暂无 LLM 流量数据——通过代理调用一次 LLM API 后这里会显示成本统计</div>';
+  } else {
+    html += '<div class="llm-stats-table-wrap"><table class="llm-stats-table">';
+    html += '<thead><tr><th>模型</th><th>厂商</th><th>次数</th><th>Prompt</th><th>Completion</th><th>成本</th><th>占比</th></tr></thead><tbody>';
+    const totalCost = totals.cost_usd || 0;
+    for (const m of byModel) {
+      html += `<tr>
+        <td class="mono">${escapeHTML(m.model)}</td>
+        <td>${esc(llmProviderName(m.provider))}</td>
+        <td>${m.exchanges}</td>
+        <td>${fmtInt(m.prompt_tokens)}</td>
+        <td>${fmtInt(m.completion_tokens)}</td>
+        <td class="cost">${fmtCostUSD(m.cost_usd)}</td>
+        <td><div class="llm-cost-bar-bg"><div class="llm-cost-bar" style="width:${percent(m.cost_usd, totalCost)}%"></div></div></td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  // 按厂商分布
+  html += '<div class="llm-stats-section-title">按厂商分布</div>';
+  if (byProvider.length > 0) {
+    html += '<div class="llm-stats-table-wrap"><table class="llm-stats-table">';
+    html += '<thead><tr><th>厂商</th><th>次数</th><th>Prompt</th><th>Completion</th><th>Total</th><th>成本</th></tr></thead><tbody>';
+    for (const p of byProvider) {
+      html += `<tr>
+        <td>${esc(llmProviderName(p.provider))}</td>
+        <td>${p.exchanges}</td>
+        <td>${fmtInt(p.prompt_tokens)}</td>
+        <td>${fmtInt(p.completion_tokens)}</td>
+        <td>${fmtInt(p.total_tokens)}</td>
+        <td class="cost">${fmtCostUSD(p.cost_usd)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  html += '</div>';
+  panel.innerHTML = html;
 }

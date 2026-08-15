@@ -463,6 +463,12 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .llm-badge.openai{background:rgba(16,163,127,.15);color:#10a37f;border:1px solid rgba(16,163,127,.3)}
 .llm-badge.anthropic{background:rgba(217,119,87,.15);color:#d97757;border:1px solid rgba(217,119,87,.3)}
 .llm-badge.gemini{background:rgba(66,133,244,.15);color:#4285f4;border:1px solid rgba(66,133,244,.3)}
+.llm-badge.deepseek{background:rgba(77,107,254,.15);color:#4d6bfe;border:1px solid rgba(77,107,254,.3)}
+.llm-badge.moonshot{background:rgba(22,22,28,.25);color:var(--text-primary);border:1px solid var(--border-default)}
+.llm-badge.zhipu{background:rgba(56,94,255,.15);color:#385eff;border:1px solid rgba(56,94,255,.3)}
+.llm-badge.minimax{background:rgba(246,80,80,.15);color:#f65050;border:1px solid rgba(246,80,80,.3)}
+.llm-badge.qwen{background:rgba(96,51,204,.15);color:#6033cc;border:1px solid rgba(96,51,204,.3)}
+.llm-badge.xai{background:rgba(255,255,255,.12);color:var(--text-primary);border:1px solid var(--border-default)}
 .llm-badge.unknown{background:var(--bg-elevated);color:var(--text-secondary);border:1px solid var(--border-default)}
 .llm-model{font-size:12px;font-family:var(--font-mono);color:var(--text-secondary);background:var(--bg-elevated);padding:2px 8px;border-radius:var(--radius-sm)}
 .llm-usage{display:flex;gap:12px;font-size:11px;color:var(--text-secondary);margin-bottom:12px;padding:8px 12px;background:var(--bg-elevated);border-radius:var(--radius)}
@@ -479,3 +485,31 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .llm-response{margin-bottom:16px;padding:12px 14px;border-radius:var(--radius);font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;background:rgba(99,102,241,.06);border-left:3px solid var(--indigo,#6366f1)}
 .llm-empty{text-align:center;padding:40px 20px;color:var(--text-secondary);font-size:13px}
 .llm-copy-btn{margin-bottom:12px}
+
+/* ── LLM 全局总览 + AI 筛选（v0.1.2）── */
+.llm-badge-mini{font-size:11px;margin:0 2px;opacity:.9}
+.filter-chip.llm-chip{color:var(--accent);border-color:transparent}
+.filter-chip.llm-chip.active{background:var(--accent-muted, rgba(99,102,241,.15));color:var(--accent);border-color:var(--accent)}
+.llm-overview-btn{margin-left:2px}
+.llm-stats-panel{margin-bottom:14px}
+.llm-stats-box{background:var(--bg-elevated);border:1px solid var(--border-default);border-radius:var(--radius);padding:14px}
+.llm-stats-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.llm-stats-title{font-size:14px;font-weight:600}
+.llm-stats-actions{display:flex;gap:6px}
+.llm-stats-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:14px}
+.llm-stat-card{background:var(--bg-default);border:1px solid var(--border-default);border-radius:var(--radius-sm);padding:10px 12px}
+.llm-stat-card.cost{border-color:var(--accent);background:var(--accent-muted, rgba(99,102,241,.08))}
+.llm-stat-num{font-size:18px;font-weight:700;font-family:var(--font-mono);color:var(--text-primary)}
+.llm-stat-card.cost .llm-stat-num{color:var(--accent)}
+.llm-stat-label{font-size:10px;color:var(--text-secondary);margin-top:2px}
+.llm-stats-section-title{font-size:12px;font-weight:600;color:var(--text-secondary);margin:12px 0 6px}
+.llm-stats-empty{font-size:12px;color:var(--text-secondary);padding:16px;text-align:center;border:1px dashed var(--border-default);border-radius:var(--radius-sm)}
+.llm-stats-loading{font-size:12px;color:var(--text-secondary);padding:12px;text-align:center}
+.llm-stats-table-wrap{overflow-x:auto}
+.llm-stats-table{width:100%;border-collapse:collapse;font-size:12px}
+.llm-stats-table th{text-align:left;color:var(--text-secondary);font-weight:600;padding:6px 10px;border-bottom:1px solid var(--border-default);white-space:nowrap}
+.llm-stats-table td{padding:6px 10px;border-bottom:1px solid var(--border-default);white-space:nowrap}
+.llm-stats-table td.mono{font-family:var(--font-mono)}
+.llm-stats-table td.cost{font-family:var(--font-mono);color:var(--accent);font-weight:600}
+.llm-cost-bar-bg{width:60px;height:5px;background:var(--bg-default);border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle}
+.llm-cost-bar{height:100%;background:var(--accent);border-radius:3px}
