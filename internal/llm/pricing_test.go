@@ -71,14 +71,17 @@ func TestEstimateCost_ZeroTokens(t *testing.T) {
 }
 
 // TestLookupPricing_Boundary 验证前缀边界匹配：
-// "gpt-4" 不得误匹配 "gpt-4.1"/"gpt-4.5"（未覆盖模型应返回 0 成本而非 gpt-4 高价）；
+// "gpt-4" 不得误匹配 "gpt-4.1"（"gpt-4.1" 现在有官方价 key 直接命中；
+// 用未覆盖的 "gpt-4.5" 验证边界保护——不得回落到 "gpt-4" 高价）；
 // '-' 分隔的版本后缀仍应正常匹配。
 func TestLookupPricing_Boundary(t *testing.T) {
-	if p := LookupPricing("gpt-4.1"); p.InputPerMTokens != 0 || p.OutputPerMTokens != 0 {
-		t.Errorf("gpt-4.1 should have zero pricing, got %+v", p)
+	// gpt-4.1 已有官方价（$2/$8），直接命中
+	if p := LookupPricing("gpt-4.1"); p.InputPerMTokens != 2.00 || p.OutputPerMTokens != 8.00 {
+		t.Errorf("gpt-4.1 should match official pricing 2/8, got %+v", p)
 	}
+	// gpt-4.5 未覆盖：边界保护使其不得回落到 "gpt-4" 高价
 	if p := LookupPricing("gpt-4.5"); p.InputPerMTokens != 0 || p.OutputPerMTokens != 0 {
-		t.Errorf("gpt-4.5 should have zero pricing, got %+v", p)
+		t.Errorf("gpt-4.5 should have zero pricing (boundary guard), got %+v", p)
 	}
 	// 版本日期经 '-' 连接，属于同一模型家族，应正常匹配
 	if p := LookupPricing("gpt-4-turbo-2024-04-09"); p.InputPerMTokens != 10.00 {

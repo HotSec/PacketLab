@@ -10,24 +10,24 @@ func TestPricingChineseModels(t *testing.T) {
 		wantOutput    float64
 		wantCacheRead float64
 	}{
-		// 智谱 GLM（OpenCode Go 2026-08-01）
+		// 智谱 GLM（models.dev 官方 API 价 2026-08 同步）
 		{"glm-5.2", 1.40, 4.40, 0.26},
 		{"glm-5.1", 1.40, 4.40, 0.26},
 		{"GLM-5.2", 1.40, 4.40, 0.26}, // 大小写不敏感
 		// Kimi
 		{"kimi-k3", 3.00, 15.00, 0.30},
-		{"kimi-k2.7", 0.95, 4.00, 0.19},
+		{"kimi-k2.7-code", 0.95, 4.00, 0.19},
 		// MiniMax
 		{"MiniMax-M2.7", 0.30, 1.20, 0.06},
 		{"minimax-m3", 0.30, 1.20, 0.06},
 		// Qwen
 		{"qwen3.7-max", 2.50, 7.50, 0.50},
-		{"qwen3.7-plus", 0.40, 1.60, 0.04},
-		// DeepSeek
+		{"qwen3.7-plus", 0.50, 3.00, 0.05},
+		// DeepSeek（官方 API 价：chat/reasoner 已与 v4-flash 同价）
 		{"deepseek-v4-flash", 0.14, 0.28, 0.0028},
 		{"deepseek-v4-pro", 0.435, 0.87, 0.003625},
-		{"deepseek-chat", 0.28, 0.42, 0.028},
-		{"deepseek-reasoner", 0.55, 2.19, 0.14},
+		{"deepseek-chat", 0.14, 0.28, 0.0028},
+		{"deepseek-reasoner", 0.14, 0.28, 0.0028},
 		// xAI
 		{"grok-4.5", 2.00, 6.00, 0.30},
 		// 其他

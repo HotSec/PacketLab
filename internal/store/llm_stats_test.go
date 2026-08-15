@@ -16,8 +16,8 @@ func TestLLMStatsAggregation(t *testing.T) {
 
 	// 造数据：两个厂商三个模型（含 1 个未知模型）
 	exchanges := []struct {
-		id       int64
-		llmData  string
+		id      int64
+		llmData string
 	}{
 		{1, `{"provider":"zhipu","model":"glm-5.2","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"cost_usd":0.00036}}`},
 		{2, `{"provider":"zhipu","model":"glm-5.2","usage":{"prompt_tokens":200,"completion_tokens":100,"total_tokens":300,"cost_usd":0.00072}}`},

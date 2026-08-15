@@ -7,7 +7,11 @@
 **国内模型支持**（此前仅覆盖 OpenAI/Anthropic/Gemini 三大厂）：
 - 新增内置厂商检测：**DeepSeek / Moonshot(Kimi) / 智谱 GLM / MiniMax / 阿里云 Qwen / xAI(Grok)**，全部按 host 精确/后缀匹配（防伪造 host 绕过）。(`internal/llm/provider.go`)
 - 解析协议路由 `ProtocolFor`：国内厂商走 OpenAI 兼容协议，自定义端点统一归一化为 OpenAI 解析。(`internal/llm/parser.go`)
-- 定价表扩充 20+ 国内模型（GLM-5.1/5.2、Kimi K2.6/K2.7/K3、MiniMax M2.7/M3/MiMo、Qwen3.6/3.7、DeepSeek V3/V4/chat/reasoner、Grok、Hy3），数据来源 OpenCode Go 定价（2026-08-01）与 DeepSeek 官方文档。(`internal/llm/pricing.go`)
+- 定价表以 **models.dev 官方 API 价为基准**（2026-08-15 同步，124 个模型条目）：
+  - 修正 5 项过时价格（deepseek-chat/reasoner 已与 v4-flash 同价 $0.14/$0.28、o3-mini $1.10/$4.40、qwen3-max $1.20/$6.00、qwen3.7-plus $0.50/$3.00）
+  - 新增 70+ 新世代模型（GPT-5.x 全系、Claude Sonnet/Opus 4.x-5、Gemini 3.x、GLM-4.x 全系、Kimi K2.x preview、Grok 4.x、Qwen3.8 等）
+  - 历史模型 key 保留（merge 策略），`scripts/sync_pricing.py` 可随时重新同步
+- 新增 `scripts/sync_pricing.py`：从 models.dev 仓库拉取官方价 → 对比 → merge 写入定价表（`--diff` 只报差异 / `--write` 落盘）
 
 **成本/用量统计聚合**：
 - 新增 `GET /api/llm/stats`：总量（交换次数、Prompt/Completion/Total tokens、估算成本）+ 按模型分布 + 按厂商分布（成本降序，SQLite `json_extract` 原生聚合）。(`internal/store/llm.go`, `internal/api/server.go`)

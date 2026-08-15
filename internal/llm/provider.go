@@ -71,7 +71,7 @@ func init() {
 			return len(builtinProviders[i].hostSuffixes[a]) > len(builtinProviders[i].hostSuffixes[b])
 		})
 	}
-	// 厂商表本身也按「最长 suffix 长度」降序排序，保证 generativelanguage.google… 
+	// 厂商表本身也按「最长 suffix 长度」降序排序，保证 generativelanguage.google…
 	// 这类长域名在任何短域名误匹配之前被检查。
 	sort.SliceStable(builtinProviders, func(a, b int) bool {
 		return len(builtinProviders[a].hostSuffixes[0]) > len(builtinProviders[b].hostSuffixes[0])

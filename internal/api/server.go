@@ -1090,4 +1090,3 @@ func (s *Server) handleLLMStats(w http.ResponseWriter, r *http.Request) {
 		"by_provider": byProvider,
 	})
 }
-
