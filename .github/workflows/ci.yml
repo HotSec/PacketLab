@@ -17,7 +17,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.64.8
+          # v2.x 用 Go 1.25+ 构建，支持 go.mod 的 go 1.25.0 目标
+          # （v1.64.8 用 Go 1.24 构建，报 "lower than the targeted Go version"）
+          version: v2.12.2
           args: --timeout=5m
 
   test:
