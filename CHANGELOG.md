@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.2 (2026-08-15) — LLM 流量分析重构 + 性能修复
+
+### 🤖 LLM 流量分析重构（完整版）
+
+**国内模型支持**（此前仅覆盖 OpenAI/Anthropic/Gemini 三大厂）：
+- 新增内置厂商检测：**DeepSeek / Moonshot(Kimi) / 智谱 GLM / MiniMax / 阿里云 Qwen / xAI(Grok)**，全部按 host 精确/后缀匹配（防伪造 host 绕过）。(`internal/llm/provider.go`)
+- 解析协议路由 `ProtocolFor`：国内厂商走 OpenAI 兼容协议，自定义端点统一归一化为 OpenAI 解析。(`internal/llm/parser.go`)
+- 定价表扩充 20+ 国内模型（GLM-5.1/5.2、Kimi K2.6/K2.7/K3、MiniMax M2.7/M3/MiMo、Qwen3.6/3.7、DeepSeek V3/V4/chat/reasoner、Grok、Hy3），数据来源 OpenCode Go 定价（2026-08-01）与 DeepSeek 官方文档。(`internal/llm/pricing.go`)
+
+**成本/用量统计聚合**：
+- 新增 `GET /api/llm/stats`：总量（交换次数、Prompt/Completion/Total tokens、估算成本）+ 按模型分布 + 按厂商分布（成本降序，SQLite `json_extract` 原生聚合）。(`internal/store/llm.go`, `internal/api/server.go`)
+- `/api/llm` 列表支持 `provider` / `model` 精确过滤；列表项新增 token 用量与成本字段。
+- 请求列表新增 `is_llm` 字段，前端 LLM 检测与后端单一事实来源对齐（移除前端硬编码 host 列表）。
+
+**前端 AI 流量总览**：
+- 顶栏新增「🤖 AI总览」按钮：打开全局仪表盘（5 张总览卡片 + 按模型分布表含成本占比条 + 按厂商分布表）。(`cmd/proxy/web/*`)
+- 请求列表新增「🤖 AI」筛选 chip，一键只看 LLM 流量；条目加 🤖 徽标。
+- provider 徽标新增国内厂商配色；成本显示精度 4 → 6 位小数。
+
+### 🔧 性能修复（08-09 未发布修复补发）
+
+- `HandleClose` O(n) 遍历修复、SSE 缓冲无上限修复等 5 项（`internal/capture/engine.go`, `internal/proxy/proxy.go`）
+- `ForEachFull` 缺列、`Clear` 残留、HAR 超时截断等 5 项必须修复（`internal/store/store.go`, `internal/api/server.go`, `cmd/proxy/main.go`）
+
 ## v0.1.1 (2026-08-05) — 安全修复（默认鉴权 + CSRF 防护）
 
 修复默认安装无 API 鉴权导致本机任意进程可读取解密流量、恶意网页可跨站重放请求的问题（Security Advisory GHSA-gp8p-c8gg-x422）。
