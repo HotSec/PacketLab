@@ -59,9 +59,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-          # Build libpcap for arm64 from source
-          git clone https://github.com/the-tcpdump-group/libpcap.git /tmp/libpcap
-          cd /tmp/libpcap
+          # Build libpcap for arm64 from source。
+          # git clone 和 GitHub tag tarball 都不含 configure 脚本
+          # （autotools 生成物，不入库），必须用官方 release tarball。
+          # 修复：curl 官方 tarball（原代码直接 clone 默认分支，
+          # ./configure 报 "No such file or directory"，arm64 构建一直失败）
+          curl -fsSL -o /tmp/libpcap.tar.gz https://www.tcpdump.org/release/libpcap-1.10.6.tar.gz
+          mkdir -p /tmp/libpcap-src
+          tar xzf /tmp/libpcap.tar.gz -C /tmp/libpcap-src --strip-components=1
+          cd /tmp/libpcap-src
           CC=aarch64-linux-gnu-gcc ./configure --host=aarch64-linux-gnu --prefix=/usr/aarch64-linux-gnu --disable-shared --disable-dbus --disable-rdma
           make -j$(nproc)
           sudo make install
