@@ -124,6 +124,7 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/export/har", s.handleExportHAR)
 
 	mux.HandleFunc("/api/llm", s.handleLLMList)
+	mux.HandleFunc("/api/llm/stats", s.handleLLMStats)
 	mux.HandleFunc("/api/llm/", s.handleLLMByID)
 
 	mux.HandleFunc("/api/maintenance/cleanup", s.handleMaintenanceCleanup)
@@ -1005,7 +1006,19 @@ func (s *Server) handleLLMList(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	items, total, err := s.store.ListLLM(limit, offset)
+	// 可选过滤：provider / model 精确匹配
+	f := store.LLMFilter{
+		Provider: r.URL.Query().Get("provider"),
+		Model:    r.URL.Query().Get("model"),
+	}
+	var items []store.LLMExchangeListItem
+	var total int
+	var err error
+	if f.Provider == "" && f.Model == "" {
+		items, total, err = s.store.ListLLM(limit, offset)
+	} else {
+		items, total, err = s.store.ListLLMFiltered(f, limit, offset)
+	}
 	if err != nil {
 		slog.Error("list llm failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeAppError(w, ErrInternal("Failed to list LLM exchanges"))
@@ -1057,3 +1070,24 @@ func (s *Server) handleLLMByID(w http.ResponseWriter, r *http.Request) {
 		"id":   id,
 	})
 }
+
+// handleLLMStats returns aggregated LLM usage statistics:
+// totals + per-model breakdown + per-provider breakdown.
+func (s *Server) handleLLMStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAppError(w, ErrMethodNotAllowed())
+		return
+	}
+	totals, byModel, byProvider, err := s.store.LLMStats()
+	if err != nil {
+		slog.Error("llm stats failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
+		writeAppError(w, ErrInternal("Failed to compute LLM stats"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"totals":      totals,
+		"by_model":    byModel,
+		"by_provider": byProvider,
+	})
+}
+

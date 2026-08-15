@@ -204,3 +204,48 @@ PR-3 V3 功能补齐：
 - `--intercept-pending-timeout` CLI（NewInterceptor 改 time.Duration）
 - `--cleanup-retention-days` / `--cleanup-interval` CLI
 - 拦截规则管理面板 + Headers 批量编辑器（已在计划前实现，验收确认完整）
+
+---
+
+## V3.1 LLM 流量分析重构（v0.1.2, 2026-08-15）
+
+> 状态：✅ 全部完成
+
+V3 时代的 LLM 模块仅覆盖 OpenAI/Anthropic/Gemini 三大厂，无统计聚合、无国内模型。
+V3.1 将其重构为完整的「LLM 流量分析」功能。
+
+### 交付内容
+
+| 功能 | 说明 |
+|------|------|
+| 国内厂商检测 | DeepSeek / Moonshot(Kimi) / 智谱 GLM / MiniMax / Qwen / xAI(Grok)，host 精确/后缀匹配（防伪造） |
+| 解析协议路由 | `ProtocolFor`：国内厂商走 OpenAI 兼容协议，自定义端点归一化 |
+| 定价表扩充 | 20+ 国内模型（GLM/Kimi/MiniMax/Qwen/DeepSeek/Grok/Hy3），来源 OpenCode Go 2026-08-01 |
+| 统计聚合 API | `GET /api/llm/stats`：总量 + 按模型 + 按厂商（成本降序，SQLite json_extract） |
+| 列表过滤 | `/api/llm?provider=&model=` 精确过滤；列表项含 token/成本 |
+| `is_llm` 标记 | 请求列表透出服务端检测结果，前端不再硬编码 host 列表 |
+| 前端总览 | 「🤖 AI总览」按钮 → 全局仪表盘（总览卡片 + 模型分布 + 厂商分布） |
+| 前端筛选 | 「🤖 AI」筛选 chip 一键过滤 LLM 流量；条目 🤖 徽标 |
+
+### 架构决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 检测事实来源 | 后端 `internal/llm.DetectProvider` 唯一 | 前端硬编码 host 列表与后端不一致（历史 bug 源头） |
+| 统计实现 | SQLite `json_extract` 原生聚合 | modernc.org/sqlite 支持；无需 Go 侧全表扫描 |
+| 成本估算 | 静态定价表（缓存未命中价） | usage 只有 prompt/completion 两级，无法区分缓存命中；保守高估 |
+| 数据模型 | 复用 `llm_data` JSON blob | 不新增列，迁移零成本；聚合走 json_extract |
+
+### 新增测试
+
+- `internal/llm/provider_cn_test.go`：内置检测（含伪造 host 安全回归）、协议路由、中文内容解析
+- `internal/llm/pricing_cn_test.go`：国内模型定价、边界匹配、GLM-5.2 端到端成本
+- `internal/store/llm_stats_test.go`：聚合统计（含非 LLM 排除、过滤列表）
+
+### 后续方向（未排期）
+
+- 被动 checkpoint（WAL 膨胀控制）
+- `SetImmediateMode` 即时交付
+- 定价表外部化（YAML/JSON 配置文件，用户可自维护）
+- 流式响应的 token 实时预估（usage 缺失时按字符估算）
+
