@@ -49,6 +49,8 @@ type RequestListItem struct {
 	ProcessPID  int       `json:"process_pid,omitempty"`
 	ProcessName string    `json:"process_name,omitempty"`
 	Truncated   bool      `json:"truncated,omitempty"`
+	// IsLLM 该请求是否被识别为 LLM API 交换（详情页「AI对话」tab 的显示依据）
+	IsLLM bool `json:"is_llm,omitempty"`
 }
 
 // ResendRequest 重发请求的结构

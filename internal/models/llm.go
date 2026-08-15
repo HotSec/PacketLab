@@ -8,7 +8,7 @@ import (
 // LLMExchange represents a captured LLM API interaction (request + response).
 // Stored as a JSON blob in the llm_data column of the requests table.
 type LLMExchange struct {
-	Provider  string       `json:"provider"` // "openai" | "anthropic" | "gemini" | "unknown"
+	Provider  string       `json:"provider"` // "openai" | "anthropic" | "gemini" | "deepseek" | ...
 	Model     string       `json:"model"`    // model name from request/response
 	Stream    bool         `json:"stream"`   // whether the response was streamed
 	System    string       `json:"system,omitempty"`

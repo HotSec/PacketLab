@@ -92,16 +92,16 @@ func GeminiModelFromPath(path string) string {
 }
 
 // ParseRequest extracts LLM request info from a JSON body.
+// 按 provider 的解析协议路由：自定义端点已在 DetectProvider 归一化为
+// ProviderOpenAI，走 OpenAI 兼容解析。
 func ParseRequest(provider Provider, body []byte) *RequestInfo {
 	if len(body) == 0 {
 		return nil
 	}
-	switch provider {
-	case ProviderOpenAI:
-		return parseOpenAIRequest(body)
-	case ProviderAnthropic:
+	switch ProtocolFor(provider) {
+	case ParseAnthropic:
 		return parseAnthropicRequest(body)
-	case ProviderGemini:
+	case ParseGemini:
 		return parseGeminiRequest(body)
 	}
 	// Fallback: try OpenAI format (most common)
@@ -398,16 +398,15 @@ func extractTextContent(raw json.RawMessage) string {
 // ── Response parsing ──────────────────────────────────────────
 
 // ParseResponse extracts LLM response info from a complete (non-streamed) JSON body.
+// 按 provider 的解析协议路由（同 ParseRequest）。
 func ParseResponse(provider Provider, body []byte) *ResponseInfo {
 	if len(body) == 0 {
 		return nil
 	}
-	switch provider {
-	case ProviderOpenAI:
-		return parseOpenAIResponse(body)
-	case ProviderAnthropic:
+	switch ProtocolFor(provider) {
+	case ParseAnthropic:
 		return parseAnthropicResponse(body)
-	case ProviderGemini:
+	case ParseGemini:
 		return parseGeminiResponse(body)
 	}
 	return parseOpenAIResponse(body)

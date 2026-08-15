@@ -1,8 +1,15 @@
 package llm
 
 // provider.go — LLM provider detection and metadata
+//
+// 内置检测覆盖国际大厂与国内主流 LLM 厂商，均按 host 精确/后缀匹配
+// （hostMatches，防 "openai.com.evil.com" 伪造）。未命中内置表的请求
+// 回落到自定义端点注册表（OpenAI 兼容），由用户在配置中登记。
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Provider identifies a known LLM API provider.
 type Provider string
@@ -11,55 +18,115 @@ const (
 	ProviderOpenAI    Provider = "openai"
 	ProviderAnthropic Provider = "anthropic"
 	ProviderGemini    Provider = "gemini"
-	ProviderUnknown   Provider = "unknown"
+	// 国内厂商
+	ProviderDeepSeek Provider = "deepseek"
+	ProviderMoonshot Provider = "moonshot" // Kimi
+	ProviderZhipu    Provider = "zhipu"    // 智谱 GLM
+	ProviderMiniMax  Provider = "minimax"
+	ProviderQwen     Provider = "qwen" // 阿里云 DashScope / 百炼
+	ProviderXAI      Provider = "xai"  // Grok
+	ProviderUnknown  Provider = "unknown"
 )
 
-// providerPattern defines host signatures for each provider.
-// pathSubstrs 曾用于路径匹配，但因误判（任何含 "/messages" 的 host 都被当作
-// Anthropic）已移除，仅保留 host 匹配。
-type providerPattern struct {
-	hostSubstrs []string
+// ParseProtocol describes how to parse requests/responses for a provider.
+type ParseProtocol string
+
+const (
+	ParseOpenAI    ParseProtocol = "openai"    // OpenAI Chat Completions 兼容
+	ParseAnthropic ParseProtocol = "anthropic" // Anthropic Messages API
+	ParseGemini    ParseProtocol = "gemini"    // Gemini generateContent
+)
+
+// providerDef defines host signatures and parse protocol for each provider.
+type providerDef struct {
+	name         Provider      // 规范化名称
+	displayName  string        // UI 展示名
+	hostSuffixes []string      // host 精确匹配或 "."+suffix 后缀匹配
+	protocol     ParseProtocol // 解析协议
 }
 
-var providerPatterns = map[Provider]providerPattern{
-	ProviderOpenAI: {
-		hostSubstrs: []string{"openai.com", "api.openai.com"},
-	},
-	ProviderAnthropic: {
-		hostSubstrs: []string{"anthropic.com"},
-	},
-	ProviderGemini: {
-		hostSubstrs: []string{"generativelanguage.googleapis.com", "aiplatform.googleapis.com"},
-	},
+// builtinProviders 内置厂商表。按 hostSuffixes 从长到短排序，
+// 保证 api.deepseek.com 先于 deepseek.com 命中（虽然两者解析协议相同，
+// 顺序不影响结果，但保持确定性）。同厂多域名用逗号分隔在注释中说明。
+var builtinProviders = []providerDef{
+	{ProviderOpenAI, "OpenAI", []string{"api.openai.com", "openai.com"}, ParseOpenAI},
+	{ProviderAnthropic, "Anthropic", []string{"api.anthropic.com", "anthropic.com"}, ParseAnthropic},
+	{ProviderGemini, "Google Gemini", []string{
+		"generativelanguage.googleapis.com",
+		"aiplatform.googleapis.com",
+	}, ParseGemini},
+	// 国内厂商
+	{ProviderDeepSeek, "DeepSeek", []string{"api.deepseek.com", "deepseek.com"}, ParseOpenAI},
+	{ProviderMoonshot, "Moonshot (Kimi)", []string{"api.moonshot.cn", "api.moonshot.ai", "moonshot.cn"}, ParseOpenAI},
+	{ProviderZhipu, "智谱 GLM", []string{"open.bigmodel.cn", "bigmodel.cn"}, ParseOpenAI},
+	{ProviderMiniMax, "MiniMax", []string{"api.minimax.chat", "api.minimaxi.com", "minimaxi.com"}, ParseOpenAI},
+	{ProviderQwen, "阿里云 Qwen", []string{"dashscope.aliyuncs.com"}, ParseOpenAI},
+	{ProviderXAI, "xAI (Grok)", []string{"api.x.ai", "x.ai"}, ParseOpenAI},
 }
 
-// DetectProvider attempts to identify the LLM provider from host and path.
-// 先匹配内置 3 大厂模式（仅按 host 子串匹配，path 单独匹配容易误判）；
-// 未命中则查自定义端点注册表，命中视为 openai 兼容。
+func init() {
+	// hostSuffixes 按长度降序排序：更长的后缀（更具体的域名）优先匹配。
+	for i := range builtinProviders {
+		sort.Slice(builtinProviders[i].hostSuffixes, func(a, b int) bool {
+			return len(builtinProviders[i].hostSuffixes[a]) > len(builtinProviders[i].hostSuffixes[b])
+		})
+	}
+	// 厂商表本身也按「最长 suffix 长度」降序排序，保证 generativelanguage.google… 
+	// 这类长域名在任何短域名误匹配之前被检查。
+	sort.SliceStable(builtinProviders, func(a, b int) bool {
+		return len(builtinProviders[a].hostSuffixes[0]) > len(builtinProviders[b].hostSuffixes[0])
+	})
+}
+
 // DetectProvider identifies the LLM provider from host and path.
-// Only host substrings are matched for built-in providers; path-only matching
-// was removed because it caused false positives (any host whose path contains
-// "/messages" was treated as Anthropic).
+// 先匹配内置厂商（仅按 host 后缀匹配，path 单独匹配容易误判）；
+// 未命中则查自定义端点注册表，命中视为 OpenAI 兼容。
 func DetectProvider(host, path string) Provider {
-	host = strings.ToLower(host)
+	host = strings.ToLower(strings.TrimSpace(host))
 	path = strings.ToLower(path)
-	for provider, pat := range providerPatterns {
-		for _, hs := range pat.hostSubstrs {
-			// 复用 custom_endpoints.go 的 hostMatches：精确匹配或 "."+pattern 后缀匹配。
+	for i := range builtinProviders {
+		def := &builtinProviders[i]
+		for _, hs := range def.hostSuffixes {
+			// hostMatches：精确匹配或 "."+pattern 后缀匹配。
 			// 避免子串匹配被 "openai.com.evil.com" 这类伪造 host 绕过。
-			// Use hostMatches (exact or "."+pattern suffix) instead of strings.Contains
-			// so forged hosts like "openai.com.evil.com" can't impersonate providers.
 			if hostMatches(host, hs) {
-				return provider
+				return def.name
 			}
 		}
 	}
+	// 区域化 Vertex AI host：<region>-aiplatform.googleapis.com（如
+	// us-central1-aiplatform.googleapis.com）。hostMatches 的 "."+pattern
+	// 后缀规则不覆盖 "-" 连接的区域前缀，这里单独按后缀处理——host 必须
+	// 以该后缀结尾，且处于 googleapis.com 域名空间内，无伪造风险。
+	if strings.HasSuffix(host, "-aiplatform.googleapis.com") {
+		return ProviderGemini
+	}
 	// 自定义端点匹配（OpenAI 兼容）
-	// Custom endpoint match (OpenAI-compatible)
 	if _, ok := matchCustomEndpoint(host, path); ok {
 		return ProviderOpenAI
 	}
 	return ProviderUnknown
+}
+
+// ProtocolFor returns the parse protocol for a provider.
+// 自定义端点已在 DetectProvider 中归一化为 ProviderOpenAI，无需特殊处理。
+func ProtocolFor(p Provider) ParseProtocol {
+	for i := range builtinProviders {
+		if builtinProviders[i].name == p {
+			return builtinProviders[i].protocol
+		}
+	}
+	return ParseOpenAI // 默认按 OpenAI 兼容解析
+}
+
+// DisplayName returns the human-friendly name for a provider.
+func DisplayName(p Provider) string {
+	for i := range builtinProviders {
+		if builtinProviders[i].name == p {
+			return builtinProviders[i].displayName
+		}
+	}
+	return string(p)
 }
 
 // IsLLMRequest determines whether a request is likely an LLM API call

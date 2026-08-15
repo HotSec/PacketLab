@@ -40,20 +40,23 @@ func TestDetectProvider_CustomEndpoint(t *testing.T) {
 	resetCustomEndpointsForTest()
 	defer resetCustomEndpointsForTest()
 
-	// 未注册时 unknown（路径 /v1/chat 不在内置 pattern 中）
-	if p := DetectProvider("api.deepseek.com", "/v1/chat"); p != ProviderUnknown {
+	// 使用非内置厂商 host：内置表未命中时才查自定义端点注册表
+	const host = "api.custom-llm.com"
+
+	// 未注册时 unknown
+	if p := DetectProvider(host, "/v1/chat"); p != ProviderUnknown {
 		t.Fatalf("before register: expected unknown, got %v", p)
 	}
 
-	RegisterCustomEndpoint(CustomEndpoint{Host: "api.deepseek.com", Path: "/v1/chat"})
+	RegisterCustomEndpoint(CustomEndpoint{Host: host, Path: "/v1/chat"})
 
 	// 注册后识别为 openai（OpenAI 兼容）
-	if p := DetectProvider("api.deepseek.com", "/v1/chat"); p != ProviderOpenAI {
+	if p := DetectProvider(host, "/v1/chat"); p != ProviderOpenAI {
 		t.Fatalf("after register: expected openai, got %v", p)
 	}
 
 	// 子域也应匹配
-	if p := DetectProvider("proxy.api.deepseek.com", "/v1/chat"); p != ProviderOpenAI {
+	if p := DetectProvider("proxy."+host, "/v1/chat"); p != ProviderOpenAI {
 		t.Fatalf("subdomain: expected openai, got %v", p)
 	}
 }
