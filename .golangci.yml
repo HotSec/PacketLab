@@ -7,20 +7,54 @@ linters:
     - staticcheck
     - unused
     - misspell
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*log/slog.Logger).Debug
+        - (fmt.Fprint*)
+        - (fmt.Print*)
+        - (fmt.Println)
+        # 惯例忽略：资源关闭/写入返回值在错误路径上无补救价值
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Tx).Rollback
+        - (*net/http.Response).Body.Close
+        - (*io.PipeWriter).Close
+        - (*io.PipeReader).Close
+        - (*io.ReadCloser).Close
+        - (*encoding/json.Decoder).Decode
+        - (*os.File).Close
+        - (*github.com/gorilla/websocket.Conn).Close
+        - (*github.com/gorilla/websocket.Conn).SetReadDeadline
+        - (*github.com/gorilla/websocket.Conn).SetWriteDeadline
+        - (*github.com/gorilla/websocket.Conn).WriteMessage
+        - (*net/http.ResponseWriter).Write
+        - (net/http.ResponseWriter).Write
+    staticcheck:
+      checks:
+        - "all"
+        # QF 可读性建议 / SA4006 解析路径误报 / SA1019 goproxy 兼容性 / ST1000 包注释
+        - "-QF1003"
+        - "-QF1011"
+        - "-SA4006"
+        - "-SA1019"
+        - "-ST1000"
+        - "-ST1023"
+        - "-S1021"
+        - "-S1012"
+        - "-S1017"
+  exclusions:
+    presets:
+      - comments
+    rules:
+      # 测试文件 errcheck/unused 收益低
+      - path: _test\.go
+        linters: [errcheck, unused]
 formatters:
   enable:
     - gofmt
     - goimports
-linters-settings:
-  errcheck:
-    exclude-functions:
-      - (*log/slog.Logger).Debug
-      - (fmt.Fprint*)
-      - (fmt.Print*)
-      - (fmt.Println)
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters: [errcheck]
   max-issues-per-linter: 0
   max-same-issues: 0

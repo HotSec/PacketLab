@@ -490,7 +490,7 @@ func readBody(req *http.Request) string {
 	// 优先 GetBody（OnRequest 已设置，可重复读）
 	if req.GetBody != nil {
 		if body, err := req.GetBody(); err == nil {
-			defer body.Close()
+			defer func() { _ = body.Close() }()
 			raw, err := io.ReadAll(io.LimitReader(body, maxBodyPreview))
 			if err == nil && len(raw) > 0 {
 				return string(raw)

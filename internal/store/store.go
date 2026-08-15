@@ -408,8 +408,12 @@ func (s *Store) Get(id int64) (*models.CapturedRequest, error) {
 		return nil, fmt.Errorf("query: %w", err)
 	}
 
-	json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders)
-	json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders)
+	if err := json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders); err != nil {
+		slog.Warn("unmarshal req headers failed", "id", id, "error", err)
+	}
+	if err := json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders); err != nil {
+		slog.Warn("unmarshal res headers failed", "id", id, "error", err)
+	}
 	req.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
 	req.IsSSE = intToBool(isSSE)
 	req.Truncated = intToBool(truncated)
@@ -481,8 +485,12 @@ func (s *Store) ForEachFull(method, search, host string, errorOnly bool, limit, 
 		}
 		req.IsSSE = intToBool(isSSE)
 		req.Truncated = intToBool(truncated)
-		json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders)
-		json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders)
+		if err := json.Unmarshal([]byte(reqHeadersJSON), &req.ReqHeaders); err != nil {
+			slog.Warn("unmarshal req headers failed", "id", req.ID, "error", err)
+		}
+		if err := json.Unmarshal([]byte(resHeadersJSON), &req.ResHeaders); err != nil {
+			slog.Warn("unmarshal res headers failed", "id", req.ID, "error", err)
+		}
 		req.CapturedAt, _ = time.Parse(time.RFC3339, capturedAt)
 		if req.ReqHeaders == nil {
 			req.ReqHeaders = make(map[string]string)

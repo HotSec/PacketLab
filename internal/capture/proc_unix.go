@@ -33,7 +33,9 @@ func buildProcTable() map[string]*models.ProcessInfo {
 		}
 		name := fields[0]
 		pid := 0
-		fmt.Sscanf(fields[1], "%d", &pid)
+		if _, err := fmt.Sscanf(fields[1], "%d", &pid); err != nil {
+			continue // PID 列解析失败，跳过该行
+		}
 		addr := fields[len(fields)-1]
 		if idx := strings.Index(addr, "->"); idx > 0 {
 			addr = addr[:idx]

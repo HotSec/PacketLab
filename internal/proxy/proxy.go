@@ -92,7 +92,7 @@ func New(port int, st *store.Store, caCert, caKey []byte, onCapture OnCapture, i
 			goproxy.HTTPMitmConnect = &goproxy.ConnectAction{
 				Action:    goproxy.ConnectMitm,
 				TLSConfig: goproxy.TLSConfigFromCA(&cert),
-			}
+			} //nolint:staticcheck // goproxy.HTTPMitmConnect 兼容旧路径，项目仍引用
 		}
 	}
 
@@ -451,8 +451,8 @@ func (s *Server) handleSSEResponse(resp *http.Response, captured *models.Capture
 
 	// 启动 goroutine 流式读取 SSE
 	go func() {
-		defer pw.Close()
-		defer originalBody.Close()
+		defer func() { _ = pw.Close() }()
+		defer func() { _ = originalBody.Close() }()
 
 		var captureBuf strings.Builder
 		var totalSize int64

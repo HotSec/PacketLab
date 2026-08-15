@@ -185,7 +185,7 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 	// 用闭包变量，重试后 resp = resp2，defer 时关最新的 resp.Body
 	defer func() {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 	}()
 
@@ -193,7 +193,7 @@ func (s *ResendService) Resend(req *models.ResendRequest) (*ResendResult, error)
 		time.Sleep(200 * time.Millisecond)
 		if retryReq, err := newRequest(); err == nil {
 			if resp2, err := client.Do(retryReq); err == nil {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				resp = resp2
 			}
 		}

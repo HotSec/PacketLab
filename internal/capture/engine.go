@@ -36,7 +36,6 @@ type Engine struct {
 	maxStreams    int           // 单个 worker Assembler 的最大并发流数（<=0 时 NewAssembler 用默认值 1000 兜底）
 
 	streamPool *TCPStreamPool
-	assembler  *Assembler
 	workers    int                    // worker 数量
 	workerChs  []chan gopacket.Packet // per-worker packet channels
 	workerSg   sync.WaitGroup
@@ -384,21 +383,6 @@ func (e *Engine) flushLoop() {
 			return
 		}
 	}
-}
-
-// emit 输出 HTTP 请求到存储
-func (e *Engine) emit(req *models.CapturedRequest) {
-	req.CaptureMode = "nic"
-	id, err := e.store.Save(req)
-	if err != nil {
-		slog.Warn("capture: save failed", "url", req.URL, "error", err)
-		return
-	}
-	req.ID = id
-	if e.hub != nil {
-		e.hub.BroadcastCapture(req)
-	}
-	e.stats.HTTPFound.Add(1)
 }
 
 // bulkEmit 批量输出
@@ -815,9 +799,9 @@ type TCPStream struct {
 	serverBuf  []byte // 服务端→客户端 数据
 	lastActive time.Time
 	pendingReq *models.CapturedRequest
-	nonHTTP    bool // 标记为非HTTP流，跳过后续处理
-	firstData  bool // 是否已收到首批数据（用于非HTTP检测）
-	sniEmitted bool // 是否已emit TLS SNI记录
+	nonHTTP    bool   // 标记为非HTTP流，跳过后续处理
+	firstData  bool   // 是否已收到首批数据（用于非HTTP检测）
+	sniEmitted bool   // 是否已emit TLS SNI记录
 	key        string // 在 a.streams 中的键，HandleClose 时直接删除避免 O(n) 遍历
 
 	// SSE 流式追踪
@@ -1131,7 +1115,9 @@ func parseStatusCodeFromHeader(headerData []byte) int {
 		codeStr = rest
 	}
 	var code int
-	fmt.Sscanf(string(codeStr), "%d", &code)
+	if _, err := fmt.Sscanf(string(codeStr), "%d", &code); err != nil {
+		slog.Warn("capture: HTTP 状态码解析失败", "code", codeStr, "error", err)
+	}
 	return code
 }
 
@@ -1372,7 +1358,10 @@ func parseContentLength(headerData []byte) int {
 		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
 		if after, ok := strings.CutPrefix(line, "content-length:"); ok {
 			var cl int
-			fmt.Sscanf(strings.TrimSpace(after), "%d", &cl)
+			if _, err := fmt.Sscanf(strings.TrimSpace(after), "%d", &cl); err != nil {
+				slog.Warn("capture: Content-Length 解析失败", "value", after, "error", err)
+				return -1
+			}
 			return cl
 		}
 	}

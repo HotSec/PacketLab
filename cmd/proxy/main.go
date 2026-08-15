@@ -131,7 +131,7 @@ func main() {
 		slog.Error("初始化数据库失败", "error", err)
 		os.Exit(1)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	slog.Info("数据库已初始化", "path", cfg.DBPath)
 
 	// 加载前端
