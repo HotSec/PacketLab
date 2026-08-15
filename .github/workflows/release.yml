@@ -27,9 +27,10 @@ jobs:
             cross: true
           - goos: darwin
             goarch: amd64
-            runner: macos-13
+            runner: macos-latest
             cgo_enabled: 1
             cc: clang
+            cross_darwin: true
           - goos: darwin
             goarch: arm64
             runner: macos-latest
@@ -80,8 +81,8 @@ jobs:
           CC: ${{ matrix.cc }}
           # Linux arm64 交叉编译：gopacket 需找到 aarch64 libpcap 头文件与库
           # Linux arm64 cross-compile: gopacket needs aarch64 libpcap headers and libs
-          CGO_CFLAGS: ${{ matrix.cross == true && '-I/usr/aarch64-linux-gnu/include' || '' }}
-          CGO_LDFLAGS: ${{ matrix.cross == true && '-L/usr/aarch64-linux-gnu/lib -lpcap' || '' }}
+          CGO_CFLAGS: ${{ matrix.cross == true && '-I/usr/aarch64-linux-gnu/include' || matrix.cross_darwin == true && '-arch x86_64' || '' }}
+          CGO_LDFLAGS: ${{ matrix.cross == true && '-L/usr/aarch64-linux-gnu/lib -lpcap' || matrix.cross_darwin == true && '-arch x86_64' || '' }}
         shell: bash
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
