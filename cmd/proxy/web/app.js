@@ -1559,10 +1559,19 @@ function renderLLMContent(exchange) {
   // Usage stats
   if (usage.prompt_tokens || usage.completion_tokens || usage.total_tokens) {
     html += '<div class="llm-usage">';
+    const estTag = usage.tokens_estimated ? '<span class="llm-est-tag" title="上游未回传 usage，数值为启发式估算">估算</span>' : '';
     if (usage.prompt_tokens) html += `<div class="llm-usage-item"><span>Prompt Tokens</span><span class="llm-usage-val">${usage.prompt_tokens}</span></div>`;
     if (usage.completion_tokens) html += `<div class="llm-usage-item"><span>Completion Tokens</span><span class="llm-usage-val">${usage.completion_tokens}</span></div>`;
-    if (usage.total_tokens) html += `<div class="llm-usage-item"><span>Total Tokens</span><span class="llm-usage-val">${usage.total_tokens}</span></div>`;
-    if (usage.cost_usd) html += `<div class="llm-usage-item"><span>Cost</span><span class="llm-usage-val">$${usage.cost_usd.toFixed(6)}</span></div>`;
+    if (usage.total_tokens) html += `<div class="llm-usage-item"><span>Total Tokens</span><span class="llm-usage-val">${usage.total_tokens}${estTag}</span></div>`;
+    if (usage.cost_usd) html += `<div class="llm-usage-item"><span>Cost</span><span class="llm-usage-val">$${usage.cost_usd.toFixed(6)}${estTag}</span></div>`;
+    html += '</div>';
+  }
+
+  // Model limits (models.dev)
+  if (exchange.context_length || exchange.max_output) {
+    html += '<div class="llm-usage">';
+    if (exchange.context_length) html += `<div class="llm-usage-item"><span>Context Limit</span><span class="llm-usage-val">${formatTokens(exchange.context_length)}</span></div>`;
+    if (exchange.max_output) html += `<div class="llm-usage-item"><span>Max Output</span><span class="llm-usage-val">${formatTokens(exchange.max_output)}</span></div>`;
     html += '</div>';
   }
 
@@ -1668,6 +1677,8 @@ function fmtInt(n) {
   if (v >= 10000) return (v / 1000).toFixed(1) + 'K';
   return String(v);
 }
+// token 数人性化（1M → "1.00M"；131072 → "128K"）
+function formatTokens(n) { return fmtInt(n); }
 
 // 拉取并渲染统计
 async function loadLLMStats() {

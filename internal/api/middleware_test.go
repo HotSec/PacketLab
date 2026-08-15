@@ -353,3 +353,41 @@ func TestAuthMiddlewareDefaultTokenRequired(t *testing.T) {
 		t.Errorf("expected 401 with wrong token, got %d", w4.Code)
 	}
 }
+
+// TestAuthMiddlewareStaticBypass 静态资源免鉴权（前端 token 输入 UI 依赖），
+// API 与 WS 仍受保护。
+func TestAuthMiddlewareStaticBypass(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := authMiddleware("test-secret-token")(inner)
+
+	staticPaths := []string{"/", "/app.js", "/style.css", "/index.html", "/favicon.ico"}
+	for _, p := range staticPaths {
+		req := httptest.NewRequest("GET", p, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("static %s: expected 200 without token, got %d", p, w.Code)
+		}
+	}
+
+	protectedPaths := []string{"/api/requests", "/api/llm", "/api/llm/stats", "/ws", "/api/resend"}
+	for _, p := range protectedPaths {
+		req := httptest.NewRequest("GET", p, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("protected %s: expected 401 without token, got %d", p, w.Code)
+		}
+	}
+
+	// 无 token 配置时全放行（兼容默认配置）
+	openHandler := authMiddleware("")(inner)
+	req := httptest.NewRequest("GET", "/api/requests", nil)
+	w := httptest.NewRecorder()
+	openHandler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("empty token config: expected 200, got %d", w.Code)
+	}
+}

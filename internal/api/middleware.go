@@ -40,8 +40,10 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 
 // authMiddleware 可选 Bearer token 鉴权。
 // apiToken 为空时不启用鉴权（兼容默认配置）。
-// /health、/ready 始终免鉴权；token 可经 Authorization: Bearer <token> 头
-// 或 ?token=<token> 查询参数传递（后者用于浏览器 WebSocket 握手）。
+// /health、/ready 始终免鉴权；静态资源（HTML/JS/CSS 等前端文件）也免鉴权，
+// 否则前端 JS 无法加载、首次访问的「输入 token」UI 永远无法出现（上线阻断 bug）。
+// token 可经 Authorization: Bearer *** 头或 ?token=<token> 查询参数传递
+// （后者用于浏览器 WebSocket 握手）。
 func authMiddleware(apiToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +52,12 @@ func authMiddleware(apiToken string) func(http.Handler) http.Handler {
 				return
 			}
 			if r.URL.Path == "/health" || r.URL.Path == "/ready" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// 静态资源免鉴权：前端必须能加载，token 输入 UI 才能工作。
+			// 数据只经 /api/* 与 /ws 暴露，这两类路径仍受 token 保护。
+			if isStaticPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -67,6 +75,15 @@ func authMiddleware(apiToken string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isStaticPath 判断是否为前端静态资源路径（非 /api、非 /ws）。
+// 前端文件由 embedded FS 提供且不含任何数据，放行安全。
+func isStaticPath(path string) bool {
+	if strings.HasPrefix(path, "/api") || path == "/ws" {
+		return false
+	}
+	return true
 }
 
 // csrfMiddleware 对状态变更请求（非 GET/HEAD/OPTIONS）要求自定义头

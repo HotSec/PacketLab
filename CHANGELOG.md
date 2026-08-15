@@ -11,7 +11,12 @@
   - 修正 5 项过时价格（deepseek-chat/reasoner 已与 v4-flash 同价 $0.14/$0.28、o3-mini $1.10/$4.40、qwen3-max $1.20/$6.00、qwen3.7-plus $0.50/$3.00）
   - 新增 70+ 新世代模型（GPT-5.x 全系、Claude Sonnet/Opus 4.x-5、Gemini 3.x、GLM-4.x 全系、Kimi K2.x preview、Grok 4.x、Qwen3.8 等）
   - 历史模型 key 保留（merge 策略），`scripts/sync_pricing.py` 可随时重新同步
-- 新增 `scripts/sync_pricing.py`：从 models.dev 仓库拉取官方价 → 对比 → merge 写入定价表（`--diff` 只报差异 / `--write` 落盘）
+- 新增 `scripts/sync_pricing.py`：从 models.dev 仓库拉取官方价 → 对比 → merge 写入定价表（`--diff` 只报差异 / `--write` 落盘），同时生成 `internal/llm/limits.go`（模型上下文/输出限制表，99 个模型）
+
+**Token 实时预估**（上游不回传 usage 时的兜底）：
+- `internal/llm/estimate.go`：中英文混合启发式估算（CJK 1.5 字符/token，其余 4 字符/token，精度 ±30%）
+- 响应无 usage 时自动按请求/响应文本估算 token 并计算成本，前端标注「估算」徽标（`tokens_estimated` 字段透出）
+- 模型上下文/输出限制展示（`context_length` / `max_output`，来自 models.dev）
 
 **成本/用量统计聚合**：
 - 新增 `GET /api/llm/stats`：总量（交换次数、Prompt/Completion/Total tokens、估算成本）+ 按模型分布 + 按厂商分布（成本降序，SQLite `json_extract` 原生聚合）。(`internal/store/llm.go`, `internal/api/server.go`)
@@ -22,6 +27,15 @@
 - 顶栏新增「🤖 AI总览」按钮：打开全局仪表盘（5 张总览卡片 + 按模型分布表含成本占比条 + 按厂商分布表）。(`cmd/proxy/web/*`)
 - 请求列表新增「🤖 AI」筛选 chip，一键只看 LLM 流量；条目加 🤖 徽标。
 - provider 徽标新增国内厂商配色；成本显示精度 4 → 6 位小数。
+
+### 🔒 安全修复（上线阻断 bug）
+
+- **静态资源免鉴权**：此前 HTML/JS/CSS 也被 token 鉴权拦截，导致首次访问时前端「输入 token」UI 永远无法加载（浏览器只见 JSON 401）。现在静态资源放行，`/api/*` 与 `/ws` 数据路径仍受 token 保护。(`internal/api/middleware.go`)
+
+### ⚡ 性能收尾（PERFORMANCE.md 遗留项）
+
+- `SetImmediateMode(true)`：网卡抓包即时交付，降低抓包到解析延迟。(`internal/capture/engine_pcap.go`)
+- 被动 WAL checkpoint：每 30s `wal_checkpoint(TRUNCATE)`，高写入场景下防止 WAL 无限膨胀；Close 时优雅停止。(`internal/store/store.go`)
 
 ### 🔧 性能修复（08-09 未发布修复补发）
 

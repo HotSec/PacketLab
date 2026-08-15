@@ -21,9 +21,11 @@ PacketLab 是一个本地 HTTP/HTTPS 代理工具，用于捕获、检查、编�
 - **拦截模式** — 自动放过 / 手动审批（Allow / Drop / Modify），手动模式下可编辑请求后转发
 - **编辑重发** — 修改 Method / URL / Headers / Body 后通过代理重新发送
 - **API 地图** — 按站点树形展示所有捕获的 API 端点，方法颜色区分，支持添加备注
+- **LLM 流量分析** — 识别 OpenAI/Anthropic/Gemini 及 DeepSeek/Kimi/GLM/MiniMax/Qwen/xAI 等国内厂商的 API 调用，展示对话内容、token 用量、**成本估算**（models.dev 官方定价，124 个模型）
+- **AI 流量总览** — 全局仪表盘：总 token 用量、成本汇总、按模型/厂商分布
 - **实时推送** — WebSocket 将新请求即时同步到前端界面
-- **批量写入** — WAL 模式 SQLite，50 条缓冲区 200ms 批量刷新，高流量不阻塞代理
-- **搜索与过滤** — 按方法、URL、状态码、Host 搜索；支持错误筛选
+- **批量写入** — WAL 模式 SQLite，500 条缓冲区 50ms 批量刷新，高流量不阻塞代理
+- **搜索与过滤** — 按方法、URL、状态码、Host 搜索；支持错误筛选；🤖 AI 一键过滤 LLM 流量
 - **i18n** — 中文 / English 界面切换
 - **亮/暗主题** — CSS 变量双主题，localStorage 持久化
 

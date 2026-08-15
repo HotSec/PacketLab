@@ -513,3 +513,4 @@ html,body{height:100%;overflow:hidden;font-family:"Geist","Satoshi",-apple-syste
 .llm-stats-table td.cost{font-family:var(--font-mono);color:var(--accent);font-weight:600}
 .llm-cost-bar-bg{width:60px;height:5px;background:var(--bg-default);border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle}
 .llm-cost-bar{height:100%;background:var(--accent);border-radius:3px}
+.llm-est-tag{font-size:9px;color:var(--yellow);border:1px solid var(--yellow);border-radius:8px;padding:1px 5px;margin-left:6px;font-weight:400;vertical-align:1px}

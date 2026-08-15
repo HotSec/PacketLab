@@ -6,6 +6,7 @@ package proxy
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"packetlab/internal/llm"
@@ -39,6 +40,11 @@ func buildLLMExchange(provider llm.Provider, reqInfo *llm.RequestInfo, resInfo *
 		ex.Model = reqInfo.Model
 		ex.Stream = reqInfo.Stream
 		ex.System = reqInfo.System
+		// 模型上下文/输出限制（models.dev，未知时为 0，前端不展示）
+		if lim := llm.LookupLimits(reqInfo.Model); lim.ContextLength > 0 || lim.MaxOutput > 0 {
+			ex.ContextLength = lim.ContextLength
+			ex.MaxOutput = lim.MaxOutput
+		}
 		for _, m := range reqInfo.Messages {
 			ex.Messages = append(ex.Messages, models.LLMMessage{
 				Role:    m.Role,
@@ -62,16 +68,16 @@ func buildLLMExchange(provider llm.Provider, reqInfo *llm.RequestInfo, resInfo *
 			ex.Model = resInfo.Model
 		}
 		ex.Response = resInfo.Content
-		if resInfo.PromptTokens > 0 || resInfo.CompletionTokens > 0 || resInfo.TotalTokens > 0 {
-			// 优先使用 resInfo 的 token 数计算成本
-			promptTok := resInfo.PromptTokens
-			compTok := resInfo.CompletionTokens
+		// 优先使用真实 usage；缺失时按文本启发式估算（标记 TokensEstimated）
+		promptTok, compTok, totalTok, estimated := usageWithFallback(reqInfo, resInfo)
+		if promptTok > 0 || compTok > 0 || totalTok > 0 {
 			cost := llm.EstimateCost(ex.Model, promptTok, compTok)
 			ex.Usage = &models.LLMUsage{
 				PromptTokens:     promptTok,
 				CompletionTokens: compTok,
-				TotalTokens:      resInfo.TotalTokens,
+				TotalTokens:      totalTok,
 				CostUSD:          cost,
+				TokensEstimated:  estimated,
 			}
 		}
 		// 转换 tool_calls
@@ -84,6 +90,46 @@ func buildLLMExchange(provider llm.Provider, reqInfo *llm.RequestInfo, resInfo *
 		}
 	}
 	return ex
+}
+
+// usageWithFallback 计算 token 用量：优先响应 usage，缺失时按请求/响应文本估算。
+// 返回 (prompt, completion, total, estimated)。estimated=true 表示数值来自估算而非上游 usage。
+func usageWithFallback(reqInfo *llm.RequestInfo, resInfo *llm.ResponseInfo) (int, int, int, bool) {
+	if resInfo != nil && (resInfo.PromptTokens > 0 || resInfo.CompletionTokens > 0 || resInfo.TotalTokens > 0) {
+		return resInfo.PromptTokens, resInfo.CompletionTokens, resInfo.TotalTokens, false
+	}
+	// usage 缺失：拼接请求侧全部文本（system + messages + 工具定义）与
+	// 响应侧文本（content + tool_calls），按中英文混合启发式估算。
+	var promptText strings.Builder
+	if reqInfo != nil {
+		promptText.WriteString(reqInfo.System)
+		for _, m := range reqInfo.Messages {
+			promptText.WriteString(m.Content)
+			for _, tc := range m.ToolCalls {
+				promptText.WriteString(tc.Name)
+				promptText.WriteString(tc.Arguments)
+			}
+		}
+		for _, t := range reqInfo.Tools {
+			promptText.WriteString(t.Name)
+			promptText.WriteString(t.Description)
+			promptText.Write(t.Parameters)
+		}
+	}
+	var responseText strings.Builder
+	if resInfo != nil {
+		responseText.WriteString(resInfo.Content)
+		for _, tc := range resInfo.ToolCalls {
+			responseText.WriteString(tc.Name)
+			responseText.WriteString(tc.Arguments)
+		}
+	}
+	promptTok := llm.EstimateTokens(promptText.String())
+	responseTok := llm.EstimateTokens(responseText.String())
+	if promptTok == 0 && responseTok == 0 {
+		return 0, 0, 0, false
+	}
+	return promptTok, responseTok, promptTok + responseTok, true
 }
 
 // saveLLMExchange saves the LLM exchange data to the store.

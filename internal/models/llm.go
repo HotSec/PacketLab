@@ -22,6 +22,10 @@ type LLMExchange struct {
 	ToolChoice json.RawMessage `json:"tool_choice,omitempty"`
 	// ToolCalls 响应中的工具调用列表
 	ToolCalls []LLMToolCall `json:"tool_calls,omitempty"`
+	// ContextLength 该模型的上下文限制（models.dev，0=未知）
+	ContextLength int `json:"context_length,omitempty"`
+	// MaxOutput 该模型的最大输出限制（models.dev，0=未知）
+	MaxOutput int `json:"max_output,omitempty"`
 }
 
 // LLMMessage is a single message in the LLM conversation.
@@ -51,4 +55,7 @@ type LLMUsage struct {
 	TotalTokens      int `json:"total_tokens,omitempty"`
 	// CostUSD 估算成本（美元）。模型未在定价表中时为 0。
 	CostUSD float64 `json:"cost_usd,omitempty"`
+	// TokensEstimated 为 true 表示 token 数来自启发式估算（上游未回传 usage）。
+	// 前端在展示时标注「估算」。
+	TokensEstimated bool `json:"tokens_estimated,omitempty"`
 }

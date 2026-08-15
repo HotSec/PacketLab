@@ -35,6 +35,11 @@ type Store struct {
 	// ListHosts 缓存（仅 search="" 时缓存）
 	hostCache    hostCacheEntry
 	hostCacheTTL time.Duration
+
+	// 被动 checkpoint（PERFORMANCE.md P0 收尾项：WAL 膨胀控制）
+	ckptStop chan struct{}
+	ckptDone chan struct{}
+	ckptOnce sync.Once
 }
 
 type hostCacheEntry struct {
@@ -76,7 +81,33 @@ func New(dbPath string) (*Store, error) {
 
 	s.hostCacheTTL = 5 * time.Minute
 
+	// 启动被动 WAL checkpoint 定时器（每 30s 尝试 TRUNCATE；高写入场景
+	// wal_autocheckpoint 被持续写事务推后时，被动 checkpoint 保证 WAL
+	// 不会无限膨胀）。Close 时优雅停止。
+	s.ckptStop = make(chan struct{})
+	s.ckptDone = make(chan struct{})
+	go s.passiveCheckpointLoop()
+
 	return s, nil
+}
+
+// passiveCheckpointLoop 每 30s 执行一次 WAL TRUNCATE checkpoint。
+// modernc.org/sqlite 通过 PRAGMA wal_checkpoint(TRUNCATE) 支持；
+// 失败仅告警（不中断写入）。
+func (s *Store) passiveCheckpointLoop() {
+	defer close(s.ckptDone)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ckptStop:
+			return
+		case <-ticker.C:
+			if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+				slog.Warn("passive wal checkpoint failed", "error", err)
+			}
+		}
+	}
 }
 
 func (s *Store) initReadConn(dbPath string) {
@@ -1107,6 +1138,13 @@ func (s *Store) ListInterceptLogs(action, since, host, pattern string, limit, of
 // ========================================
 
 func (s *Store) Close() error {
+	// 先停被动 checkpoint 循环
+	s.ckptOnce.Do(func() {
+		if s.ckptStop != nil {
+			close(s.ckptStop)
+			<-s.ckptDone
+		}
+	})
 	var errs []error
 	if err := s.db.Close(); err != nil {
 		errs = append(errs, err)

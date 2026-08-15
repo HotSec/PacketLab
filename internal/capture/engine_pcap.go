@@ -38,6 +38,11 @@ func openHandle(iface string, promisc bool) (*pcap.Handle, error) {
 	if err := inactive.SetTimeout(pcap.BlockForever); err != nil {
 		slog.Warn("capture: SetTimeout 失败（忽略，使用默认值）", "error", err)
 	}
+	// ImmediateMode：数据包到达立即交付，降低抓包到解析的延迟。
+	// 高吞吐场景下牺牲少量 CPU 换取更低延迟（PERFORMANCE.md P1 收尾项）。
+	if err := inactive.SetImmediateMode(true); err != nil {
+		slog.Warn("capture: SetImmediateMode 失败（忽略，使用默认值）", "error", err)
+	}
 	return inactive.Activate()
 }
 

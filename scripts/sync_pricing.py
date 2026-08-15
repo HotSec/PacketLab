@@ -133,6 +133,22 @@ def parse_section(text, section):
     return out
 
 
+def parse_limit(text):
+    """解析 [limit] 段（context / output），返回 {context, output} 整数。"""
+    d = parse_section(text, "limit")
+    out = {}
+    for k in ("context", "output"):
+        v = d.get(k)
+        if v is None:
+            continue
+        v = v.split("#")[0].strip()  # 去行内注释
+        try:
+            out[k] = int(float(v.replace("_", "")))
+        except (ValueError, TypeError):
+            pass
+    return out
+
+
 def to_float(v):
     try:
         return float(str(v).replace("_", ""))
@@ -141,7 +157,7 @@ def to_float(v):
 
 
 def collect_pricing(root):
-    """遍历厂商目录收集 (provider, model, cost) 三元组。"""
+    """遍历厂商目录收集 (provider, model, cost, limit) 元组。"""
     rows = []
     for prov in PROVIDERS:
         p = os.path.join(root, "providers", prov, "models")
@@ -165,7 +181,8 @@ def collect_pricing(root):
             cache = to_float(cost.get("cache_read"))
             if inp is None or out is None or inp <= 0 or out <= 0:
                 continue  # 无实价
-            rows.append((prov, name, inp, out, cache))
+            limit = parse_limit(text)
+            rows.append((prov, name, inp, out, cache, limit))
     return rows
 
 
@@ -215,15 +232,22 @@ def main():
 
     # 定价表 key 去重（不同厂商同名模型时，保留先出现的；这里全部厂商共享一个表）
     seen = {}
-    for prov, name, inp, out, cache in rows:
+    limits_seen = {}
+    for prov, name, inp, out, cache, limit in rows:
         key = name.lower()
         if key not in seen:
             seen[key] = (prov, name, inp, out, cache)
+        if key not in limits_seen:
+            limits_seen[key] = limit
 
     pricing_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "internal", "llm", "pricing.go"
     )
     pricing_path = os.path.normpath(pricing_path)
+    limits_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "internal", "llm", "limits.go"
+    )
+    limits_path = os.path.normpath(limits_path)
 
     current, span = read_current_table(pricing_path)
 
@@ -270,9 +294,67 @@ def main():
         new_src = src[:span[0]] + new_block + src[span[1]:]
         open(pricing_path, "w").write(new_src)
         print(f"\n已写入 {pricing_path}（{'merge' if merge else '全量覆盖'} 模式）")
+        # 生成 limits.go（context/output 限制表）
+        limits_literal = generate_limits_go(limits_seen)
+        open(limits_path, "w").write(limits_literal)
+        print(f"已写入 {limits_path}（{len(limits_seen)} 个模型限制）")
         print("下一步：go build ./... && go test ./internal/llm/ 验证")
     else:
         print("\n（--diff 模式，未写文件。确认差异后加 --write 重新运行）")
+
+
+def generate_limits_go(limits):
+    """生成 limits.go 文件内容（模型上下文/输出限制表 + 查询函数）。"""
+    lines = [
+        "package llm",
+        "",
+        "// limits.go — 模型上下文/输出限制（models.dev [limit] 段，scripts/sync_pricing.py 生成）。",
+        "// 未收录的模型返回零值（前端不展示限制）。",
+        "",
+        "// ModelLimits 模型上下文与输出长度限制（tokens）。",
+        "type ModelLimits struct {",
+        "\tContextLength int // 最大上下文长度",
+        "\tMaxOutput     int // 最大输出长度",
+        "}",
+        "",
+        "// modelLimits 限制表。key 语义同 pricingTable（'-' 边界前缀匹配）。",
+        "var modelLimits = map[string]ModelLimits{",
+    ]
+    for key in sorted(limits):
+        lim = limits[key]
+        ctx = lim.get("context", 0)
+        out = lim.get("output", 0)
+        if ctx <= 0 and out <= 0:
+            continue
+        lines.append(f'\t"{key}": {{ContextLength: {ctx}, MaxOutput: {out}}},')
+    lines += [
+        "}",
+        "",
+        "// LookupLimits 查找模型限制。与 LookupPricing 相同的前缀边界匹配语义。",
+        "// 未收录返回零值（ContextLength 与 MaxOutput 均为 0）。",
+        "func LookupLimits(model string) ModelLimits {",
+        "\tm := toLowerASCII(model)",
+        "\tvar best ModelLimits",
+        "\tvar bestKeyLen int",
+        "\tfor key, lim := range modelLimits {",
+        "\t\tk := toLowerASCII(key)",
+        "\t\tif len(k) <= bestKeyLen {",
+        "\t\t\tcontinue",
+        "\t\t}",
+        "\t\tif !hasPrefix(m, k) {",
+        "\t\t\tcontinue",
+        "\t\t}",
+        "\t\tif len(m) > len(k) && m[len(k)] != '-' {",
+        "\t\t\tcontinue",
+        "\t\t}",
+        "\t\tbest = lim",
+        "\t\tbestKeyLen = len(k)",
+        "\t}",
+        "\treturn best",
+        "}",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
